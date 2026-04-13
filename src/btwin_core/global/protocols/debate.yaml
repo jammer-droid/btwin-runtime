@@ -1,0 +1,31 @@
+name: debate
+description: "Multiple agents submit structured opinions on a topic and reach consensus"
+phases:
+  - name: context
+    description: "Each participant shares their relevant knowledge and position"
+    actions: [contribute, discuss]
+    template:
+      - section: background
+        required: true
+        guidance: "What I know about this topic, relevant prior work or decisions"
+      - section: position
+        required: true
+        guidance: "My stance and supporting evidence"
+      - section: concerns
+        required: false
+        guidance: "Risks, trade-offs, uncertainties"
+  - name: discussion
+    description: "React to other participants' contributions via real-time messages"
+    actions: [review, discuss]
+    guidance: "Read other contributions, identify differences, work toward agreement"
+  - name: decision
+    description: "Finalize the outcome"
+    actions: [decide]
+    decided_by: user
+    template:
+      - section: agreed_points
+        required: true
+      - section: action_items
+        required: false
+      - section: open_questions
+        required: false
