@@ -227,7 +227,7 @@ class ConductorLoop:
         if agent is None:
             return None
 
-        model_id = agent.get("model", "")
+        model_id = agent.get("model")
 
         # Load providers config
         config_path = Path(data_dir) / "providers.json"
@@ -237,12 +237,16 @@ class ConductorLoop:
         if config_path.exists():
             config = json.loads(config_path.read_text(encoding="utf-8"))
             for provider in config.get("providers", []):
+                target_model_id = model_id or provider.get("default_model")
                 for model in provider.get("models", []):
-                    if model["id"] == model_id:
+                    if model["id"] == target_model_id:
                         command = provider["cli"]
                         args = list(provider.get("default_args", []))
                         # Reasoning level
-                        reasoning_level = agent.get("reasoning_level")
+                        reasoning_level = (
+                            agent.get("reasoning_level")
+                            or provider.get("default_reasoning_level")
+                        )
                         reasoning_arg = provider.get("reasoning_arg")
                         if reasoning_level and reasoning_arg:
                             expanded = reasoning_arg.replace("{level}", reasoning_level)

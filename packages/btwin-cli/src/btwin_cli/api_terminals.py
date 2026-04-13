@@ -46,14 +46,18 @@ def create_terminal_router(terminal_manager: TerminalManager, storage=None) -> A
             agent_store = AgentStore(storage.data_dir)
             agent = agent_store.get_agent(body.agent_name)
             if agent:
-                model_id = agent.get("model", "")
+                model_id = agent.get("model")
                 providers_config = _load_providers(storage.data_dir)
                 for provider in providers_config.get("providers", []):
+                    target_model_id = model_id or provider.get("default_model")
                     for model in provider.get("models", []):
-                        if model["id"] == model_id:
+                        if model["id"] == target_model_id:
                             command = provider["cli"]
                             args = list(provider.get("default_args", []))
-                            reasoning_level = agent.get("reasoning_level")
+                            reasoning_level = (
+                                agent.get("reasoning_level")
+                                or provider.get("default_reasoning_level")
+                            )
                             reasoning_arg = provider.get("reasoning_arg")
                             if reasoning_level and reasoning_arg:
                                 expanded = reasoning_arg.replace("{level}", reasoning_level)

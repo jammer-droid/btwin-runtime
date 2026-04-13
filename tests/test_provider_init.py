@@ -15,10 +15,15 @@ def test_build_provider_config_returns_codex_models_and_reasoning_levels():
     payload = build_provider_config("codex")
 
     assert payload["providers"][0]["cli"] == "codex"
+    assert payload["providers"][0]["default_model"] == "gpt-5.4"
+    assert payload["providers"][0]["default_reasoning_level"] == "medium"
     models = {model["id"]: model for model in payload["providers"][0]["models"]}
     assert "gpt-5.4" in models
     assert models["gpt-5.4"]["reasoning_levels"] == ["none", "low", "medium", "high", "xhigh"]
+    assert "gpt-5.4-mini" in models
     assert "gpt-5.3-codex" in models
+    assert "gpt-5.3-codex-spark" in models
+    assert "gpt-5.2" in models
     assert "conductor" in payload["capabilities"]
 
 
