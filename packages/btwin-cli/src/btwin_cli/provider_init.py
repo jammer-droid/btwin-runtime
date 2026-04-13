@@ -2,52 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
+from importlib.resources import files
 from pathlib import Path
-
-
-_CODEX_PROVIDER_CONFIG = {
-    "providers": [
-        {
-            "id": "openai",
-            "name": "OpenAI",
-            "cli": "codex",
-            "default_args": [],
-            "allow_bypass_permissions": False,
-            "reasoning_arg": "--config model_reasoning_effort={level}",
-            "default_model": "gpt-5.3-codex",
-            "models": [
-                {
-                    "id": "gpt-5.4",
-                    "name": "GPT-5.4",
-                    "reasoning_levels": ["none", "low", "medium", "high", "xhigh"],
-                },
-                {
-                    "id": "gpt-5.3-codex",
-                    "name": "GPT-5.3 Codex",
-                    "reasoning_levels": ["low", "medium", "high", "xhigh"],
-                },
-                {
-                    "id": "gpt-5.2-codex",
-                    "name": "GPT-5.2 Codex",
-                    "reasoning_levels": ["low", "medium", "high", "xhigh"],
-                },
-            ],
-        }
-    ],
-    "capabilities": [
-        "planning",
-        "code-generation",
-        "code-review",
-        "debugging",
-        "testing",
-        "documentation",
-        "research",
-        "refactoring",
-        "conductor",
-    ],
-}
 
 
 def available_provider_names() -> list[str]:
@@ -69,10 +28,16 @@ def validate_provider_cli(provider_name: str) -> str:
     return resolved
 
 
+def _provider_seed_path(provider_name: str) -> Path:
+    return Path(files("btwin_cli").joinpath("provider_seeds", f"{provider_name}.json"))
+
+
 def build_provider_config(provider_name: str) -> dict:
-    if provider_name != "codex":
+    if provider_name not in available_provider_names():
         raise ValueError(f"Unsupported provider: {provider_name}")
-    return json.loads(json.dumps(_CODEX_PROVIDER_CONFIG))
+    return copy.deepcopy(
+        json.loads(_provider_seed_path(provider_name).read_text(encoding="utf-8"))
+    )
 
 
 def write_provider_config(path: Path, payload: dict) -> None:

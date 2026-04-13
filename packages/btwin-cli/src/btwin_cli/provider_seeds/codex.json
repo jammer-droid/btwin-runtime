@@ -1,0 +1,41 @@
+{
+  "providers": [
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "cli": "codex",
+      "default_args": [],
+      "allow_bypass_permissions": false,
+      "reasoning_arg": "--config model_reasoning_effort={level}",
+      "default_model": "gpt-5.3-codex",
+      "models": [
+        {
+          "id": "gpt-5.4",
+          "name": "GPT-5.4",
+          "reasoning_levels": ["none", "low", "medium", "high", "xhigh"]
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "name": "GPT-5.3 Codex",
+          "reasoning_levels": ["low", "medium", "high", "xhigh"]
+        },
+        {
+          "id": "gpt-5.2-codex",
+          "name": "GPT-5.2 Codex",
+          "reasoning_levels": ["low", "medium", "high", "xhigh"]
+        }
+      ]
+    }
+  ],
+  "capabilities": [
+    "planning",
+    "code-generation",
+    "code-review",
+    "debugging",
+    "testing",
+    "documentation",
+    "research",
+    "refactoring",
+    "conductor"
+  ]
+}

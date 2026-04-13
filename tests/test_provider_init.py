@@ -1,4 +1,5 @@
 from btwin_cli.provider_init import (
+    _provider_seed_path,
     available_provider_names,
     build_provider_config,
     provider_display_name,
@@ -19,6 +20,10 @@ def test_build_provider_config_returns_codex_models_and_reasoning_levels():
     assert models["gpt-5.4"]["reasoning_levels"] == ["none", "low", "medium", "high", "xhigh"]
     assert "gpt-5.3-codex" in models
     assert "conductor" in payload["capabilities"]
+
+
+def test_provider_seed_file_exists_for_codex():
+    assert _provider_seed_path("codex").exists()
 
 
 def test_build_provider_config_returns_fresh_copy():
