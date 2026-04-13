@@ -257,55 +257,74 @@ def _get_thread_store() -> ThreadStore:
     return ThreadStore(_project_root() / ".btwin" / "threads")
 
 
-def _get_workflow_engine(config: BTwinConfig | None = None) -> WorkflowEngine:
-    return WorkflowEngine(Storage(_get_active_data_dir(config)))
+def _get_workflow_engine(data_dir: Path | None = None) -> WorkflowEngine:
+    return WorkflowEngine(Storage(data_dir or _btwin_data_dir()))
 
 
-def _normalize_runtime_sessions(raw_sessions: object) -> list[dict[str, object]]:
+def _normalize_runtime_sessions(agent_name: str, raw_sessions: object) -> tuple[list[dict[str, object]], str | None]:
     if not isinstance(raw_sessions, list):
-        return []
+        return [], f"Unexpected runtime session payload shape for {agent_name}: expected a list"
 
     sessions: list[dict[str, object]] = []
+    dropped = 0
     for session in raw_sessions:
         if isinstance(session, dict):
             sessions.append(dict(session))
         elif isinstance(session, str):
             sessions.append({"thread_id": session, "status": "active"})
-    return sessions
+        else:
+            dropped += 1
+
+    warning = None
+    if dropped:
+        warning = f"Ignored {dropped} malformed runtime session record(s) for {agent_name}"
+    return sessions, warning
 
 
-def _get_attached_runtime_sessions(agent_name: str, config: BTwinConfig | None = None) -> list[dict[str, object]]:
+def _get_attached_runtime_sessions(agent_name: str, config: BTwinConfig | None = None) -> tuple[list[dict[str, object]], str | None, str | None]:
     current_config = config or _get_config()
     if not _use_attached_api(current_config):
-        return []
+        return [], None, None
 
     try:
         payload = _api_get("/api/agent-runtime-status")
-    except Exception:
+    except Exception as exc:
         logger.warning("Failed to fetch runtime sessions for %s", agent_name, exc_info=True)
-        return []
+        return [], None, f"Failed to fetch runtime sessions: {exc.__class__.__name__}: {exc}"
 
     agents = payload.get("agents", {}) if isinstance(payload, dict) else {}
     if not isinstance(agents, dict):
-        return []
+        return [], f"Unexpected runtime session payload shape for {agent_name}: expected agents mapping", None
 
     raw_sessions = agents.get(agent_name, [])
-    return _normalize_runtime_sessions(raw_sessions)
+    sessions, warning = _normalize_runtime_sessions(agent_name, raw_sessions)
+    return sessions, warning, None
 
 
-def _build_agent_queue_summary(agent_name: str, config: BTwinConfig | None = None) -> list[dict[str, object]]:
-    agent_store = _get_agent_store()
-    queue = agent_store.get_queue(agent_name)
+def _build_agent_queue_summary(
+    agent_name: str,
+    queue_data_dir: Path | None = None,
+    agent_store: AgentStore | None = None,
+) -> list[dict[str, object]]:
+    store = agent_store or _get_agent_store()
+    queue = store.get_queue(agent_name)
     if not queue:
         return []
 
-    workflow_engine = _get_workflow_engine(config)
+    workflow_engine = _get_workflow_engine(queue_data_dir or store.data_dir)
+    workflow_entries = {
+        entry.get("record_id"): entry
+        for entry in workflow_engine._read_all_workflow_entries()
+        if isinstance(entry, dict) and isinstance(entry.get("record_id"), str) and entry.get("record_id")
+    }
     items: list[dict[str, object]] = []
     for order, item in enumerate(queue):
+        if not isinstance(item, dict):
+            continue
         workflow_id = str(item.get("workflow_id") or "")
         task_id = str(item.get("task_id") or "")
-        workflow_entry = workflow_engine._find_entry(workflow_id) if workflow_id else None
-        task_entry = workflow_engine._find_entry(task_id) if task_id else None
+        workflow_entry = workflow_entries.get(workflow_id) if workflow_id else None
+        task_entry = workflow_entries.get(task_id) if task_id else None
         items.append(
             {
                 "workflow_id": workflow_id,
@@ -327,19 +346,27 @@ def _build_agent_thread_summary(agent_name: str, thread_store: ThreadStore | Non
 
     summaries: list[dict[str, object]] = []
     for thread in threads:
+        if not isinstance(thread, dict):
+            continue
+        thread_id = thread.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            continue
+        participants = thread.get("participants", [])
+        if not isinstance(participants, list):
+            continue
         participant_names = {
             participant["name"]
-            for participant in thread.get("participants", [])
+            for participant in participants
             if isinstance(participant, dict) and isinstance(participant.get("name"), str)
         }
         if agent_name not in participant_names:
             continue
 
-        pending_messages = store.list_inbox(thread["thread_id"], agent_name) or []
-        agent_status = store.get_agent_status(thread["thread_id"], agent_name) or {}
+        pending_messages = store.list_inbox(thread_id, agent_name) or []
+        agent_status = store.get_agent_status(thread_id, agent_name) or {}
         summaries.append(
             {
-                "thread_id": thread.get("thread_id"),
+                "thread_id": thread_id,
                 "topic": thread.get("topic", ""),
                 "protocol": thread.get("protocol", ""),
                 "status": thread.get("status", ""),
@@ -680,15 +707,26 @@ def agent_inbox(
         raise typer.Exit(4)
 
     config = _get_config()
-    queue = _build_agent_queue_summary(name, config)
+    agent_store = _get_agent_store()
+    thread_store = _get_thread_store()
+    queue_root = agent_store.data_dir
+    queue = _build_agent_queue_summary(name, queue_root, agent_store)
     active_threads = _build_agent_thread_summary(name)
-    runtime_sessions = _get_attached_runtime_sessions(name, config)
+    runtime_sessions, runtime_warning, runtime_error = _get_attached_runtime_sessions(name, config)
 
     pending_thread_count = sum(1 for thread in active_threads if thread["pending_message_count"] > 0)
     pending_message_count = sum(thread["pending_message_count"] for thread in active_threads)
 
     payload = {
         "agent": agent,
+        "context": {
+            "agent_data_dir": str(agent_store.data_dir),
+            "workflow_data_dir": str(queue_root),
+            "thread_data_dir": str(thread_store.data_dir),
+            "config_data_dir": str(config.data_dir),
+            "project_root": str(_project_root()),
+            "runtime_mode": config.runtime.mode,
+        },
         "queue_count": len(queue),
         "queue": queue,
         "active_thread_count": len(active_threads),
@@ -697,6 +735,8 @@ def agent_inbox(
         "pending_message_count": pending_message_count,
         "runtime_session_count": len(runtime_sessions),
         "runtime_sessions": runtime_sessions,
+        "runtime_session_warning": runtime_warning,
+        "runtime_session_error": runtime_error,
     }
     _emit_payload(payload, as_json=as_json)
 

@@ -27,12 +27,10 @@ def _parse_json_output(output: str):
     return json.loads(output.strip())
 
 
-def _build_agent_inbox_fixtures(tmp_path: Path):
-    data_dir = tmp_path / ".btwin"
-    project_root = tmp_path
-    agent_store = AgentStore(data_dir)
+def _build_agent_inbox_fixtures(agent_data_dir: Path, project_root: Path):
+    agent_store = AgentStore(agent_data_dir)
     thread_store = ThreadStore(project_root / ".btwin" / "threads")
-    workflow_engine = WorkflowEngine(Storage(data_dir))
+    workflow_engine = WorkflowEngine(Storage(agent_data_dir))
 
     agent_store.register(
         name="alice",
@@ -78,14 +76,17 @@ def _build_agent_inbox_fixtures(tmp_path: Path):
         initial_phase="context",
     )
 
-    return data_dir, agent_store, thread_store, workflow
+    return agent_store, thread_store, workflow
 
 
 def test_agent_inbox_standalone_summarizes_queue_and_threads(tmp_path, monkeypatch):
-    data_dir, agent_store, thread_store, workflow = _build_agent_inbox_fixtures(tmp_path)
+    agent_data_dir = tmp_path / "global-btwin"
+    config_data_dir = tmp_path / "config-btwin"
+    project_root = tmp_path / "project"
+    agent_store, thread_store, workflow = _build_agent_inbox_fixtures(agent_data_dir, project_root)
 
-    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
-    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(config_data_dir))
     monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
     monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
 
@@ -95,12 +96,18 @@ def test_agent_inbox_standalone_summarizes_queue_and_threads(tmp_path, monkeypat
     payload = _parse_json_output(result.output)
 
     assert payload["agent"]["name"] == "alice"
+    assert payload["context"]["agent_data_dir"] == str(agent_data_dir)
+    assert payload["context"]["workflow_data_dir"] == str(agent_data_dir)
+    assert payload["context"]["thread_data_dir"] == str(project_root / ".btwin")
+    assert payload["context"]["config_data_dir"] == str(config_data_dir)
     assert payload["queue_count"] == 1
     assert payload["active_thread_count"] == 2
     assert payload["pending_thread_count"] == 1
     assert payload["pending_message_count"] == 1
     assert payload["runtime_session_count"] == 0
     assert payload["runtime_sessions"] == []
+    assert payload["runtime_session_warning"] is None
+    assert payload["runtime_session_error"] is None
 
     queue_item = payload["queue"][0]
     assert queue_item["workflow_id"] == workflow["workflow_id"]
@@ -120,10 +127,13 @@ def test_agent_inbox_standalone_summarizes_queue_and_threads(tmp_path, monkeypat
 
 
 def test_agent_inbox_attached_enriches_runtime_sessions(tmp_path, monkeypatch):
-    data_dir, agent_store, thread_store, _workflow = _build_agent_inbox_fixtures(tmp_path)
+    agent_data_dir = tmp_path / "global-btwin"
+    project_root = tmp_path / "project"
+    config_data_dir = tmp_path / "config-btwin"
+    agent_store, thread_store, _workflow = _build_agent_inbox_fixtures(agent_data_dir, project_root)
 
-    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
-    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(config_data_dir))
     monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
     monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
     monkeypatch.setattr(
@@ -147,16 +157,23 @@ def test_agent_inbox_attached_enriches_runtime_sessions(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     payload = _parse_json_output(result.output)
+    assert payload["context"]["agent_data_dir"] == str(agent_data_dir)
+    assert payload["context"]["config_data_dir"] == str(config_data_dir)
     assert payload["runtime_session_count"] == 1
     assert payload["runtime_sessions"][0]["thread_id"] == "thread-20260413-abc123"
     assert payload["runtime_sessions"][0]["provider"] == "codex"
+    assert payload["runtime_session_warning"] is None
+    assert payload["runtime_session_error"] is None
 
 
 def test_agent_inbox_missing_runtime_data_does_not_fail(tmp_path, monkeypatch):
-    data_dir, agent_store, thread_store, _workflow = _build_agent_inbox_fixtures(tmp_path)
+    agent_data_dir = tmp_path / "global-btwin"
+    project_root = tmp_path / "project"
+    config_data_dir = tmp_path / "config-btwin"
+    agent_store, thread_store, _workflow = _build_agent_inbox_fixtures(agent_data_dir, project_root)
 
-    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
-    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(config_data_dir))
     monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
     monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
 
@@ -171,6 +188,41 @@ def test_agent_inbox_missing_runtime_data_does_not_fail(tmp_path, monkeypatch):
     payload = _parse_json_output(result.output)
     assert payload["runtime_session_count"] == 0
     assert payload["runtime_sessions"] == []
+    assert payload["runtime_session_warning"] is None
+    assert payload["runtime_session_error"] == "Failed to fetch runtime sessions: RuntimeError: runtime unavailable"
+
+
+def test_agent_inbox_malformed_runtime_payload_reports_warning(tmp_path, monkeypatch):
+    agent_data_dir = tmp_path / "global-btwin"
+    project_root = tmp_path / "project"
+    config_data_dir = tmp_path / "config-btwin"
+    agent_store, thread_store, _workflow = _build_agent_inbox_fixtures(agent_data_dir, project_root)
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(config_data_dir))
+    monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+    monkeypatch.setattr(
+        main,
+        "_api_get",
+        lambda path, params=None: {
+            "agents": {
+                "alice": {
+                    "thread_id": "thread-20260413-abc123",
+                    "provider": "codex",
+                }
+            }
+        },
+    )
+
+    result = runner.invoke(app, ["agent", "inbox", "alice", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["runtime_session_count"] == 0
+    assert payload["runtime_sessions"] == []
+    assert payload["runtime_session_warning"] == "Unexpected runtime session payload shape for alice: expected a list"
+    assert payload["runtime_session_error"] is None
 
 
 def test_agent_inbox_missing_agent_exits_4(tmp_path, monkeypatch):
