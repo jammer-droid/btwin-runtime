@@ -32,13 +32,14 @@ Default assumptions:
 - data lives in the global `~/.btwin` directory
 - `serve-api` is the shared backend and is expected to stay available
 - `mcp-proxy` is the lightweight bridge that MCP clients connect to
+- on macOS, the intended steady-state is to keep `serve-api` running as a background LaunchAgent via `btwin service install`
 - project-local `.btwin/` is an exception for isolated testing, not the default
 
 ## Prerequisites
 
 - Python 3.11+
 - `uv`
-- `codex` CLI if you plan to run `btwin init` or use Codex MCP integration
+- `codex` CLI
 
 Install `uv` if needed:
 
@@ -46,7 +47,75 @@ Install `uv` if needed:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-## Minimal Local Setup
+## Provider Model
+
+Today B-TWIN ships with exactly one provider integration: Codex.
+
+- `btwin init` currently supports Codex only
+- the generated MCP config launches `btwin mcp-proxy` for Codex
+- the default user workflow assumes Codex is both the MCP client and the active LLM provider surface
+
+In practice, that means Codex is not an optional extra right now. If you want the
+standard B-TWIN workflow, install the `codex` CLI first and then run `btwin init`.
+
+## Recommended macOS Setup
+
+If you are using macOS, the intended workflow is to keep `serve-api` running in
+the background and let Codex connect through `btwin mcp-proxy`.
+
+Install and verify the repo-local environment:
+
+```bash
+git clone https://github.com/jammer-droid/btwin-runtime.git
+cd btwin-runtime
+uv sync
+uv run btwin --help
+```
+
+Install `btwin` as a normal CLI so Codex and launchd can call it directly:
+
+```bash
+cd btwin-runtime
+uv tool install -e .
+btwin --help
+```
+
+Initialize the Codex provider config:
+
+```bash
+btwin init
+```
+
+This creates `~/.btwin/providers.json` and writes a Codex MCP entry that launches:
+
+```toml
+[mcp_servers.btwin]
+command = "btwin"
+args = ["mcp-proxy"]
+```
+
+Install and start the background service:
+
+```bash
+btwin service install
+btwin service status
+```
+
+Install the bundled skills and then restart Codex so it reconnects with the new MCP config:
+
+```bash
+btwin install-skills --platform codex
+```
+
+After that, the normal daily workflow is:
+
+1. keep `btwin serve-api` running in the background through launchd
+2. let Codex connect via `btwin mcp-proxy`
+3. use the global `~/.btwin` data directory
+
+You should not need to run `btwin serve-api` manually in a terminal for normal use.
+
+## Local Development Setup
 
 If you only want to try the runtime from this clone, start here:
 
@@ -62,7 +131,7 @@ Check the CLI entrypoint:
 uv run btwin --help
 ```
 
-Start the shared API locally:
+Start the shared API manually:
 
 ```bash
 uv run btwin serve-api
@@ -81,48 +150,8 @@ For a quick API health check:
 curl -s http://localhost:8787/api/sessions/status
 ```
 
-This flow is enough for local CLI and runtime smoke tests from the repo clone.
-It does not make `btwin` globally available to your shell or MCP client.
-
-## Recommended Persistent Setup
-
-If you want Codex to launch `btwin mcp-proxy` directly and keep using this
-runtime outside the repo shell, install `btwin` as a normal CLI first:
-
-```bash
-cd btwin-runtime
-uv tool install -e .
-btwin --help
-```
-
-Then initialize the default Codex-based provider config:
-
-```bash
-btwin init
-```
-
-Today the init flow supports Codex only. It creates `~/.btwin/providers.json`
-and writes a Codex MCP entry that launches:
-
-```toml
-[mcp_servers.btwin]
-command = "btwin"
-args = ["mcp-proxy"]
-```
-
-The normal persistent setup is:
-
-1. install `btwin` so it is on your normal `PATH`
-2. run `btwin init`
-3. use the global `~/.btwin` data directory
-4. start `serve-api`
-5. connect clients through `mcp-proxy`
-
-Start the shared API:
-
-```bash
-btwin serve-api
-```
+This flow is mainly for local development, smoke tests, and debugging from the
+repo clone. It does not make `btwin` globally available to your shell or MCP client.
 
 ## macOS Background Service
 
@@ -185,7 +214,7 @@ This repository already contains the packaged runtime assets needed by:
 - bundled protocol definitions
 - bundled skills
 
-For local testing from this clone, prefer `uv run btwin ...` first.
+For repo-local development, prefer `uv run btwin ...` first.
 
 If you have already installed `btwin` globally, your MCP client can run:
 
