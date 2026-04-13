@@ -46,7 +46,7 @@ def sync_global_dirs(
     *,
     bundled_dir: Path | None = None,
 ) -> int:
-    """Sync bundled subdirectories (e.g., pipelines/) to data_dir."""
+    """Sync bundled subdirectories to data_dir."""
     src = bundled_dir or resolve_bundled_global_docs_dir()
     if src is None or not src.is_dir():
         return 0
