@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from rich.markdown import Markdown
 from btwin_core.agent_store import AgentStore
 from btwin_core.config import BTwinConfig, load_config
 from btwin_core.handoff_archive import write_handoff_record
+from btwin_core.locale_settings import LocaleSettingsStore
 from btwin_core.protocol_store import Protocol, ProtocolStore
 from btwin_core.protocol_validator import ProtocolValidator
 from btwin_core.sources import SourceRegistry
@@ -65,6 +67,7 @@ app.add_typer(contribution_app, name="contribution")
 app.add_typer(service_app, name="service")
 
 console = Console(soft_wrap=True)
+logger = logging.getLogger(__name__)
 _SERVICE_LABEL = "com.btwin.serve-api"
 
 
@@ -108,6 +111,15 @@ def _api_post(path: str, data: dict) -> dict:
         return resp.json()
 
 
+def _api_get(path: str, params: dict | None = None):
+    import httpx
+
+    with httpx.Client(base_url=_api_base_url(), timeout=30.0) as client:
+        resp = client.get(path, params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+
 def _use_attached_api(config: BTwinConfig) -> bool:
     return config.runtime.mode == "attached"
 
@@ -127,6 +139,78 @@ def _attached_api_call_or_exit(path: str, data: dict) -> dict:
             f"- Error: {exc.__class__.__name__}: {exc}"
         )
         raise typer.Exit(1)
+
+
+def _attached_api_get_or_exit(path: str, params: dict | None = None):
+    import httpx
+
+    try:
+        return _api_get(path, params=params)
+    except httpx.HTTPError as exc:
+        console.print(
+            "[red]Attached runtime could not reach the shared B-TWIN API.[/red]\n"
+            f"- URL: {_api_base_url()}\n"
+            "- Start or restart the API with: [bold]btwin serve-api[/bold]\n"
+            "- If you use a custom endpoint, check [bold]BTWIN_API_URL[/bold]\n"
+            "- For local-only usage, switch to [bold]runtime.mode: standalone[/bold] in ~/.btwin/config.yaml\n"
+            f"- Error: {exc.__class__.__name__}: {exc}"
+        )
+        raise typer.Exit(1)
+
+
+def _record_thread_result_entry(
+    data_dir: Path,
+    thread_id: str,
+    closed: dict,
+    summary: str,
+    decision: str | None,
+) -> str | None:
+    try:
+        from btwin_core.btwin import BTwin
+
+        config = BTwinConfig(data_dir=data_dir)
+        twin = BTwin(config)
+        protocol_name = str(closed.get("protocol", "unknown"))
+        participants = [
+            participant["name"]
+            for participant in closed.get("participants", [])
+            if isinstance(participant, dict) and participant.get("name")
+        ]
+
+        content = f"## Summary\n\n{summary}"
+        if decision:
+            content += f"\n\n## Decision\n\n{decision}"
+        content += f"\n\n## Participants\n\n{', '.join(participants)}"
+        content += f"\n\n## Thread\n\n{thread_id} (protocol: {protocol_name})"
+
+        result = twin.record(
+            content,
+            topic="thread-result",
+            tags=["thread-result", f"protocol:{protocol_name}"],
+            tldr=summary[:200],
+        )
+        saved_path = result.get("path")
+        if not saved_path:
+            return None
+
+        raw = Path(saved_path).read_text(encoding="utf-8")
+        parts = raw.split("---\n", 2)
+        if len(parts) < 3:
+            return None
+
+        metadata = yaml.safe_load(parts[1]) or {}
+        record_id = metadata.get("record_id")
+        if not record_id:
+            return None
+
+        update_result = twin.update_entry(record_id=record_id, related_records=[f"thread:{thread_id}"])
+        if not update_result.get("ok"):
+            return None
+        return record_id
+    except Exception:
+        logger.warning("Failed to create thread result entry for %s", thread_id, exc_info=True)
+        return None
+
 
 def _config_path() -> Path:
     return Path.home() / ".btwin" / "config.yaml"
@@ -621,6 +705,90 @@ def protocol_next(
         "suggested_action": suggested_action,
     }
     _emit_payload(payload, as_json=as_json)
+
+
+@thread_app.command("create")
+def thread_create(
+    topic: str = typer.Option(..., "--topic", help="Thread topic"),
+    protocol: str = typer.Option(..., "--protocol", help="Protocol name"),
+    participant: list[str] = typer.Option([], "--participant", help="Participant agent name"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Create a new collaboration thread."""
+    config = _get_config()
+    if _use_attached_api(config):
+        payload = {"topic": topic, "protocol": protocol}
+        if participant:
+            payload["participants"] = participant
+        thread = _attached_api_call_or_exit("/api/threads", payload)
+    else:
+        protocol_store = _get_protocol_store()
+        proto = protocol_store.get_protocol(protocol)
+        if proto is None:
+            console.print(f"[red]Protocol not found:[/red] {protocol}")
+            raise typer.Exit(4)
+
+        store = _get_thread_store()
+        locale = LocaleSettingsStore(store.data_dir).read().model_dump()
+        thread = store.create_thread(
+            topic=topic,
+            protocol=protocol,
+            participants=participant or None,
+            initial_phase=proto.phases[0].name if proto.phases else None,
+            locale=locale,
+        )
+    _emit_payload(thread, as_json=as_json)
+
+
+@thread_app.command("list")
+def thread_list(
+    status: str | None = typer.Option(None, "--status", help="Filter by thread status"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """List collaboration threads."""
+    if status is not None and status not in {"active", "completed"}:
+        raise typer.BadParameter("--status must be active or completed")
+
+    config = _get_config()
+    if _use_attached_api(config):
+        threads = _attached_api_get_or_exit("/api/threads", {"status": status} if status else None)
+    else:
+        threads = _get_thread_store().list_threads(status=status)
+    _emit_payload(threads, as_json=as_json)
+
+
+@thread_app.command("close")
+def thread_close(
+    thread_id: str = typer.Option(..., "--thread", help="Thread id"),
+    summary: str = typer.Option(..., "--summary", help="Thread summary"),
+    decision: str | None = typer.Option(None, "--decision", help="Thread decision"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Close a collaboration thread."""
+    config = _get_config()
+    if _use_attached_api(config):
+        payload: dict[str, object] = {"summary": summary}
+        if decision is not None:
+            payload["decision"] = decision
+        closed = _attached_api_call_or_exit(f"/api/threads/{thread_id}/close", payload)
+    else:
+        store = _get_thread_store()
+        closed = store.close_thread(thread_id, summary=summary, decision=decision)
+        if closed is None:
+            console.print(f"[red]Thread not found:[/red] {thread_id}")
+            raise typer.Exit(4)
+
+        result_record_id = _record_thread_result_entry(
+            store.data_dir,
+            thread_id,
+            closed,
+            summary,
+            decision,
+        )
+        if result_record_id:
+            closed = dict(closed)
+            closed["result_record_id"] = result_record_id
+    _emit_payload(closed, as_json=as_json)
 
 
 @thread_app.command("show")
