@@ -1,0 +1,32 @@
+name: code-review
+description: "Parallel code review from multiple agent perspectives"
+phases:
+  - name: analysis
+    description: "Each reviewer submits their analysis from their expertise area"
+    actions: [contribute]
+    template:
+      - section: scope
+        required: true
+        guidance: "What I reviewed and from what perspective (security, performance, architecture, etc.)"
+      - section: findings
+        required: true
+        guidance: "Issues found, categorized by severity (critical, warning, info)"
+      - section: suggestions
+        required: false
+        guidance: "Recommended changes or improvements"
+  - name: discussion
+    description: "Reviewers discuss findings and align on priority"
+    actions: [review, discuss]
+    guidance: "Resolve conflicting reviews, prioritize fixes"
+  - name: verdict
+    description: "Final review decision"
+    actions: [decide]
+    decided_by: user
+    template:
+      - section: must_fix
+        required: true
+      - section: should_fix
+        required: false
+      - section: approved
+        required: true
+        guidance: "yes/no/conditional"

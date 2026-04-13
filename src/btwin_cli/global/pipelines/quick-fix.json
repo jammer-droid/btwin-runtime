@@ -1,0 +1,19 @@
+{
+  "id": "quick-fix",
+  "name": "Quick Fix",
+  "description": "Implement → Review",
+  "stages": [
+    {
+      "name": "Implementation",
+      "role": "code-generation",
+      "description_template": "Implement fix for: {task_description}",
+      "prompt_guide": "## Your Task\nImplement the fix described in the task.\n\n1. Read the task description carefully\n2. Identify the root cause of the issue\n3. Implement the fix with minimal scope\n4. Run tests to verify the fix\n5. Commit with a descriptive message\n\n## Completion\nWhen done: /bt:update {workflow_id} {task_id} status=done"
+    },
+    {
+      "name": "Review",
+      "role": "code-review",
+      "description_template": "Review the fix from previous stage",
+      "prompt_guide": "## Your Task\nReview the fix from the previous stage.\n\n1. Read the implementation changes\n2. Verify the fix addresses the root cause\n3. Check for regressions or side effects\n4. Record your review findings in the task document\n\n## Completion\nWhen done: /bt:update {workflow_id} {task_id} status=done"
+    }
+  ]
+}

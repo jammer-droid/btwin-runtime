@@ -1,0 +1,31 @@
+{
+  "id": "standard-dev",
+  "name": "Standard Development",
+  "description": "Plan → Implement → Review → Fix cycle",
+  "stages": [
+    {
+      "name": "Planning",
+      "role": "planning",
+      "description_template": "Create implementation plan for: {task_description}",
+      "prompt_guide": "## Your Task\nCreate a detailed implementation plan.\n\n1. Read the task description carefully\n2. Explore the codebase to understand context\n3. Write the plan document to docs/plans/\n4. Include: architecture, file changes, test strategy\n\n## Completion\nWhen done: /bt:update {workflow_id} {task_id} status=done"
+    },
+    {
+      "name": "Implementation",
+      "role": "code-generation",
+      "description_template": "Implement based on plan from previous stage",
+      "prompt_guide": "## Your Task\nImplement the feature based on the planning document.\n\n1. Read the plan from the previous stage\n2. Follow TDD: write tests first, then implementation\n3. Commit with descriptive messages after each step\n4. Document any deviations from the plan\n\n## Completion\nWhen done: /bt:update {workflow_id} {task_id} status=done"
+    },
+    {
+      "name": "Review",
+      "role": "code-review",
+      "description_template": "Review the implementation from previous stage",
+      "prompt_guide": "## Your Task\nReview the implementation from the previous stage.\n\n1. Read the implementation changes\n2. Check correctness, test coverage, code quality\n3. Note any issues or improvements needed\n4. Record your review findings in the task document\n\n## Completion\nWhen done: /bt:update {workflow_id} {task_id} status=done"
+    },
+    {
+      "name": "Fix",
+      "role": "code-generation",
+      "description_template": "Fix issues found in review (if any)",
+      "prompt_guide": "## Your Task\nFix issues found in the review.\n\n1. Read the review feedback\n2. Address each issue\n3. Run tests to verify fixes\n4. Commit with descriptive messages\n\n## Completion\nWhen done: /bt:update {workflow_id} {task_id} status=done"
+    }
+  ]
+}

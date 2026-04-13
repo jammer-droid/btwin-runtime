@@ -1,0 +1,38 @@
+name: ideation
+description: "Collaborative idea generation, evaluation, and selection"
+phases:
+  - name: problem
+    description: "Define the problem space and constraints"
+    actions: [contribute, discuss]
+    template:
+      - section: problem_statement
+        required: true
+        guidance: "Clear definition of what we are trying to solve"
+      - section: constraints
+        required: false
+        guidance: "Technical, time, resource, or design constraints"
+  - name: ideas
+    description: "Each participant contributes ideas"
+    actions: [contribute]
+    template:
+      - section: ideas
+        required: true
+        guidance: "List of ideas with brief description of each"
+      - section: inspiration
+        required: false
+        guidance: "What influenced these ideas (prior art, analogies, etc.)"
+  - name: evaluation
+    description: "Evaluate and discuss ideas"
+    actions: [review, discuss]
+    guidance: "Rate ideas on feasibility, impact, effort. Identify top candidates."
+  - name: selection
+    description: "Select the winning idea(s)"
+    actions: [decide]
+    decided_by: user
+    template:
+      - section: selected
+        required: true
+      - section: rationale
+        required: true
+      - section: next_steps
+        required: false

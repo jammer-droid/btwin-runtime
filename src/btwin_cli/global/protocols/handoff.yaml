@@ -1,0 +1,34 @@
+name: handoff
+description: "Structured work transfer between agents"
+phases:
+  - name: summary
+    description: "Outgoing agent documents completed work and remaining items"
+    actions: [contribute]
+    template:
+      - section: completed
+        required: true
+        guidance: "What was done, key files changed, tests passing"
+      - section: remaining
+        required: true
+        guidance: "What still needs to be done, in priority order"
+      - section: caveats
+        required: false
+        guidance: "Known issues, workarounds, things to watch out for"
+      - section: context
+        required: false
+        guidance: "Design decisions made and why, relevant discussions"
+  - name: questions
+    description: "Incoming agent asks clarifying questions"
+    actions: [review, discuss]
+    guidance: "Ask about anything unclear in the handoff summary"
+  - name: acceptance
+    description: "Incoming agent confirms handoff"
+    actions: [contribute, decide]
+    decided_by: consensus
+    template:
+      - section: understood
+        required: true
+        guidance: "Confirm understanding of the work and priorities"
+      - section: plan
+        required: false
+        guidance: "How I plan to approach the remaining work"

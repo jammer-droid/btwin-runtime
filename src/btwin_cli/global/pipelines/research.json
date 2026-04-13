@@ -1,0 +1,19 @@
+{
+  "id": "research",
+  "name": "Research",
+  "description": "Research → Document",
+  "stages": [
+    {
+      "name": "Research",
+      "role": "research",
+      "description_template": "Research and analyze: {task_description}",
+      "prompt_guide": "## Your Task\nResearch and analyze the topic described in the task.\n\n1. Read the task description carefully\n2. Gather information from relevant sources\n3. Analyze findings and identify key insights\n4. Write a research summary to docs/reports/\n\n## Completion\nWhen done: /bt:update {workflow_id} {task_id} status=done"
+    },
+    {
+      "name": "Documentation",
+      "role": "documentation",
+      "description_template": "Document findings from research stage",
+      "prompt_guide": "## Your Task\nDocument the findings from the research stage.\n\n1. Read the research summary from the previous stage\n2. Structure findings into a clear, navigable document\n3. Include recommendations and next steps\n4. Save the final document to docs/plans/ or docs/reports/\n\n## Completion\nWhen done: /bt:update {workflow_id} {task_id} status=done"
+    }
+  ]
+}

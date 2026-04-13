@@ -23,14 +23,15 @@ import yaml
 from rich.console import Console
 from rich.markdown import Markdown
 
-from btwin.config import BTwinConfig, load_config
-from btwin.core.agent_store import AgentStore
-from btwin.core.handoff_archive import write_handoff_record
-from btwin.core.protocol_store import Protocol, ProtocolStore
-from btwin.core.protocol_validator import ProtocolValidator
-from btwin.core.resource_paths import resolve_bundled_skills_dir
-from btwin.core.sources import SourceRegistry
+from btwin_core.agent_store import AgentStore
+from btwin_core.config import BTwinConfig, load_config
+from btwin_core.handoff_archive import write_handoff_record
+from btwin_core.protocol_store import Protocol, ProtocolStore
+from btwin_core.protocol_validator import ProtocolValidator
+from btwin_core.sources import SourceRegistry
 from btwin_core.thread_store import ThreadStore
+from btwin_cli.resource_paths import resolve_bundled_skills_dir
+from btwin_core.resource_paths import resolve_bundled_protocols_dir
 
 app = typer.Typer(
     name="btwin",
@@ -131,8 +132,12 @@ def _get_config() -> BTwinConfig:
     return BTwinConfig()
 
 
+def _get_active_data_dir(config: BTwinConfig | None = None) -> Path:
+    return (config or _get_config()).data_dir
+
+
 def _get_registry() -> SourceRegistry:
-    return SourceRegistry(Path.home() / ".btwin" / "sources.yaml")
+    return SourceRegistry(_get_active_data_dir() / "sources.yaml")
 
 
 def _get_agent_store() -> AgentStore:
@@ -140,7 +145,8 @@ def _get_agent_store() -> AgentStore:
 
 
 def _bundled_protocols_dir() -> Path:
-    return _REPO_ROOT / "global" / "protocols"
+    bundled = resolve_bundled_protocols_dir()
+    return bundled if bundled is not None else _REPO_ROOT / "global" / "protocols"
 
 
 def _get_protocol_store() -> ProtocolStore:
@@ -717,13 +723,14 @@ def mcp_proxy(
     _ErrConsole(stderr=True).print(
         f"[bold]Starting B-TWIN MCP Proxy: project={resolved_project} backend={backend}[/bold]"
     )
-    from btwin.core.doc_sync import sync_global_docs
-    sync_global_docs(Path.home() / ".btwin")
+    from btwin_cli.doc_sync import sync_global_docs
+    sync_global_docs(_get_active_data_dir())
 
     from btwin_cli import mcp_proxy as proxy
 
     proxy._project = resolved_project
     proxy._backend = backend
+    proxy.configure_runtime(_get_active_data_dir())
     proxy.mcp.run(transport="stdio")
 
 
@@ -740,7 +747,7 @@ def setup():
         "llm": {"provider": "anthropic", "model": "claude-haiku-4-5-20251001"},
         "session": {"timeout_minutes": 10},
         "promotion": {"enabled": True, "schedule": "0 9,21 * * *"},
-        "data_dir": str(Path.home() / ".btwin"),
+        "data_dir": str(_get_active_data_dir()),
     }
 
     _atomic_write_yaml(config_path, config_data)
@@ -775,12 +782,13 @@ def serve_api(
 ):
     """Start the B-TWIN HTTP API server for orchestration workflow."""
     import uvicorn
-    from btwin.api.app import create_default_app
+    from btwin_cli.api_app import create_default_app
 
     console.print(f"[bold]Starting B-TWIN HTTP API on http://{host}:{port}[/bold]")
-    from btwin.core.doc_sync import sync_global_dirs, sync_global_docs
-    sync_global_docs(Path.home() / ".btwin")
-    sync_global_dirs(Path.home() / ".btwin")
+    from btwin_cli.doc_sync import sync_global_dirs, sync_global_docs
+    active_data_dir = _get_active_data_dir()
+    sync_global_docs(active_data_dir)
+    sync_global_dirs(active_data_dir)
     app_instance = create_default_app()
     uvicorn.run(app_instance, host=host, port=port)
 
@@ -793,7 +801,7 @@ def search(query: str, n: int = typer.Option(5, help="Number of results")):
         response = _attached_api_call_or_exit("/api/entries/search", {"query": query, "nResults": n, "scope": "all"})
         results = response.get("results", [])
     else:
-        from btwin.core.btwin import BTwin
+        from btwin_core.btwin import BTwin
 
         twin = BTwin(config)
         results = twin.search(query, n_results=n)
@@ -824,7 +832,7 @@ def record(
             payload["topic"] = topic
         result = _attached_api_call_or_exit("/api/entries/record", payload)
     else:
-        from btwin.core.btwin import BTwin
+        from btwin_core.btwin import BTwin
 
         twin = BTwin(config)
         result = twin.record(content, topic=topic, tldr=tldr)
@@ -871,7 +879,7 @@ def handoff(
 @app.command()
 def chat():
     """Interactive chat with B-TWIN (REPL mode). Requires API key."""
-    from btwin.core.btwin import BTwin
+    from btwin_core.btwin import BTwin
 
     config = _get_config()
     if _use_attached_api(config):
@@ -1038,10 +1046,10 @@ def promotion_schedule(
 @promotion_app.command("run")
 def promotion_run(limit: int | None = typer.Option(None, min=1, help="Max approved items to process")):
     """Run one promotion batch (approved -> queued -> promoted)."""
-    from btwin.core.indexer import CoreIndexer
-    from btwin.core.promotion_store import PromotionStore
-    from btwin.core.promotion_worker import PromotionWorker
-    from btwin.core.storage import Storage
+    from btwin_core.indexer import CoreIndexer
+    from btwin_core.promotion_store import PromotionStore
+    from btwin_core.promotion_worker import PromotionWorker
+    from btwin_core.storage import Storage
 
     config = _get_config()
     storage = Storage(config.data_dir)
@@ -1060,7 +1068,7 @@ def promotion_run(limit: int | None = typer.Option(None, min=1, help="Max approv
 @indexer_app.command("status")
 def indexer_status():
     """Show indexer manifest status summary."""
-    from btwin.core.indexer import CoreIndexer
+    from btwin_core.indexer import CoreIndexer
 
     config = _get_config()
     idx = CoreIndexer(data_dir=config.data_dir)
@@ -1079,7 +1087,7 @@ def indexer_status():
 @indexer_app.command("refresh")
 def indexer_refresh(limit: int | None = typer.Option(None, min=1, help="Max docs to process in this run")):
     """Refresh pending/stale/failed/deleted docs into vector index."""
-    from btwin.core.indexer import CoreIndexer
+    from btwin_core.indexer import CoreIndexer
 
     config = _get_config()
     idx = CoreIndexer(data_dir=config.data_dir)
@@ -1094,7 +1102,7 @@ def indexer_refresh(limit: int | None = typer.Option(None, min=1, help="Max docs
 @indexer_app.command("reconcile")
 def indexer_reconcile():
     """Reconcile file system docs with manifest and refresh index."""
-    from btwin.core.indexer import CoreIndexer
+    from btwin_core.indexer import CoreIndexer
 
     config = _get_config()
     idx = CoreIndexer(data_dir=config.data_dir)
@@ -1109,7 +1117,7 @@ def indexer_reconcile():
 @indexer_app.command("repair")
 def indexer_repair(doc_id: str = typer.Option(..., "--doc-id", help="Document id to repair")):
     """Repair a single manifest doc id by re-indexing source content."""
-    from btwin.core.indexer import CoreIndexer
+    from btwin_core.indexer import CoreIndexer
 
     config = _get_config()
     idx = CoreIndexer(data_dir=config.data_dir)
@@ -1121,7 +1129,7 @@ def indexer_repair(doc_id: str = typer.Option(..., "--doc-id", help="Document id
 @indexer_app.command("kpi")
 def indexer_kpi():
     """Show sync-gap KPI metrics for indexer health."""
-    from btwin.core.indexer import CoreIndexer
+    from btwin_core.indexer import CoreIndexer
 
     config = _get_config()
     idx = CoreIndexer(data_dir=config.data_dir)
@@ -1178,7 +1186,7 @@ _EXCLUDED_BUNDLED_SKILLS = {"bt-sync"}
 
 def _get_skills_dir() -> Path:
     """Return the path to the skills directory bundled with btwin."""
-    return resolve_bundled_skills_dir() or Path(__file__).resolve().parent.parent / "skills"
+    return resolve_bundled_skills_dir() or Path(__file__).resolve().parent / "skills"
 
 
 def _validate_init_provider(provider: str) -> str:
@@ -1324,7 +1332,7 @@ def migrate_collab_cmd(
     data_dir: str = typer.Option(None, "--data-dir", help="Override data directory"),
 ):
     """Migrate legacy collab records to workflow format."""
-    from btwin.core.migration import migrate_collab_to_workflow
+    from btwin_cli.migration import migrate_collab_to_workflow
 
     if data_dir:
         path = Path(data_dir)
@@ -1355,7 +1363,7 @@ def validate(
     data_dir: str = typer.Option(None, "--data-dir", help="Override data directory"),
 ):
     """Validate all entries against the canonical frontmatter schema."""
-    from btwin.core.validator import validate_entry, fix_entry
+    from btwin_core.validator import validate_entry, fix_entry
 
     config = _get_config()
     entries_dir = Path(data_dir) / "entries" if data_dir else config.data_dir / "entries"
@@ -1385,7 +1393,7 @@ def validate(
     console.print(f"\nTotal: {total}, Invalid: {invalid}, Fixed: {fixed}")
 
     if reconcile and fixed > 0:
-        from btwin.core.indexer import CoreIndexer
+        from btwin_core.indexer import CoreIndexer
         idx = CoreIndexer(data_dir=config.data_dir)
         result = idx.reconcile()
         console.print(
