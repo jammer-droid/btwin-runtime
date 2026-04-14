@@ -402,6 +402,18 @@ def create_threads_router(
     def list_messages(thread_id: str, since: str | None = None):
         return thread_store.list_messages(thread_id, since=since)
 
+    @router.get("/api/threads/{thread_id}/inbox")
+    def thread_inbox(thread_id: str, agent: str):
+        messages = thread_store.list_inbox(thread_id, agent)
+        if messages is None:
+            raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' or participant '{agent}' not found")
+        return {
+            "thread_id": thread_id,
+            "agent": agent,
+            "pending_count": len(messages),
+            "messages": messages,
+        }
+
     @router.post("/api/threads/{thread_id}/contributions")
     async def submit_contribution(thread_id: str, req: ContributionSubmitRequest):
         contrib = thread_store.submit_contribution(
@@ -475,7 +487,13 @@ def create_threads_router(
         return updated
 
     @router.get("/api/threads/{thread_id}/status")
-    def thread_status(thread_id: str):
+    def thread_status(thread_id: str, agent: str | None = None):
+        if agent is not None:
+            status = thread_store.get_agent_status(thread_id, agent)
+            if status is None:
+                raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' or participant '{agent}' not found")
+            return status
+
         status = thread_store.get_status(thread_id)
         if status is None:
             raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")

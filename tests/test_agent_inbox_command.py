@@ -164,6 +164,91 @@ def test_agent_inbox_attached_enriches_runtime_sessions(tmp_path, monkeypatch):
     assert payload["runtime_sessions"][0]["provider"] == "codex"
     assert payload["runtime_session_warning"] is None
     assert payload["runtime_session_error"] is None
+    assert payload["thread_summary_warning"] is None
+
+
+def test_agent_inbox_attached_uses_shared_api_for_thread_summary(tmp_path, monkeypatch):
+    agent_data_dir = tmp_path / "global-btwin"
+    config_data_dir = tmp_path / "config-btwin"
+    project_root = tmp_path / "project"
+    agent_store = AgentStore(agent_data_dir)
+
+    agent_store.register(
+        name="alice",
+        model="gpt-5",
+        alias="alice",
+        provider="codex",
+        role="implementer",
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(config_data_dir))
+    monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
+
+    calls: list[tuple[str, dict | None]] = []
+
+    def fake_api_get(path: str, params=None):
+        calls.append((path, params))
+        if path == "/api/threads":
+            return [
+                {
+                    "thread_id": "thread-1",
+                    "topic": "Attached primary thread",
+                    "protocol": "debate",
+                    "status": "active",
+                    "current_phase": "context",
+                    "participants": [{"name": "alice"}, {"name": "bob"}],
+                    "created_at": "2026-04-14T00:00:00+00:00",
+                },
+                {
+                    "thread_id": "thread-2",
+                    "topic": "Other thread",
+                    "protocol": "debate",
+                    "status": "active",
+                    "current_phase": "context",
+                    "participants": [{"name": "bob"}],
+                    "created_at": "2026-04-14T00:00:00+00:00",
+                },
+            ]
+        if path == "/api/threads/thread-1/inbox":
+            return {
+                "thread_id": "thread-1",
+                "agent": "alice",
+                "pending_count": 1,
+                "messages": [{"message_id": "msg-1", "tldr": "Review this"}],
+            }
+        if path == "/api/threads/thread-1/status":
+            return {
+                "thread_id": "thread-1",
+                "agent": "alice",
+                "current_phase": "context",
+                "interaction_mode": "discuss",
+                "participant_status": "joined",
+                "pending_message_count": 1,
+                "pending_messages": [{"message_id": "msg-1", "tldr": "Review this"}],
+            }
+        if path == "/api/agent-runtime-status":
+            return {"agents": {"alice": []}}
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(main, "_api_get", fake_api_get)
+
+    result = runner.invoke(app, ["agent", "inbox", "alice", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["context"]["thread_data_dir"] == str(config_data_dir / "threads")
+    assert payload["active_thread_count"] == 1
+    assert payload["pending_thread_count"] == 1
+    assert payload["pending_message_count"] == 1
+    assert payload["active_threads"][0]["thread_id"] == "thread-1"
+    assert payload["active_threads"][0]["pending_message_count"] == 1
+    assert calls == [
+        ("/api/threads", {"status": "active"}),
+        ("/api/threads/thread-1/inbox", {"agent": "alice"}),
+        ("/api/threads/thread-1/status", {"agent": "alice"}),
+        ("/api/agent-runtime-status", None),
+    ]
 
 
 def test_agent_inbox_missing_runtime_data_does_not_fail(tmp_path, monkeypatch):
@@ -190,6 +275,7 @@ def test_agent_inbox_missing_runtime_data_does_not_fail(tmp_path, monkeypatch):
     assert payload["runtime_sessions"] == []
     assert payload["runtime_session_warning"] is None
     assert payload["runtime_session_error"] == "Failed to fetch runtime sessions: RuntimeError: runtime unavailable"
+    assert payload["thread_summary_warning"] == "Failed to fetch attached thread summaries: RuntimeError: runtime unavailable"
 
 
 def test_agent_inbox_malformed_runtime_payload_reports_warning(tmp_path, monkeypatch):
@@ -223,6 +309,7 @@ def test_agent_inbox_malformed_runtime_payload_reports_warning(tmp_path, monkeyp
     assert payload["runtime_sessions"] == []
     assert payload["runtime_session_warning"] == "Unexpected runtime session payload shape for alice: expected a list"
     assert payload["runtime_session_error"] is None
+    assert payload["thread_summary_warning"] is None
 
 
 def test_agent_inbox_missing_agent_exits_4(tmp_path, monkeypatch):
@@ -235,3 +322,53 @@ def test_agent_inbox_missing_agent_exits_4(tmp_path, monkeypatch):
 
     assert result.exit_code == 4
     assert "Agent not found" in result.output
+
+
+def test_agent_inbox_attached_reports_partial_thread_summary_failures(tmp_path, monkeypatch):
+    agent_data_dir = tmp_path / "global-btwin"
+    config_data_dir = tmp_path / "config-btwin"
+    project_root = tmp_path / "project"
+    agent_store = AgentStore(agent_data_dir)
+
+    agent_store.register(
+        name="alice",
+        model="gpt-5",
+        alias="alice",
+        provider="codex",
+        role="implementer",
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(config_data_dir))
+    monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
+
+    def flaky_api_get(path: str, params=None):
+        if path == "/api/threads":
+            return [
+                {
+                    "thread_id": "thread-1",
+                    "topic": "Attached primary thread",
+                    "protocol": "debate",
+                    "status": "active",
+                    "current_phase": "context",
+                    "participants": [{"name": "alice"}, {"name": "bob"}],
+                    "created_at": "2026-04-14T00:00:00+00:00",
+                }
+            ]
+        if path == "/api/threads/thread-1/inbox":
+            raise RuntimeError("thread inbox unavailable")
+        if path == "/api/agent-runtime-status":
+            return {"agents": {"alice": []}}
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(main, "_api_get", flaky_api_get)
+
+    result = runner.invoke(app, ["agent", "inbox", "alice", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["active_thread_count"] == 0
+    assert payload["thread_summary_warning"] == (
+        "Some attached thread summaries were skipped for alice: "
+        "thread-1 (RuntimeError: thread inbox unavailable)"
+    )

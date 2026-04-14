@@ -122,6 +122,96 @@ def _api_get(path: str, params: dict | None = None):
         return resp.json()
 
 
+def _current_btwin_command_path() -> Path | None:
+    argv0 = sys.argv[0]
+    if not argv0:
+        return None
+
+    if os.sep in argv0 or argv0.startswith("."):
+        try:
+            return Path(argv0).expanduser().resolve()
+        except OSError:
+            return Path(argv0).expanduser()
+
+    resolved = shutil.which(argv0)
+    if resolved is None:
+        return None
+    return Path(resolved).expanduser().resolve()
+
+
+def _attached_runtime_diagnostics() -> list[str]:
+    current_btwin = _current_btwin_command_path()
+    path_btwin = shutil.which("btwin")
+    config_path = _config_path()
+    data_dir = _get_active_data_dir()
+    api_url = _api_base_url()
+
+    lines = [
+        f"- URL: {api_url}",
+        f"- Config: {config_path}",
+        f"- Data dir: {data_dir}",
+        f"- Current btwin: {current_btwin or 'unknown'}",
+        f"- PATH btwin: {path_btwin or 'not found'}",
+        "- If you use a custom endpoint, check [bold]BTWIN_API_URL[/bold]",
+        "- For local-only usage, switch to [bold]runtime.mode: standalone[/bold] in the active config",
+    ]
+
+    if path_btwin and current_btwin is not None:
+        try:
+            path_btwin_resolved = Path(path_btwin).expanduser().resolve()
+        except OSError:
+            path_btwin_resolved = Path(path_btwin).expanduser()
+
+        if path_btwin_resolved != current_btwin:
+            lines.append(
+                "- Possible PATH mismatch: the current process and the `btwin` on PATH are different."
+            )
+            lines.append("- Re-run `btwin init` if needed, then restart the MCP client session.")
+        else:
+            lines.append(
+                "- If MCP tools still look stale, restart your MCP client session to clear a stale MCP proxy or stale Codex client session."
+            )
+    elif not path_btwin:
+        lines.append("- `btwin` is not currently resolvable from PATH.")
+
+    return lines
+
+
+def _render_attached_http_status_error(exc) -> None:
+    response = exc.response
+    detail = None
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            detail = payload.get("detail")
+    except Exception:
+        detail = None
+
+    detail_text = detail if isinstance(detail, str) else response.text.strip() or exc.__class__.__name__
+    console.print(
+        "[red]Attached runtime shared API responded with an error.[/red]\n"
+        f"- URL: {_api_base_url()}\n"
+        f"- Status: {response.status_code}\n"
+        f"- Detail: {detail_text}"
+    )
+
+
+def _attached_http_status_exit_code(exc) -> int:
+    response = exc.response
+    if response.status_code == 404:
+        return 4
+    return 1
+
+
+def _render_attached_transport_error(exc) -> None:
+    lines = _attached_runtime_diagnostics()
+    console.print(
+        "[red]Attached runtime could not reach the shared B-TWIN API.[/red]\n"
+        + "\n".join(lines)
+        + f"\n- Error: {exc.__class__.__name__}: {exc}"
+    )
+
+
 def _use_attached_api(config: BTwinConfig) -> bool:
     return config.runtime.mode == "attached"
 
@@ -131,15 +221,11 @@ def _attached_api_call_or_exit(path: str, data: dict) -> dict:
 
     try:
         return _api_post(path, data)
-    except httpx.HTTPError as exc:
-        console.print(
-            "[red]Attached runtime could not reach the shared B-TWIN API.[/red]\n"
-            f"- URL: {_api_base_url()}\n"
-            "- Start or restart the API with: [bold]btwin serve-api[/bold]\n"
-            "- If you use a custom endpoint, check [bold]BTWIN_API_URL[/bold]\n"
-            "- For local-only usage, switch to [bold]runtime.mode: standalone[/bold] in ~/.btwin/config.yaml\n"
-            f"- Error: {exc.__class__.__name__}: {exc}"
-        )
+    except httpx.HTTPStatusError as exc:
+        _render_attached_http_status_error(exc)
+        raise typer.Exit(_attached_http_status_exit_code(exc))
+    except httpx.RequestError as exc:
+        _render_attached_transport_error(exc)
         raise typer.Exit(1)
 
 
@@ -148,15 +234,11 @@ def _attached_api_get_or_exit(path: str, params: dict | None = None):
 
     try:
         return _api_get(path, params=params)
-    except httpx.HTTPError as exc:
-        console.print(
-            "[red]Attached runtime could not reach the shared B-TWIN API.[/red]\n"
-            f"- URL: {_api_base_url()}\n"
-            "- Start or restart the API with: [bold]btwin serve-api[/bold]\n"
-            "- If you use a custom endpoint, check [bold]BTWIN_API_URL[/bold]\n"
-            "- For local-only usage, switch to [bold]runtime.mode: standalone[/bold] in ~/.btwin/config.yaml\n"
-            f"- Error: {exc.__class__.__name__}: {exc}"
-        )
+    except httpx.HTTPStatusError as exc:
+        _render_attached_http_status_error(exc)
+        raise typer.Exit(_attached_http_status_exit_code(exc))
+    except httpx.RequestError as exc:
+        _render_attached_transport_error(exc)
         raise typer.Exit(1)
 
 
@@ -340,7 +422,70 @@ def _build_agent_queue_summary(
     return items
 
 
-def _build_agent_thread_summary(agent_name: str, thread_store: ThreadStore | None = None) -> list[dict[str, object]]:
+def _build_agent_thread_summary(
+    agent_name: str,
+    thread_store: ThreadStore | None = None,
+    config: BTwinConfig | None = None,
+) -> tuple[list[dict[str, object]], str | None]:
+    resolved_config = config or _get_config()
+    if _use_attached_api(resolved_config):
+        try:
+            threads = _api_get("/api/threads", params={"status": "active"})
+        except Exception as exc:
+            return [], f"Failed to fetch attached thread summaries: {exc.__class__.__name__}: {exc}"
+        summaries: list[dict[str, object]] = []
+        skipped: list[str] = []
+        for thread in threads:
+            if not isinstance(thread, dict):
+                continue
+            thread_id = thread.get("thread_id")
+            if not isinstance(thread_id, str) or not thread_id:
+                continue
+            participants = thread.get("participants", [])
+            if not isinstance(participants, list):
+                continue
+            participant_names = {
+                participant["name"]
+                for participant in participants
+                if isinstance(participant, dict) and isinstance(participant.get("name"), str)
+            }
+            if agent_name not in participant_names:
+                continue
+
+            try:
+                inbox_payload = _api_get(f"/api/threads/{thread_id}/inbox", params={"agent": agent_name})
+                agent_status = _api_get(f"/api/threads/{thread_id}/status", params={"agent": agent_name})
+            except Exception as exc:
+                skipped.append(f"{thread_id} ({exc.__class__.__name__}: {exc})")
+                continue
+            pending_messages = inbox_payload.get("messages", []) if isinstance(inbox_payload, dict) else []
+            summaries.append(
+                {
+                    "thread_id": thread_id,
+                    "topic": thread.get("topic", ""),
+                    "protocol": thread.get("protocol", ""),
+                    "status": thread.get("status", ""),
+                    "current_phase": agent_status.get("current_phase", thread.get("current_phase"))
+                    if isinstance(agent_status, dict)
+                    else thread.get("current_phase"),
+                    "interaction_mode": agent_status.get("interaction_mode", thread.get("interaction_mode"))
+                    if isinstance(agent_status, dict)
+                    else thread.get("interaction_mode"),
+                    "participant_status": agent_status.get("participant_status")
+                    if isinstance(agent_status, dict)
+                    else None,
+                    "pending_message_count": agent_status.get("pending_message_count", len(pending_messages))
+                    if isinstance(agent_status, dict)
+                    else len(pending_messages),
+                    "pending_messages": pending_messages,
+                    "created_at": thread.get("created_at"),
+                }
+            )
+        warning = None
+        if skipped:
+            warning = f"Some attached thread summaries were skipped for {agent_name}: " + ", ".join(skipped)
+        return summaries, warning
+
     store = thread_store or _get_thread_store()
     threads = store.list_threads(status="active")
 
@@ -379,7 +524,7 @@ def _build_agent_thread_summary(agent_name: str, thread_store: ThreadStore | Non
             }
         )
 
-    return summaries
+    return summaries, None
 
 
 def _resolve_thread_protocol_context(thread_id: str) -> tuple[dict, Protocol, object, list[str], list[dict]]:
@@ -708,11 +853,16 @@ def agent_inbox(
 
     config = _get_config()
     agent_store = _get_agent_store()
-    thread_store = _get_thread_store()
     queue_root = agent_store.data_dir
     queue = _build_agent_queue_summary(name, queue_root, agent_store)
-    active_threads = _build_agent_thread_summary(name)
+    thread_store = None if _use_attached_api(config) else _get_thread_store()
+    active_threads, thread_summary_warning = _build_agent_thread_summary(
+        name,
+        thread_store=thread_store,
+        config=config,
+    )
     runtime_sessions, runtime_warning, runtime_error = _get_attached_runtime_sessions(name, config)
+    thread_data_dir = (config.data_dir / "threads") if _use_attached_api(config) else thread_store.data_dir
 
     pending_thread_count = sum(1 for thread in active_threads if thread["pending_message_count"] > 0)
     pending_message_count = sum(thread["pending_message_count"] for thread in active_threads)
@@ -722,7 +872,7 @@ def agent_inbox(
         "context": {
             "agent_data_dir": str(agent_store.data_dir),
             "workflow_data_dir": str(queue_root),
-            "thread_data_dir": str(thread_store.data_dir),
+            "thread_data_dir": str(thread_data_dir),
             "config_data_dir": str(config.data_dir),
             "project_root": str(_project_root()),
             "runtime_mode": config.runtime.mode,
@@ -737,6 +887,7 @@ def agent_inbox(
         "runtime_sessions": runtime_sessions,
         "runtime_session_warning": runtime_warning,
         "runtime_session_error": runtime_error,
+        "thread_summary_warning": thread_summary_warning,
     }
     _emit_payload(payload, as_json=as_json)
 
@@ -970,14 +1121,20 @@ def thread_show(
     as_json: bool = typer.Option(False, "--json", help="Output JSON"),
 ):
     """Show one thread and its current status summary."""
-    store = _get_thread_store()
-    thread = store.get_thread(thread_id)
-    if thread is None:
-        console.print(f"[red]Thread not found:[/red] {thread_id}")
-        raise typer.Exit(4)
+    config = _get_config()
+    if _use_attached_api(config):
+        thread = _attached_api_get_or_exit(f"/api/threads/{thread_id}")
+        status_summary = _attached_api_get_or_exit(f"/api/threads/{thread_id}/status")
+    else:
+        store = _get_thread_store()
+        thread = store.get_thread(thread_id)
+        if thread is None:
+            console.print(f"[red]Thread not found:[/red] {thread_id}")
+            raise typer.Exit(4)
+        status_summary = store.get_status(thread_id)
 
     payload = dict(thread)
-    payload["status_summary"] = store.get_status(thread_id)
+    payload["status_summary"] = status_summary
     _emit_payload(payload, as_json=as_json)
 
 
@@ -995,17 +1152,29 @@ def thread_send_message(
     if delivery_mode == "direct" and not target_agents:
         raise typer.BadParameter("--target is required when --delivery-mode=direct")
 
-    message = _get_thread_store().send_message(
-        thread_id=thread_id,
-        from_agent=from_agent,
-        content=_resolve_content(content),
-        tldr=tldr,
-        delivery_mode=delivery_mode,
-        target_agents=target_agents,
-    )
-    if message is None:
-        console.print(f"[red]Thread not found or closed:[/red] {thread_id}")
-        raise typer.Exit(4)
+    resolved_content = _resolve_content(content)
+    config = _get_config()
+    if _use_attached_api(config):
+        payload: dict[str, object] = {
+            "fromAgent": from_agent,
+            "content": resolved_content,
+            "tldr": tldr,
+            "deliveryMode": delivery_mode,
+            "targetAgents": target_agents,
+        }
+        message = _attached_api_call_or_exit(f"/api/threads/{thread_id}/messages", payload)
+    else:
+        message = _get_thread_store().send_message(
+            thread_id=thread_id,
+            from_agent=from_agent,
+            content=resolved_content,
+            tldr=tldr,
+            delivery_mode=delivery_mode,
+            target_agents=target_agents,
+        )
+        if message is None:
+            console.print(f"[red]Thread not found or closed:[/red] {thread_id}")
+            raise typer.Exit(4)
     _emit_payload(message, as_json=as_json)
 
 
@@ -1016,17 +1185,21 @@ def thread_inbox(
     as_json: bool = typer.Option(False, "--json", help="Output JSON"),
 ):
     """Return pending messages relevant to one agent in a thread."""
-    messages = _get_thread_store().list_inbox(thread_id, agent_name)
-    if messages is None:
-        console.print(f"[red]Thread or participant not found:[/red] {thread_id} / {agent_name}")
-        raise typer.Exit(4)
+    config = _get_config()
+    if _use_attached_api(config):
+        payload = _attached_api_get_or_exit(f"/api/threads/{thread_id}/inbox", {"agent": agent_name})
+    else:
+        messages = _get_thread_store().list_inbox(thread_id, agent_name)
+        if messages is None:
+            console.print(f"[red]Thread or participant not found:[/red] {thread_id} / {agent_name}")
+            raise typer.Exit(4)
 
-    payload = {
-        "thread_id": thread_id,
-        "agent": agent_name,
-        "pending_count": len(messages),
-        "messages": messages,
-    }
+        payload = {
+            "thread_id": thread_id,
+            "agent": agent_name,
+            "pending_count": len(messages),
+            "messages": messages,
+        }
     _emit_payload(payload, as_json=as_json)
 
 
@@ -1037,10 +1210,14 @@ def thread_status(
     as_json: bool = typer.Option(False, "--json", help="Output JSON"),
 ):
     """Return compact thread status for one participating agent."""
-    payload = _get_thread_store().get_agent_status(thread_id, agent_name)
-    if payload is None:
-        console.print(f"[red]Thread or participant not found:[/red] {thread_id} / {agent_name}")
-        raise typer.Exit(4)
+    config = _get_config()
+    if _use_attached_api(config):
+        payload = _attached_api_get_or_exit(f"/api/threads/{thread_id}/status", {"agent": agent_name})
+    else:
+        payload = _get_thread_store().get_agent_status(thread_id, agent_name)
+        if payload is None:
+            console.print(f"[red]Thread or participant not found:[/red] {thread_id} / {agent_name}")
+            raise typer.Exit(4)
     _emit_payload(payload, as_json=as_json)
 
 
