@@ -377,12 +377,19 @@ class AgentRunner:
                 session_resumed=bool("--resume" in cmd or "resume" in cmd),
                 session_id_captured=captured_session_id,
             )
-        except TimeoutError:
+        except TimeoutError as exc:
+            session.last_transport_error = str(exc)
             proc.kill()
             await proc.wait()
             if proc.pid:
                 self._active_pids.pop(proc.pid, None)
-            self._emit_session_state(thread_id, agent_name, "failed", reason="timeout")
+            self._emit_session_state(
+                thread_id,
+                agent_name,
+                "failed",
+                reason="timeout",
+                last_transport_error=session.last_transport_error,
+            )
             return InvocationResult(ok=False, timed_out=True)
         finally:
             if typing_started and not typing_done_published and not defer_typing_done:
@@ -473,6 +480,7 @@ class AgentRunner:
                             "fallback",
                             previous_transport_mode=previous_transport_mode,
                             transport_mode=runtime_session.transport_mode,
+                            last_transport_error=runtime_session.last_transport_error,
                         )
                         self._emit_session_state(
                             thread_id,
@@ -1131,12 +1139,14 @@ class AgentRunner:
                 session_id_captured=captured_session_id,
             )
         except Exception as exc:  # noqa: BLE001
+            session.last_transport_error = str(exc)
             await self._close_live_transport_adapter_async(key)
             self._emit_session_state(
                 thread_id,
                 agent_name,
                 "failed",
                 reason="live_transport_failed",
+                last_transport_error=session.last_transport_error,
             )
             return InvocationResult(
                 ok=False,
