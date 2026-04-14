@@ -43,6 +43,22 @@ Default assumptions:
 - on macOS, the intended steady-state is to keep `serve-api` running as a background LaunchAgent via `btwin service install`
 - project-local `.btwin/` is an exception for isolated testing, not the default
 
+### Data Dir Resolution
+
+Most `btwin` commands decide which store to read and write from using this
+precedence:
+
+1. `BTWIN_DATA_DIR`
+2. `./.btwin/` under the current working directory
+3. `~/.btwin/`
+
+In practice, that means a repo-local `.btwin/` can become the active runtime
+store for normal CLI commands if you run `btwin` from that repository. Treat a
+project-local `.btwin/` as temporary isolated runtime state, not as shared
+project documentation or source-controlled data.
+
+If you intentionally use a repo-local `.btwin/`, ignore it in git.
+
 ## Prerequisites
 
 - Python 3.11+
@@ -171,6 +187,10 @@ btwin service stop
 `~/.btwin/logs/` exists, links the plist into `~/Library/LaunchAgents/`, and
 bootstraps the service with the current `btwin` executable found on `PATH`.
 
+Unlike ordinary CLI/runtime state, the launchd helper always uses the global
+`~/.btwin` service paths. A repo-local `.btwin/` should not become the backing
+store for the background LaunchAgent.
+
 If the active `btwin` executable changes later, run `btwin service install`
 again to refresh the LaunchAgent target.
 
@@ -242,6 +262,7 @@ Use a repo-local data directory only when you explicitly want isolation from the
 normal global store:
 
 ```bash
+export BTWIN_CONFIG_PATH="$(pwd)/.btwin/config.yaml"
 export BTWIN_DATA_DIR="$(pwd)/.btwin"
 mkdir -p "$BTWIN_DATA_DIR"
 uv run btwin serve-api
@@ -252,6 +273,12 @@ This is useful for:
 - split-repo smoke tests
 - temporary sandbox runs
 - experiments that should not touch `~/.btwin`
+
+When you use this isolated mode, remember:
+
+- `BTWIN_CONFIG_PATH` and `BTWIN_DATA_DIR` should usually point at the same local root
+- many `btwin` commands will keep reading and writing that repo-local store while those paths stay active
+- the repo-local `.btwin/` directory is local runtime state and should be ignored by git
 
 For a repeatable attached-helper smoke that exercises the isolated bootstrap,
 attached API-backed helper commands, runtime binding, and `protocol apply-next`

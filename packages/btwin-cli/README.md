@@ -71,6 +71,11 @@ Today `btwin-cli` supports exactly one provider bootstrap path: Codex.
 Additional providers may be added later, but the current packaged workflow is
 intentionally Codex-first.
 
+For normal usage, `~/.btwin` is the recommended shared runtime store. A
+project-local `.btwin/` or explicit `BTWIN_DATA_DIR` can override the active
+store for many CLI commands, but that path should be treated as isolated local
+runtime state rather than shared default data.
+
 ## Bundled Skills
 
 `btwin-cli` ships the B-TWIN skills that can be installed into supported client
@@ -100,6 +105,11 @@ update touched CLI/runtime packaging, then re-run `btwin install-skills`.
 
 The package also bundles runtime docs and global protocol assets so the CLI can
 sync them into the active B-TWIN data directory when needed.
+
+That "active data directory" is not always global: it can become project-local
+when you run from a repo that already has `./.btwin/` or when `BTWIN_DATA_DIR`
+is set. The main exception is `btwin service install`, which intentionally uses
+the global `~/.btwin` LaunchAgent paths.
 
 ## Relationship To btwin-core
 
