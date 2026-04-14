@@ -29,9 +29,11 @@ from btwin_core.agent_store import AgentStore
 from btwin_core.config import BTwinConfig, load_config, resolve_config_path
 from btwin_core.handoff_archive import write_handoff_record
 from btwin_core.locale_settings import LocaleSettingsStore
-from btwin_core.protocol_store import Protocol, ProtocolStore
+from btwin_core.protocol_flow import describe_next
+from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolStore
 from btwin_core.protocol_validator import ProtocolValidator
 from btwin_core.sources import SourceRegistry
+from btwin_core.runtime_binding_store import RuntimeBindingState, RuntimeBindingStore
 from btwin_core.thread_store import ThreadStore
 from btwin_core.storage import Storage
 from btwin_core.workflow_engine import WorkflowEngine
@@ -258,6 +260,103 @@ def _attached_api_get_or_exit(path: str, params: dict | None = None):
     except httpx.RequestError as exc:
         _render_attached_transport_error(exc)
         raise typer.Exit(1)
+
+
+def _get_runtime_binding_store() -> RuntimeBindingStore:
+    return RuntimeBindingStore(_project_root() / ".btwin")
+
+
+def _resolve_runtime_thread(thread_id: str, config: BTwinConfig | None = None) -> dict | None:
+    current_config = config or _get_config()
+    if _use_attached_api(current_config):
+        return _attached_api_get_or_exit(f"/api/threads/{thread_id}")
+
+    store = _get_thread_store()
+    return store.get_thread(thread_id)
+
+
+def _thread_participant_names(thread: dict | None) -> set[str]:
+    if not isinstance(thread, dict):
+        return set()
+    participants = thread.get("participants", [])
+    if not isinstance(participants, list):
+        return set()
+    return {
+        participant["name"]
+        for participant in participants
+        if isinstance(participant, dict) and isinstance(participant.get("name"), str)
+    }
+
+
+def _resolve_runtime_thread_safely(
+    thread_id: str,
+    config: BTwinConfig | None = None,
+) -> tuple[dict | None, str | None]:
+    current_config = config or _get_config()
+    try:
+        if _use_attached_api(current_config):
+            return _api_get(f"/api/threads/{thread_id}"), None
+        return _get_thread_store().get_thread(thread_id), None
+    except Exception as exc:
+        return None, f"Failed to fetch thread details: {exc.__class__.__name__}: {exc}"
+
+
+def _resolve_runtime_thread_id(thread_id: str | None, config: BTwinConfig | None = None) -> tuple[str, str]:
+    if thread_id is not None:
+        return thread_id, "explicit"
+
+    state = _get_runtime_binding_store().read_state()
+    if state.binding is None:
+        if state.binding_error:
+            console.print(
+                "[red]No usable runtime binding found.[/red]\n"
+                f"- Error: {state.binding_error}\n"
+                "- Pass [bold]--thread[/bold] explicitly or fix the runtime binding file."
+            )
+        else:
+            console.print(
+                "[red]No runtime binding found.[/red]\n"
+                "- Pass [bold]--thread[/bold] explicitly or bind the current project with [bold]btwin runtime bind[/bold]."
+            )
+        raise typer.Exit(4)
+
+    return state.binding.thread_id, "runtime_binding"
+
+
+def _runtime_binding_payload(
+    state: RuntimeBindingState,
+    *,
+    config: BTwinConfig | None = None,
+    thread: dict | None = None,
+    agent_store: AgentStore | None = None,
+    include_thread_lookup_error: bool = False,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "bound": state.bound,
+        "binding": state.binding.model_dump() if state.binding is not None else None,
+        "binding_error": state.binding_error,
+    }
+    if state.binding is None:
+        return payload
+
+    current_config = config or _get_config()
+    resolved_thread = thread
+    thread_error = None
+    if resolved_thread is None:
+        if include_thread_lookup_error:
+            resolved_thread, thread_error = _resolve_runtime_thread_safely(state.binding.thread_id, current_config)
+        else:
+            resolved_thread = _resolve_runtime_thread(state.binding.thread_id, current_config)
+    if resolved_thread is not None:
+        payload["thread"] = resolved_thread
+    if thread_error is not None:
+        payload["thread_error"] = thread_error
+
+    store = agent_store or _get_agent_store()
+    agent = store.get_agent(state.binding.agent_name)
+    if agent is not None:
+        payload["agent"] = agent
+    return payload
 
 
 def _record_thread_result_entry(
@@ -545,7 +644,46 @@ def _build_agent_thread_summary(
     return summaries, None
 
 
-def _resolve_thread_protocol_context(thread_id: str) -> tuple[dict, Protocol, object, list[str], list[dict]]:
+def _load_protocol_flow_context(
+    thread_id: str,
+    config: BTwinConfig | None = None,
+) -> tuple[dict, Protocol, ProtocolPhase, list[str], list[dict]]:
+    current_config = config or _get_config()
+    if _use_attached_api(current_config):
+        thread = _attached_api_get_or_exit(f"/api/threads/{thread_id}")
+        protocol_name = thread.get("protocol")
+        if not isinstance(protocol_name, str) or not protocol_name:
+            console.print(f"[red]Protocol not found for thread:[/red] {protocol_name}")
+            raise typer.Exit(4)
+
+        protocol_payload = _attached_api_get_or_exit(f"/api/protocols/{protocol_name}")
+        protocol = Protocol.model_validate(protocol_payload)
+        current_phase = thread.get("current_phase")
+        phase = next((item for item in protocol.phases if item.name == current_phase), None)
+        if phase is None:
+            payload = {
+                "thread_id": thread_id,
+                "protocol": protocol.name,
+                "current_phase": current_phase,
+                "passed": False,
+                "error": "phase_not_found",
+            }
+            _emit_payload(payload, as_json=True)
+            raise typer.Exit(2)
+
+        phase_participants = thread.get("phase_participants", [])
+        if not isinstance(phase_participants, list):
+            phase_participants = []
+        contributions = []
+        if isinstance(current_phase, str) and current_phase:
+            contributions_payload = _attached_api_get_or_exit(
+                f"/api/threads/{thread_id}/contributions",
+                {"phase": current_phase},
+            )
+            if isinstance(contributions_payload, list):
+                contributions = contributions_payload
+        return thread, protocol, phase, [str(name) for name in phase_participants if isinstance(name, str)], contributions
+
     thread_store = _get_thread_store()
     thread = thread_store.get_thread(thread_id)
     if thread is None:
@@ -577,7 +715,9 @@ def _resolve_thread_protocol_context(thread_id: str) -> tuple[dict, Protocol, ob
         if current_phase
         else []
     )
-    return thread, protocol, phase, phase_participants, contributions
+    if not isinstance(phase_participants, list):
+        phase_participants = []
+    return thread, protocol, phase, [str(name) for name in phase_participants if isinstance(name, str)], contributions
 
 
 def _project_root() -> Path:
@@ -968,7 +1108,7 @@ def protocol_check(
     as_json: bool = typer.Option(False, "--json", help="Output JSON"),
 ):
     """Validate the current thread phase against protocol contribution requirements."""
-    thread, protocol, phase, phase_participants, contributions = _resolve_thread_protocol_context(thread_id)
+    thread, protocol, phase, phase_participants, contributions = _load_protocol_flow_context(thread_id, _get_config())
     current_phase = thread.get("current_phase")
 
     validation = ProtocolValidator.validate_phase(
@@ -995,63 +1135,124 @@ def protocol_next(
     as_json: bool = typer.Option(False, "--json", help="Output JSON"),
 ):
     """Calculate the next valid protocol action from the current thread state."""
-    thread, protocol, phase, phase_participants, contributions = _resolve_thread_protocol_context(thread_id)
-    current_phase = thread.get("current_phase")
-
-    validation = ProtocolValidator.validate_phase(
-        phase_participants=phase_participants,
-        template_sections=phase.template or [],
-        contributions=contributions,
-    )
-    phase_index = next(
-        (idx for idx, item in enumerate(protocol.phases) if item.name == current_phase),
-        -1,
-    )
-    sequential_next = (
-        protocol.phases[phase_index + 1].name
-        if 0 <= phase_index < len(protocol.phases) - 1
-        else None
-    )
-
-    branch_transitions = [t for t in protocol.transitions if t.from_phase == current_phase and t.on]
-    default_transition = next(
-        (t for t in protocol.transitions if t.from_phase == current_phase and t.on is None),
-        None,
-    )
-    valid_outcomes = list(protocol.outcomes) or [
-        transition.on for transition in branch_transitions if transition.on
-    ]
-
-    next_phase = None
-    suggested_action = "close_thread"
-    if not validation.passed:
-        suggested_action = "submit_contribution"
-    elif outcome:
-        matched = next(
-            (t for t in branch_transitions if t.on == outcome),
-            None,
-        )
-        next_phase = matched.to if matched else None
-        suggested_action = "advance_phase" if next_phase else "record_outcome"
-    elif valid_outcomes:
-        suggested_action = "record_outcome"
-    else:
-        next_phase = default_transition.to if default_transition else sequential_next
-        if next_phase:
-            suggested_action = "advance_phase"
-
-    payload = {
-        "thread_id": thread_id,
-        "protocol": protocol.name,
-        "current_phase": current_phase,
-        "passed": validation.passed,
-        "missing": validation.missing,
-        "valid_outcomes": valid_outcomes,
-        "requested_outcome": outcome,
-        "next_phase": next_phase,
-        "suggested_action": suggested_action,
-    }
+    thread, protocol, phase, _phase_participants, contributions = _load_protocol_flow_context(thread_id, _get_config())
+    plan = describe_next(thread, protocol, contributions, outcome=outcome)
+    payload = plan.model_dump(exclude={"manual_outcome_required"})
     _emit_payload(payload, as_json=as_json)
+    if plan.error:
+        raise typer.Exit(2)
+
+
+@protocol_app.command("apply-next")
+def protocol_apply_next(
+    thread_id: str | None = typer.Option(None, "--thread", help="Thread id"),
+    outcome: str | None = typer.Option(None, "--outcome", help="Protocol outcome to apply"),
+    summary: str | None = typer.Option(None, "--summary", help="Thread summary for close actions"),
+    decision: str | None = typer.Option(None, "--decision", help="Thread decision for close actions"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Apply the next protocol action when it is unambiguous."""
+    config = _get_config()
+    resolved_thread_id, thread_source = _resolve_runtime_thread_id(thread_id, config)
+    thread, protocol, phase, _phase_participants, contributions = _load_protocol_flow_context(resolved_thread_id, config)
+    plan = describe_next(thread, protocol, contributions, outcome=outcome)
+    base_payload = {
+        "thread_id": resolved_thread_id,
+        "thread_source": thread_source,
+        "protocol": protocol.name,
+        "current_phase": plan.current_phase,
+        "passed": plan.passed,
+        "missing": plan.missing,
+        "valid_outcomes": plan.valid_outcomes,
+        "requested_outcome": plan.requested_outcome,
+        "next_phase": plan.next_phase,
+        "suggested_action": plan.suggested_action,
+        "applied": False,
+    }
+
+    if plan.error:
+        base_payload["error"] = plan.error
+        _emit_payload(base_payload, as_json=as_json)
+        raise typer.Exit(2)
+
+    if not plan.passed:
+        base_payload["manual_outcome_required"] = False
+        _emit_payload(base_payload, as_json=as_json)
+        raise typer.Exit(0)
+
+    if plan.suggested_action == "record_outcome":
+        base_payload["manual_outcome_required"] = True
+        _emit_payload(base_payload, as_json=as_json)
+        raise typer.Exit(0)
+
+    if plan.suggested_action == "close_thread":
+        if summary is None:
+            base_payload["summary_required"] = True
+            _emit_payload(base_payload, as_json=as_json)
+            raise typer.Exit(0)
+
+        if _use_attached_api(config):
+            payload: dict[str, object] = {"summary": summary}
+            if decision is not None:
+                payload["decision"] = decision
+            closed = _attached_api_call_or_exit(f"/api/threads/{resolved_thread_id}/close", payload)
+        else:
+            store = _get_thread_store()
+            closed = store.close_thread(resolved_thread_id, summary=summary, decision=decision)
+            if closed is None:
+                console.print(f"[red]Thread not found:[/red] {resolved_thread_id}")
+                raise typer.Exit(4)
+            result_record_id = _record_thread_result_entry(store.data_dir, resolved_thread_id, closed, summary, decision)
+            if result_record_id:
+                closed = dict(closed)
+                closed["result_record_id"] = result_record_id
+
+        result_payload = {
+            "thread_id": resolved_thread_id,
+            "thread_source": thread_source,
+            "protocol": protocol.name,
+            "current_phase": plan.current_phase,
+            "next_phase": plan.next_phase,
+            "suggested_action": plan.suggested_action,
+            "applied": True,
+            "thread": closed,
+        }
+        _emit_payload(result_payload, as_json=as_json)
+        return
+
+    if plan.suggested_action == "advance_phase":
+        if plan.next_phase is None:
+            base_payload["error"] = "next_phase_unavailable"
+            _emit_payload(base_payload, as_json=as_json)
+            raise typer.Exit(2)
+
+        if _use_attached_api(config):
+            closed_or_updated = _attached_api_call_or_exit(
+                f"/api/threads/{resolved_thread_id}/advance-phase",
+                {"nextPhase": plan.next_phase},
+            )
+        else:
+            store = _get_thread_store()
+            closed_or_updated = store.advance_phase(resolved_thread_id, next_phase=plan.next_phase)
+            if closed_or_updated is None:
+                console.print(f"[red]Thread not found:[/red] {resolved_thread_id}")
+                raise typer.Exit(4)
+
+        result_payload = {
+            "thread_id": resolved_thread_id,
+            "thread_source": thread_source,
+            "protocol": protocol.name,
+            "current_phase": plan.current_phase,
+            "next_phase": plan.next_phase,
+            "suggested_action": plan.suggested_action,
+            "applied": True,
+            "thread": closed_or_updated,
+        }
+        _emit_payload(result_payload, as_json=as_json)
+        return
+
+    base_payload["manual_outcome_required"] = True
+    _emit_payload(base_payload, as_json=as_json)
 
 
 @thread_app.command("create")
@@ -1881,6 +2082,79 @@ def runtime_show():
         console.print("Attached fallback behavior: standalone-journal if OpenClaw memory binding is unavailable")
     else:
         console.print("Recall adapter target: standalone-journal")
+
+
+@runtime_app.command("bind")
+def runtime_bind(
+    thread_id: str = typer.Option(..., "--thread", help="Thread id"),
+    agent_name: str = typer.Option(..., "--agent", help="Agent name"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Bind the current project runtime context to a thread and agent."""
+    config = _get_config()
+    thread = _resolve_runtime_thread(thread_id, config)
+    if thread is None:
+        console.print(f"[red]Thread not found:[/red] {thread_id}")
+        raise typer.Exit(4)
+
+    agent_store = _get_agent_store()
+    agent = agent_store.get_agent(agent_name)
+    if agent is None:
+        console.print(f"[red]Agent not found:[/red] {agent_name}")
+        raise typer.Exit(4)
+
+    participant_names = _thread_participant_names(thread)
+    if not participant_names:
+        console.print(f"[red]Thread participant data unavailable:[/red] {thread_id}")
+        raise typer.Exit(4)
+    if agent_name not in participant_names:
+        console.print(
+            f"[red]Agent is not a participant on this thread:[/red] {agent_name} not in {thread_id}"
+        )
+        raise typer.Exit(4)
+
+    binding = _get_runtime_binding_store().bind(thread_id=thread_id, agent_name=agent_name)
+    payload = _runtime_binding_payload(
+        RuntimeBindingState(binding=binding),
+        config=config,
+        agent_store=agent_store,
+        thread=thread,
+    )
+    _emit_payload(payload, as_json=as_json)
+
+
+@runtime_app.command("current")
+def runtime_current(
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Show the current project runtime binding."""
+    config = _get_config()
+    state = _get_runtime_binding_store().read_state()
+    payload = _runtime_binding_payload(state, config=config, include_thread_lookup_error=True)
+    _emit_payload(payload, as_json=as_json)
+
+
+@runtime_app.command("clear")
+def runtime_clear(
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Clear the current project runtime binding."""
+    config = _get_config()
+    previous = _get_runtime_binding_store().clear()
+    previous_thread = None
+    if previous.binding is not None:
+        try:
+            previous_thread = _resolve_runtime_thread(previous.binding.thread_id, config)
+        except Exception:
+            previous_thread = None
+    payload = {
+        "cleared": True,
+        "bound": False,
+        "previous_binding": previous.binding.model_dump() if previous.binding is not None else None,
+        "previous_thread": previous_thread,
+        "previous_binding_error": previous.binding_error,
+    }
+    _emit_payload(payload, as_json=as_json)
 
 
 _PLATFORMS = {

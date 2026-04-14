@@ -100,7 +100,7 @@ class ProtocolStore:
         """Save protocol to project-local directory."""
         self._dir.mkdir(parents=True, exist_ok=True)
         path = self._dir / f"{protocol.name}.yaml"
-        data = protocol.model_dump(exclude_none=True)
+        data = protocol.model_dump(exclude_none=True, by_alias=True)
         for phase in data.get("phases", []):
             phase.pop("mode", None)
         path.write_text(yaml.dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
