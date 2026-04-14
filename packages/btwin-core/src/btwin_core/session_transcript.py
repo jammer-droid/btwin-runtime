@@ -66,9 +66,8 @@ def _normalize_runtime_event(
         metadata["provider"] = provider_name
     content = _event_content(event)
 
-    if kind in _TEXT_DELTA_KINDS or kind in _TURN_COMPLETE_KINDS:
-        if _event_has_noise_marker(event):
-            return []
+    if _event_has_noise_marker(event):
+        return []
 
     if kind in _SESSION_STARTED_KINDS:
         session_id = _event_session_id(event)

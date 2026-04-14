@@ -60,6 +60,21 @@ def test_normalize_runtime_events_does_not_promote_startup_text_to_session_id() 
     assert normalized == []
 
 
+def test_normalize_runtime_events_filters_hook_marked_startup_session_started_event() -> None:
+    normalized = normalize_runtime_events(
+        [
+            {
+                "event_type": "thread.started",
+                "session_id": "thread-123",
+                "metadata": {"source": "hook", "phase": "startup"},
+            }
+        ],
+        provider_name="codex",
+    )
+
+    assert normalized == []
+
+
 def test_normalize_runtime_events_keeps_mapping_item_completed_text() -> None:
     normalized = normalize_runtime_events(
         [
