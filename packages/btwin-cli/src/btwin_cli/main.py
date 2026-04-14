@@ -139,22 +139,19 @@ def _current_btwin_command_path() -> Path | None:
     return Path(resolved).expanduser().resolve()
 
 
-def _attached_runtime_diagnostics() -> list[str]:
+def _attached_runtime_diagnostics_context() -> dict[str, object]:
     current_btwin = _current_btwin_command_path()
     path_btwin = shutil.which("btwin")
     config_path = _config_path()
     data_dir = _get_active_data_dir()
     api_url = _api_base_url()
 
-    lines = [
-        f"- URL: {api_url}",
-        f"- Config: {config_path}",
-        f"- Data dir: {data_dir}",
-        f"- Current btwin: {current_btwin or 'unknown'}",
-        f"- PATH btwin: {path_btwin or 'not found'}",
+    messages = [
         "- If you use a custom endpoint, check [bold]BTWIN_API_URL[/bold]",
         "- For local-only usage, switch to [bold]runtime.mode: standalone[/bold] in the active config",
     ]
+    path_matches_current = None
+    path_btwin_resolved = None
 
     if path_btwin and current_btwin is not None:
         try:
@@ -162,19 +159,40 @@ def _attached_runtime_diagnostics() -> list[str]:
         except OSError:
             path_btwin_resolved = Path(path_btwin).expanduser()
 
-        if path_btwin_resolved != current_btwin:
-            lines.append(
-                "- Possible PATH mismatch: the current process and the `btwin` on PATH are different."
-            )
-            lines.append("- Re-run `btwin init` if needed, then restart the MCP client session.")
+        path_matches_current = path_btwin_resolved == current_btwin
+        if not path_matches_current:
+            messages.append("- Possible PATH mismatch: the current process and the `btwin` on PATH are different.")
+            messages.append("- Re-run `btwin init` if needed, then restart the MCP client session.")
         else:
-            lines.append(
+            messages.append(
                 "- If MCP tools still look stale, restart your MCP client session to clear a stale MCP proxy or stale Codex client session."
             )
     elif not path_btwin:
-        lines.append("- `btwin` is not currently resolvable from PATH.")
+        path_matches_current = False
+        messages.append("- `btwin` is not currently resolvable from PATH.")
 
-    return lines
+    return {
+        "url": api_url,
+        "config_path": str(config_path),
+        "data_dir": str(data_dir),
+        "current_btwin": str(current_btwin) if current_btwin is not None else None,
+        "path_btwin": path_btwin,
+        "path_btwin_resolved": str(path_btwin_resolved) if path_btwin_resolved is not None else None,
+        "path_matches_current": path_matches_current,
+        "messages": messages,
+    }
+
+
+def _attached_runtime_diagnostics() -> list[str]:
+    diagnostics = _attached_runtime_diagnostics_context()
+    return [
+        f"- URL: {diagnostics['url']}",
+        f"- Config: {diagnostics['config_path']}",
+        f"- Data dir: {diagnostics['data_dir']}",
+        f"- Current btwin: {diagnostics['current_btwin'] or 'unknown'}",
+        f"- PATH btwin: {diagnostics['path_btwin'] or 'not found'}",
+        *diagnostics["messages"],
+    ]
 
 
 def _render_attached_http_status_error(exc) -> None:
@@ -863,6 +881,9 @@ def agent_inbox(
     )
     runtime_sessions, runtime_warning, runtime_error = _get_attached_runtime_sessions(name, config)
     thread_data_dir = (config.data_dir / "threads") if _use_attached_api(config) else thread_store.data_dir
+    attached_runtime_diagnostics = (
+        _attached_runtime_diagnostics_context() if _use_attached_api(config) and as_json else None
+    )
 
     pending_thread_count = sum(1 for thread in active_threads if thread["pending_message_count"] > 0)
     pending_message_count = sum(thread["pending_message_count"] for thread in active_threads)
@@ -889,6 +910,8 @@ def agent_inbox(
         "runtime_session_error": runtime_error,
         "thread_summary_warning": thread_summary_warning,
     }
+    if attached_runtime_diagnostics is not None:
+        payload["attached_runtime_diagnostics"] = attached_runtime_diagnostics
     _emit_payload(payload, as_json=as_json)
 
 

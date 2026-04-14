@@ -131,11 +131,18 @@ def test_agent_inbox_attached_enriches_runtime_sessions(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     config_data_dir = tmp_path / "config-btwin"
     agent_store, thread_store, _workflow = _build_agent_inbox_fixtures(agent_data_dir, project_root)
+    current_btwin = project_root / "bin" / "btwin"
+    path_btwin = project_root / "venv" / "bin" / "btwin"
 
     monkeypatch.setattr(main, "_project_root", lambda: project_root)
     monkeypatch.setattr(main, "_get_config", lambda: _attached_config(config_data_dir))
     monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
     monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+    monkeypatch.setattr(main, "_config_path", lambda: project_root / "config" / "btwin.yaml")
+    monkeypatch.setattr(main, "_get_active_data_dir", lambda config=None: config_data_dir)
+    monkeypatch.setattr(main, "_current_btwin_command_path", lambda: current_btwin)
+    monkeypatch.setattr(main.shutil, "which", lambda name: str(path_btwin) if name == "btwin" else None)
+    monkeypatch.setattr(main, "_api_base_url", lambda: "http://attached-api.local")
     monkeypatch.setattr(
         main,
         "_api_get",
@@ -164,7 +171,109 @@ def test_agent_inbox_attached_enriches_runtime_sessions(tmp_path, monkeypatch):
     assert payload["runtime_sessions"][0]["provider"] == "codex"
     assert payload["runtime_session_warning"] is None
     assert payload["runtime_session_error"] is None
+    assert payload["attached_runtime_diagnostics"] == {
+        "url": "http://attached-api.local",
+        "config_path": str(project_root / "config" / "btwin.yaml"),
+        "data_dir": str(config_data_dir),
+        "current_btwin": str(current_btwin),
+        "path_btwin": str(path_btwin),
+        "path_btwin_resolved": str(path_btwin),
+        "path_matches_current": False,
+        "messages": [
+            "- If you use a custom endpoint, check [bold]BTWIN_API_URL[/bold]",
+            "- For local-only usage, switch to [bold]runtime.mode: standalone[/bold] in the active config",
+            "- Possible PATH mismatch: the current process and the `btwin` on PATH are different.",
+            "- Re-run `btwin init` if needed, then restart the MCP client session.",
+        ],
+    }
     assert payload["thread_summary_warning"] is None
+
+
+def test_agent_inbox_attached_non_json_omits_structured_diagnostics(tmp_path, monkeypatch):
+    agent_data_dir = tmp_path / "global-btwin"
+    project_root = tmp_path / "project"
+    config_data_dir = tmp_path / "config-btwin"
+    agent_store, thread_store, _workflow = _build_agent_inbox_fixtures(agent_data_dir, project_root)
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(config_data_dir))
+    monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+    monkeypatch.setattr(main, "_config_path", lambda: project_root / "config" / "btwin.yaml")
+    monkeypatch.setattr(main, "_get_active_data_dir", lambda config=None: config_data_dir)
+    monkeypatch.setattr(main, "_current_btwin_command_path", lambda: project_root / "bin" / "btwin")
+    monkeypatch.setattr(main.shutil, "which", lambda name: str(project_root / "bin" / "btwin") if name == "btwin" else None)
+    monkeypatch.setattr(main, "_api_base_url", lambda: "http://attached-api.local")
+    monkeypatch.setattr(
+        main,
+        "_api_get",
+        lambda path, params=None: {
+            "agents": {
+                "alice": [
+                    {
+                        "thread_id": "thread-20260413-abc123",
+                        "provider": "codex",
+                        "transport_mode": "stdio",
+                        "status": "active",
+                    }
+                ]
+            }
+        },
+    )
+
+    result = runner.invoke(app, ["agent", "inbox", "alice"])
+
+    assert result.exit_code == 0, result.output
+    assert "attached_runtime_diagnostics" not in result.output
+    assert "runtime_session_error: null" in result.output
+
+
+def test_agent_inbox_attached_reports_missing_path_diagnostics(tmp_path, monkeypatch):
+    agent_data_dir = tmp_path / "global-btwin"
+    project_root = tmp_path / "project"
+    config_data_dir = tmp_path / "config-btwin"
+    agent_store, thread_store, _workflow = _build_agent_inbox_fixtures(agent_data_dir, project_root)
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(config_data_dir))
+    monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+    monkeypatch.setattr(main, "_config_path", lambda: project_root / "config" / "btwin.yaml")
+    monkeypatch.setattr(main, "_get_active_data_dir", lambda config=None: config_data_dir)
+    monkeypatch.setattr(main, "_current_btwin_command_path", lambda: None)
+    monkeypatch.setattr(main.shutil, "which", lambda name: None)
+    monkeypatch.setattr(main, "_api_base_url", lambda: "http://attached-api.local")
+    monkeypatch.setattr(
+        main,
+        "_api_get",
+        lambda path, params=None: {
+            "agents": {
+                "alice": [
+                    {
+                        "thread_id": "thread-20260413-abc123",
+                        "provider": "codex",
+                        "transport_mode": "stdio",
+                        "status": "active",
+                    }
+                ]
+            }
+        },
+    )
+
+    result = runner.invoke(app, ["agent", "inbox", "alice", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    diagnostics = payload["attached_runtime_diagnostics"]
+    assert diagnostics["current_btwin"] is None
+    assert diagnostics["path_btwin"] is None
+    assert diagnostics["path_btwin_resolved"] is None
+    assert diagnostics["path_matches_current"] is False
+    assert diagnostics["messages"] == [
+        "- If you use a custom endpoint, check [bold]BTWIN_API_URL[/bold]",
+        "- For local-only usage, switch to [bold]runtime.mode: standalone[/bold] in the active config",
+        "- `btwin` is not currently resolvable from PATH.",
+    ]
 
 
 def test_agent_inbox_attached_uses_shared_api_for_thread_summary(tmp_path, monkeypatch):
@@ -261,6 +370,11 @@ def test_agent_inbox_missing_runtime_data_does_not_fail(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_get_config", lambda: _attached_config(config_data_dir))
     monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
     monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+    monkeypatch.setattr(main, "_config_path", lambda: project_root / "config" / "btwin.yaml")
+    monkeypatch.setattr(main, "_get_active_data_dir", lambda config=None: config_data_dir)
+    monkeypatch.setattr(main, "_current_btwin_command_path", lambda: project_root / "bin" / "btwin")
+    monkeypatch.setattr(main.shutil, "which", lambda name: str(project_root / "bin" / "btwin") if name == "btwin" else None)
+    monkeypatch.setattr(main, "_api_base_url", lambda: "http://attached-api.local")
 
     def fail_runtime_status(path, params=None):
         raise RuntimeError("runtime unavailable")
@@ -275,6 +389,20 @@ def test_agent_inbox_missing_runtime_data_does_not_fail(tmp_path, monkeypatch):
     assert payload["runtime_sessions"] == []
     assert payload["runtime_session_warning"] is None
     assert payload["runtime_session_error"] == "Failed to fetch runtime sessions: RuntimeError: runtime unavailable"
+    assert payload["attached_runtime_diagnostics"] == {
+        "url": "http://attached-api.local",
+        "config_path": str(project_root / "config" / "btwin.yaml"),
+        "data_dir": str(config_data_dir),
+        "current_btwin": str(project_root / "bin" / "btwin"),
+        "path_btwin": str(project_root / "bin" / "btwin"),
+        "path_btwin_resolved": str(project_root / "bin" / "btwin"),
+        "path_matches_current": True,
+        "messages": [
+            "- If you use a custom endpoint, check [bold]BTWIN_API_URL[/bold]",
+            "- For local-only usage, switch to [bold]runtime.mode: standalone[/bold] in the active config",
+            "- If MCP tools still look stale, restart your MCP client session to clear a stale MCP proxy or stale Codex client session.",
+        ],
+    }
     assert payload["thread_summary_warning"] == "Failed to fetch attached thread summaries: RuntimeError: runtime unavailable"
 
 
