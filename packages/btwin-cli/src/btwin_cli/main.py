@@ -1241,7 +1241,10 @@ def _service_target() -> str:
 
 
 def _service_data_dir() -> Path:
-    return Path.home() / ".btwin"
+    default_data_dir = Path.home() / ".btwin"
+    if "BTWIN_CONFIG_PATH" not in os.environ:
+        return default_data_dir
+    return _get_active_data_dir()
 
 
 def _service_plist_path() -> Path:
