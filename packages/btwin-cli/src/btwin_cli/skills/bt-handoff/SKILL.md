@@ -121,10 +121,11 @@ After saving to btwin, run the CLI helper to write the latest snapshot to `HANDO
 
 1. The next worker can see what to do without searching btwin
 2. B-TWIN keeps an append-only global archive of who did what for that project identity
+3. The current project can inspect that archive locally with `btwin handoff list` and `btwin handoff show`
 
 ### File Format
 
-`HANDOFF.md` is the latest handoff snapshot only. The historical archive lives in the global B-TWIN project archive, which defaults to `~/.btwin/projects/<project_key>/handoffs.jsonl`.
+`HANDOFF.md` is the latest handoff snapshot only. The historical archive lives in the global B-TWIN project archive, which defaults to `~/.btwin/projects/<project_key>/handoffs.jsonl`, and can be queried from the project with `btwin handoff list` / `btwin handoff show`.
 
 ```markdown
 # Current Handoff
@@ -151,6 +152,14 @@ btwin handoff --record-id convo-123 --summary "Short handoff summary" --dispatch
 ```
 
 Add `--background`, `--intent`, `--current-state`, `--verification`, `--risks`, `--next-steps`, and `--starter-context` when you have those details available.
+
+To inspect previous handoffs for the current project:
+
+```bash
+btwin handoff list
+btwin handoff show
+btwin handoff show convo-123
+```
 
 ## Rules
 

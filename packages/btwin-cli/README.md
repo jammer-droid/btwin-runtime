@@ -38,6 +38,9 @@ The `btwin` CLI is defined by the package entrypoint in `pyproject.toml`.
 Common commands include:
 
 - `btwin init`
+- `btwin handoff --record-id ...`
+- `btwin handoff list`
+- `btwin handoff show`
 - `btwin serve-api`
 - `btwin mcp-proxy`
 - `btwin service install`
@@ -91,6 +94,9 @@ Install them with:
 ```bash
 btwin install-skills --platform codex
 ```
+
+After pulling repo changes, refresh the installed `btwin` executable first if the
+update touched CLI/runtime packaging, then re-run `btwin install-skills`.
 
 The package also bundles runtime docs and global protocol assets so the CLI can
 sync them into the active B-TWIN data directory when needed.

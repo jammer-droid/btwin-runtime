@@ -27,7 +27,7 @@ from rich.markdown import Markdown
 
 from btwin_core.agent_store import AgentStore
 from btwin_core.config import BTwinConfig, load_config, resolve_config_path
-from btwin_core.handoff_archive import write_handoff_record
+from btwin_core.handoff_archive import get_handoff_record, list_handoff_records, write_handoff_record
 from btwin_core.locale_settings import LocaleSettingsStore
 from btwin_core.protocol_flow import describe_next
 from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolStore
@@ -60,6 +60,11 @@ protocol_app = typer.Typer(help="Manage B-TWIN protocol definitions.")
 thread_app = typer.Typer(help="Manage B-TWIN protocol threads.")
 contribution_app = typer.Typer(help="Manage B-TWIN protocol contributions.")
 service_app = typer.Typer(help="Manage the macOS launchd service for B-TWIN API.")
+handoff_app = typer.Typer(
+    help="Write or inspect project handoff snapshots and archive.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
 app.add_typer(sources_app, name="sources")
 app.add_typer(promotion_app, name="promotion")
 app.add_typer(indexer_app, name="indexer")
@@ -69,6 +74,7 @@ app.add_typer(protocol_app, name="protocol")
 app.add_typer(thread_app, name="thread")
 app.add_typer(contribution_app, name="contribution")
 app.add_typer(service_app, name="service")
+app.add_typer(handoff_app, name="handoff")
 
 console = Console(soft_wrap=True)
 logger = logging.getLogger(__name__)
@@ -766,8 +772,12 @@ def _service_target() -> str:
     return f"{_service_domain()}/{_SERVICE_LABEL}"
 
 
+def _service_data_dir() -> Path:
+    return Path.home() / ".btwin"
+
+
 def _service_plist_path() -> Path:
-    return _btwin_data_dir() / f"{_SERVICE_LABEL}.plist"
+    return _service_data_dir() / f"{_SERVICE_LABEL}.plist"
 
 
 def _service_link_path() -> Path:
@@ -775,7 +785,7 @@ def _service_link_path() -> Path:
 
 
 def _service_logs_dir() -> Path:
-    return _btwin_data_dir() / "logs"
+    return _service_data_dir() / "logs"
 
 
 def _resolve_btwin_executable() -> Path:
@@ -1750,11 +1760,12 @@ def record(
     console.print(f"[green]Recorded: {result['path']}[/green]")
 
 
-@app.command()
+@handoff_app.callback()
 def handoff(
-    record_id: str = typer.Option(..., "--record-id", help="Btwin record id for the handoff"),
-    summary: str = typer.Option(..., "--summary", help="One-line handoff summary"),
-    dispatch: str = typer.Option(..., "--dispatch", help="Copy-paste dispatch sentence for the next worker"),
+    ctx: typer.Context,
+    record_id: str | None = typer.Option(None, "--record-id", help="Btwin record id for the handoff"),
+    summary: str | None = typer.Option(None, "--summary", help="One-line handoff summary"),
+    dispatch: str | None = typer.Option(None, "--dispatch", help="Copy-paste dispatch sentence for the next worker"),
     branch: str | None = typer.Option(None, "--branch", help="Branch name for starter context"),
     commit: str | None = typer.Option(None, "--commit", help="Relevant commit SHA"),
     tag: list[str] = typer.Option([], "--tag", help="Optional archive tag (repeatable)"),
@@ -1767,6 +1778,27 @@ def handoff(
     starter_context: str | None = typer.Option(None, "--starter-context", help="Starter context section"),
 ):
     """Write the latest project-local handoff snapshot and append a global archive row."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    missing = [
+        option
+        for option, value in (
+            ("--record-id", record_id),
+            ("--summary", summary),
+            ("--dispatch", dispatch),
+        )
+        if not value
+    ]
+    if missing:
+        console.print(
+            "[red]Missing required handoff write options.[/red]\n"
+            f"- Required: {', '.join(missing)}\n"
+            "Use [bold]btwin handoff --help[/bold] for write usage or "
+            "[bold]btwin handoff list[/bold] to inspect history."
+        )
+        raise typer.Exit(2)
+
     result = write_handoff_record(
         _project_root(),
         record_id=record_id,
@@ -1785,6 +1817,30 @@ def handoff(
     )
     console.print(f"[green]Updated local handoff snapshot[/green] -> {result.snapshot_path}")
     console.print(f"[dim]Global archive appended[/dim] -> {result.archive_path}")
+
+
+@handoff_app.command("list")
+def handoff_list(
+    limit: int = typer.Option(10, "--limit", min=1, help="Maximum number of recent handoffs to show"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+):
+    """List recent handoffs for the current project from the global archive."""
+    payload = list_handoff_records(_project_root(), limit=limit)
+    _emit_payload(payload, as_json=as_json)
+
+
+@handoff_app.command("show")
+def handoff_show(
+    record_id: str | None = typer.Argument(None, help="Btwin record id to show; defaults to the latest handoff"),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON output"),
+):
+    """Show one archived handoff for the current project."""
+    payload = get_handoff_record(_project_root(), record_id=record_id)
+    if payload is None:
+        target = record_id or "latest"
+        console.print(f"[red]Handoff not found[/red]: {target}")
+        raise typer.Exit(4)
+    _emit_payload(payload, as_json=as_json)
 
 
 @app.command()

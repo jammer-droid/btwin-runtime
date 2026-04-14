@@ -199,6 +199,57 @@ def append_archive_row(project_root: Path, row: dict[str, Any], *, git_remote: s
     return archive_path
 
 
+def get_handoff_archive_path(project_root: Path, *, git_remote: str | None = None) -> Path:
+    return _global_archive_path(project_root, git_remote=git_remote)
+
+
+def read_handoff_archive_rows(project_root: Path, *, git_remote: str | None = None) -> list[dict[str, Any]]:
+    archive_path = get_handoff_archive_path(project_root, git_remote=git_remote)
+    if not archive_path.exists():
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for line in archive_path.read_text(encoding="utf-8").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def list_handoff_records(
+    project_root: Path,
+    *,
+    limit: int | None = None,
+    git_remote: str | None = None,
+) -> list[dict[str, Any]]:
+    rows = list(reversed(read_handoff_archive_rows(project_root, git_remote=git_remote)))
+    if limit is None:
+        return rows
+    return rows[: max(limit, 0)]
+
+
+def get_handoff_record(
+    project_root: Path,
+    *,
+    record_id: str | None = None,
+    git_remote: str | None = None,
+) -> dict[str, Any] | None:
+    rows = list_handoff_records(project_root, git_remote=git_remote)
+    if record_id is None:
+        return rows[0] if rows else None
+
+    for row in rows:
+        if row.get("record_id") == record_id:
+            return row
+    return None
+
+
 def _global_archive_path(project_root: Path, *, git_remote: str | None = None) -> Path:
     return _handoff_archive_root() / _project_key(project_root, git_remote=git_remote) / "handoffs.jsonl"
 
