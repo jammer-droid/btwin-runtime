@@ -65,6 +65,12 @@ class LaunchResolution:
     metadata: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass
+class TurnTypingState:
+    started: bool = False
+    done_published: bool = False
+
+
 
 
 class AgentRunner:
@@ -189,6 +195,28 @@ class AgentRunner:
             metadata=metadata,
         ))
 
+    def _emit_agent_typing(
+        self,
+        thread_id: str,
+        agent_name: str,
+        delta: str,
+    ) -> None:
+        self._event_bus.publish(SSEEvent(
+            type="agent_typing",
+            resource_id=thread_id,
+            metadata={
+                "agent_name": agent_name,
+                "delta": delta,
+            },
+        ))
+
+    def _emit_agent_typing_done(self, thread_id: str, agent_name: str) -> None:
+        self._event_bus.publish(SSEEvent(
+            type="agent_typing_done",
+            resource_id=thread_id,
+            metadata={"agent_name": agent_name},
+        ))
+
     def _log_runtime_event(
         self,
         event_type: str,
@@ -223,6 +251,8 @@ class AgentRunner:
         agent_name: str,
         *,
         launch_env: dict[str, str] | None = None,
+        typing_state: TurnTypingState | None = None,
+        defer_typing_done: bool = False,
     ) -> InvocationResult:
         """Execute CLI subprocess with streaming output parsing."""
         env = {**os.environ, **(launch_env or provider.env_overrides())}
@@ -260,6 +290,8 @@ class AgentRunner:
         observed_text_deltas: list[str] = []
         all_output_lines: list[str] = []
         seen_text_delta = False
+        typing_started = False
+        typing_done_published = False
 
         try:
             async with asyncio.timeout(INVOKE_TIMEOUT):
@@ -281,21 +313,70 @@ class AgentRunner:
                                 self._emit_session_state(thread_id, agent_name, "working")
                                 self._emit_session_state(thread_id, agent_name, "responding")
                                 seen_text_delta = True
+                                typing_started = True
+                                if typing_state is not None:
+                                    typing_state.started = True
                             if normalized.content:
                                 observed_text_deltas.append(normalized.content)
-                                self._event_bus.publish(SSEEvent(
-                                    type="agent_typing",
-                                    resource_id=thread_id,
-                                    metadata={
-                                        "agent_name": agent_name,
-                                        "delta": normalized.content,
-                                    },
-                                ))
+                                self._emit_agent_typing(thread_id, agent_name, normalized.content)
                             continue
                         if normalized.kind == "turn_complete" and normalized.content:
                             final_text = normalized.content
 
                 await proc.wait()
+
+            stderr_bytes = await proc.stderr.read() if proc.stderr else b""
+            stderr_text = stderr_bytes.decode(errors="replace")
+
+            # Fallback: if no final_text from stream events, try full output parse
+            if not final_text:
+                if observed_text_deltas:
+                    final_text = "".join(observed_text_deltas)
+                else:
+                    full_output = "\n".join(all_output_lines)
+                    final_text = provider.parse_final_response(full_output)
+
+            if not captured_session_id:
+                full_output = "\n".join(all_output_lines)
+                captured_session_id = provider.parse_session_id_from_output(full_output)
+
+            if proc.pid:
+                self._active_pids.pop(proc.pid, None)
+
+            if proc.returncode != 0:
+                self._emit_session_state(
+                    thread_id,
+                    agent_name,
+                    "failed",
+                    exit_code=proc.returncode,
+                )
+                return InvocationResult(
+                    ok=False,
+                    response_text=final_text,
+                    exit_code=proc.returncode,
+                    stderr_summary=stderr_text[:500],
+                    session_resumed=bool("--resume" in cmd or "resume" in cmd),
+                    session_id_captured=captured_session_id,
+                )
+
+            self._emit_session_state(thread_id, agent_name, "done")
+            if not defer_typing_done:
+                if typing_state is None:
+                    self._emit_agent_typing_done(thread_id, agent_name)
+                    typing_done_published = True
+                elif not typing_state.done_published:
+                    self._emit_agent_typing_done(thread_id, agent_name)
+                    typing_state.done_published = True
+                    typing_done_published = True
+
+            return InvocationResult(
+                ok=(proc.returncode == 0),
+                response_text=final_text,
+                exit_code=proc.returncode,
+                stderr_summary=stderr_text[:500],
+                session_resumed=bool("--resume" in cmd or "resume" in cmd),
+                session_id_captured=captured_session_id,
+            )
         except TimeoutError:
             proc.kill()
             await proc.wait()
@@ -303,56 +384,13 @@ class AgentRunner:
                 self._active_pids.pop(proc.pid, None)
             self._emit_session_state(thread_id, agent_name, "failed", reason="timeout")
             return InvocationResult(ok=False, timed_out=True)
-
-        stderr_bytes = await proc.stderr.read() if proc.stderr else b""
-        stderr_text = stderr_bytes.decode(errors="replace")
-
-        # Fallback: if no final_text from stream events, try full output parse
-        if not final_text:
-            if observed_text_deltas:
-                final_text = "".join(observed_text_deltas)
-            else:
-                full_output = "\n".join(all_output_lines)
-                final_text = provider.parse_final_response(full_output)
-
-        if not captured_session_id:
-            full_output = "\n".join(all_output_lines)
-            captured_session_id = provider.parse_session_id_from_output(full_output)
-
-        if proc.pid:
-            self._active_pids.pop(proc.pid, None)
-
-        if proc.returncode != 0:
-            self._emit_session_state(
-                thread_id,
-                agent_name,
-                "failed",
-                exit_code=proc.returncode,
-            )
-            return InvocationResult(
-                ok=False,
-                response_text=final_text,
-                exit_code=proc.returncode,
-                stderr_summary=stderr_text[:500],
-                session_resumed=bool("--resume" in cmd or "resume" in cmd),
-                session_id_captured=captured_session_id,
-            )
-
-        self._emit_session_state(thread_id, agent_name, "done")
-        self._event_bus.publish(SSEEvent(
-            type="agent_typing_done",
-            resource_id=thread_id,
-            metadata={"agent_name": agent_name},
-        ))
-
-        return InvocationResult(
-            ok=(proc.returncode == 0),
-            response_text=final_text,
-            exit_code=proc.returncode,
-            stderr_summary=stderr_text[:500],
-            session_resumed=bool("--resume" in cmd or "resume" in cmd),
-            session_id_captured=captured_session_id,
-        )
+        finally:
+            if typing_started and not typing_done_published and not defer_typing_done:
+                if typing_state is None:
+                    self._emit_agent_typing_done(thread_id, agent_name)
+                elif not typing_state.done_published:
+                    self._emit_agent_typing_done(thread_id, agent_name)
+                    typing_state.done_published = True
 
     async def invoke(self, thread_id: str, agent_name: str, prompt: str) -> InvocationResult:
         session = self._get_or_create_session(thread_id, agent_name)
@@ -360,6 +398,7 @@ class AgentRunner:
             return InvocationResult(ok=False)
 
         final_result = InvocationResult(ok=False)
+        typing_state = TurnTypingState()
 
         async def _deliver(runtime_session: AgentSession, runtime_prompt: str) -> SessionDeliveryResult:
             nonlocal final_result
@@ -377,6 +416,8 @@ class AgentRunner:
                     launch,
                     thread_id=thread_id,
                     agent_name=agent_name,
+                    typing_state=typing_state,
+                    defer_typing_done=True,
                 )
                 final_result = result
                 if result.ok:
@@ -469,6 +510,8 @@ class AgentRunner:
                 thread_id,
                 agent_name,
                 launch_env=launch.env,
+                typing_state=typing_state,
+                defer_typing_done=True,
             )
             final_result = result
 
@@ -519,6 +562,8 @@ class AgentRunner:
                     thread_id,
                     agent_name,
                     launch_env=launch.env,
+                    typing_state=typing_state,
+                    defer_typing_done=True,
                 )
                 final_result = result
                 if result.ok and result.session_id_captured:
@@ -569,6 +614,9 @@ class AgentRunner:
             prompt,
             deliver=_deliver,
         )
+        if typing_state.started and not typing_state.done_published:
+            self._emit_agent_typing_done(thread_id, agent_name)
+            typing_state.done_published = True
         session = self._session_supervisor.get_session(thread_id, agent_name)
         final_result.ok = delivery.ok
         final_result.response_text = delivery.response_text
@@ -877,6 +925,8 @@ class AgentRunner:
         *,
         thread_id: str,
         agent_name: str,
+        typing_state: TurnTypingState | None = None,
+        defer_typing_done: bool = False,
     ) -> InvocationResult:
         key = (thread_id, agent_name)
         launch_context = self._build_transport_launch_context(session, launch)
@@ -981,6 +1031,8 @@ class AgentRunner:
             final_text = ""
             captured_session_id = session.provider_session_id
             seen_text_delta = False
+            typing_started = False
+            typing_done_published = False
             turn_complete_seen = False
             active_turn_id: str | None = None
             event_iterator = adapter.read_events().__aiter__()
@@ -1033,16 +1085,12 @@ class AgentRunner:
                             )
                             self._emit_session_state(thread_id, agent_name, "responding")
                             seen_text_delta = True
+                            typing_started = True
+                            if typing_state is not None:
+                                typing_state.started = True
                         if normalized.content:
                             observed_text_deltas.append(normalized.content)
-                            self._event_bus.publish(SSEEvent(
-                                type="agent_typing",
-                                resource_id=thread_id,
-                                metadata={
-                                    "agent_name": agent_name,
-                                    "delta": normalized.content,
-                                },
-                            ))
+                            self._emit_agent_typing(thread_id, agent_name, normalized.content)
                         continue
                     if normalized.kind == "turn_complete":
                         if session.provider == "codex":
@@ -1069,11 +1117,14 @@ class AgentRunner:
 
             session.last_transport_error = None
             self._emit_session_state(thread_id, agent_name, "done")
-            self._event_bus.publish(SSEEvent(
-                type="agent_typing_done",
-                resource_id=thread_id,
-                metadata={"agent_name": agent_name},
-            ))
+            if not defer_typing_done:
+                if typing_state is None:
+                    self._emit_agent_typing_done(thread_id, agent_name)
+                    typing_done_published = True
+                elif not typing_state.done_published:
+                    self._emit_agent_typing_done(thread_id, agent_name)
+                    typing_state.done_published = True
+                    typing_done_published = True
             return InvocationResult(
                 ok=True,
                 response_text=final_text,
@@ -1092,6 +1143,13 @@ class AgentRunner:
                 stderr_summary=str(exc),
                 session_id_captured=session.provider_session_id,
             )
+        finally:
+            if typing_started and not typing_done_published and not defer_typing_done:
+                if typing_state is None:
+                    self._emit_agent_typing_done(thread_id, agent_name)
+                elif not typing_state.done_published:
+                    self._emit_agent_typing_done(thread_id, agent_name)
+                    typing_state.done_published = True
 
     def _close_live_transport_adapter(self, key: tuple[str, str]) -> None:
         adapter = self._detach_live_transport_adapter(key)
