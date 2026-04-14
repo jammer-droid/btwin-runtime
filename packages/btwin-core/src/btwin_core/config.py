@@ -25,6 +25,14 @@ def resolve_data_dir() -> Path:
     return Path.home() / ".btwin"
 
 
+def resolve_config_path() -> Path:
+    """Resolve config path with precedence: env var > global default."""
+    env_path = os.environ.get("BTWIN_CONFIG_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
+    return Path.home() / ".btwin" / "config.yaml"
+
+
 class LLMConfig(BaseModel):
     provider: str = "anthropic"
     model: str = "claude-haiku-4-5-20251001"

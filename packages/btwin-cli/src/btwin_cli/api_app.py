@@ -34,7 +34,7 @@ from btwin_cli.api_terminals import create_terminal_router
 from btwin_cli.api_threads import create_threads_router
 from btwin_core.agent_store import AgentStore as _AgentStore
 from btwin_core.btwin import BTwin
-from btwin_core.config import BTwinConfig, load_config
+from btwin_core.config import BTwinConfig, load_config, resolve_config_path
 from btwin_core.event_bus import EventBus
 from btwin_core.indexer import CoreIndexer
 from btwin_core.promotion_store import PromotionStore
@@ -321,7 +321,7 @@ def _resolve_runtime_openclaw_path(config: BTwinConfig) -> str | None:
 
 def create_default_app() -> FastAPI:
     """Create API app from default B-TWIN/OpenClaw runtime config."""
-    config_path = Path.home() / ".btwin" / "config.yaml"
+    config_path = resolve_config_path()
     if config_path.exists():
         config = load_config(config_path)
     else:

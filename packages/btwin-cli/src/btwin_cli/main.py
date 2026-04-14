@@ -26,7 +26,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from btwin_core.agent_store import AgentStore
-from btwin_core.config import BTwinConfig, load_config
+from btwin_core.config import BTwinConfig, load_config, resolve_config_path
 from btwin_core.handoff_archive import write_handoff_record
 from btwin_core.locale_settings import LocaleSettingsStore
 from btwin_core.protocol_store import Protocol, ProtocolStore
@@ -215,11 +215,11 @@ def _record_thread_result_entry(
 
 
 def _config_path() -> Path:
-    return Path.home() / ".btwin" / "config.yaml"
+    return resolve_config_path()
 
 
 def _btwin_data_dir() -> Path:
-    return Path.home() / ".btwin"
+    return _get_active_data_dir()
 
 
 def _get_config() -> BTwinConfig:
