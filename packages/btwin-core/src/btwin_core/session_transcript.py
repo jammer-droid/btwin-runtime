@@ -59,6 +59,8 @@ def _normalize_runtime_event(
 
     if kind in _SESSION_STARTED_KINDS:
         session_id = _event_session_id(event) or content
+        if not session_id:
+            return []
         return [NormalizedRuntimeEvent(kind="session_started", content=session_id, metadata=metadata)]
 
     if kind in _TEXT_DELTA_KINDS:
@@ -67,6 +69,8 @@ def _normalize_runtime_event(
         return [NormalizedRuntimeEvent(kind="text_delta", content=content, metadata=metadata)]
 
     if kind in _TURN_COMPLETE_KINDS:
+        if not content:
+            content = _event_turn_id(event)
         return [NormalizedRuntimeEvent(kind="turn_complete", content=content, metadata=metadata)]
 
     return []
@@ -88,7 +92,7 @@ def _event_kind(event: Any) -> str:
 
 def _event_content(event: Any) -> str | None:
     if isinstance(event, Mapping):
-        for key in ("content", "final_text", "text_delta"):
+        for key in ("content", "final_text", "text_delta", "delta", "result"):
             value = event.get(key)
             if isinstance(value, str) and value:
                 return value
@@ -120,13 +124,53 @@ def _event_content(event: Any) -> str | None:
 
 def _event_session_id(event: Any) -> str | None:
     if isinstance(event, Mapping):
-        value = event.get("session_id")
-        if isinstance(value, str) and value:
-            return value
+        for key in ("session_id", "session"):
+            value = event.get(key)
+            if isinstance(value, str) and value:
+                return value
+            if isinstance(value, Mapping):
+                nested = value.get("id")
+                if isinstance(nested, str) and nested:
+                    return nested
+        for key in ("thread",):
+            value = event.get(key)
+            if isinstance(value, Mapping):
+                nested = value.get("id")
+                if isinstance(nested, str) and nested:
+                    return nested
         return None
     value = getattr(event, "session_id", None)
     if isinstance(value, str) and value:
         return value
+    value = getattr(event, "session", None)
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, Mapping):
+        nested = value.get("id")
+        if isinstance(nested, str) and nested:
+            return nested
+    for attr in ("thread",):
+        value = getattr(event, attr, None)
+        if isinstance(value, Mapping):
+            nested = value.get("id")
+            if isinstance(nested, str) and nested:
+                return nested
+    return None
+
+
+def _event_turn_id(event: Any) -> str | None:
+    if isinstance(event, Mapping):
+        turn = event.get("turn")
+        if isinstance(turn, Mapping):
+            value = turn.get("id")
+            if isinstance(value, str) and value:
+                return value
+        return None
+    value = getattr(event, "turn", None)
+    if isinstance(value, Mapping):
+        nested = value.get("id")
+        if isinstance(nested, str) and nested:
+            return nested
     return None
 
 
