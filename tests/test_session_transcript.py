@@ -146,3 +146,34 @@ def test_normalize_runtime_events_filters_startup_hook_and_tool_noise() -> None:
         ("text_delta", "Hello "),
         ("text_delta", "world"),
     ]
+
+
+def test_normalize_runtime_events_filters_hook_and_status_noise_even_when_wrapped_like_transcript_events() -> None:
+    normalized = normalize_runtime_events(
+        [
+            {
+                "event_type": "assistant",
+                "message": {"content": [{"type": "text", "text": "booting"}]},
+                "metadata": {"source": "hook", "phase": "startup"},
+            },
+            {
+                "event_type": "result",
+                "result": "ready",
+                "metadata": {"source": "status_notification"},
+            },
+            {
+                "event_type": "assistant",
+                "message": {"content": [{"type": "text", "text": "Hello"}]},
+            },
+            {
+                "event_type": "result",
+                "result": "done",
+            },
+        ],
+        provider_name="claude-code",
+    )
+
+    assert [(event.kind, event.content) for event in normalized] == [
+        ("text_delta", "Hello"),
+        ("turn_complete", "done"),
+    ]

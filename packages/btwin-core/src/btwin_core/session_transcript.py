@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from collections.abc import Mapping
+import re
 from typing import Any, Iterable
 
 
@@ -29,6 +30,13 @@ _TURN_COMPLETE_KINDS = {
     "done",
     "final",
     "result",
+}
+_NOISE_MARKERS = {
+    "hook",
+    "notification",
+    "status",
+    "status_notification",
+    "tool_use",
 }
 
 
@@ -57,6 +65,10 @@ def _normalize_runtime_event(
     if provider_name and "provider" not in metadata:
         metadata["provider"] = provider_name
     content = _event_content(event)
+
+    if kind in _TEXT_DELTA_KINDS or kind in _TURN_COMPLETE_KINDS:
+        if _event_has_noise_marker(event):
+            return []
 
     if kind in _SESSION_STARTED_KINDS:
         session_id = _event_session_id(event)
@@ -197,3 +209,43 @@ def _event_metadata(event: Any) -> dict[str, Any]:
                 metadata[key] = item
         return metadata or {"raw": value}
     return {}
+
+
+def _event_has_noise_marker(event: Any) -> bool:
+    for value in _event_noise_values(event):
+        if _is_noise_marker(value):
+            return True
+    return False
+
+
+def _event_noise_values(event: Any) -> Iterable[Any]:
+    if isinstance(event, Mapping):
+        for key in ("kind", "event_type", "type", "method"):
+            yield event.get(key)
+        metadata = event.get("metadata")
+        if isinstance(metadata, Mapping):
+            for key in ("source", "phase", "name"):
+                yield metadata.get(key)
+        for key in ("raw", "message", "item"):
+            nested = event.get(key)
+            if nested is not None:
+                yield from _event_noise_values(nested)
+        return
+
+    for attr in ("kind", "event_type", "type", "method"):
+        yield getattr(event, attr, None)
+    metadata = getattr(event, "metadata", None)
+    if isinstance(metadata, Mapping):
+        for key in ("source", "phase", "name"):
+            yield metadata.get(key)
+    for attr in ("raw", "message", "item"):
+        nested = getattr(event, attr, None)
+        if nested is not None:
+            yield from _event_noise_values(nested)
+
+
+def _is_noise_marker(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    tokens = [token for token in re.split(r"[^a-z0-9]+", value.lower()) if token]
+    return any(token in _NOISE_MARKERS for token in tokens)
