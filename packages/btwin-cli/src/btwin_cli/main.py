@@ -804,6 +804,56 @@ def _format_live_message(
     return f"{sender}: {clean_content}"
 
 
+class _LiveStatusDisplay:
+    """Render one transient interactive status line above the chat log."""
+
+    _ACTIVE_STATES = {"queued", "received", "thinking", "working", "responding"}
+
+    def __init__(self, *, console: object | None = None, enabled: bool = False):
+        self.console = console if console is not None else globals()["console"]
+        self.enabled = enabled
+        self._lock = threading.Lock()
+        self._visible = False
+
+    def _write_control(self, value: str) -> bool:
+        stream = getattr(self.console, "file", None)
+        if stream is None or not hasattr(stream, "write"):
+            return False
+        stream.write(value)
+        flush = getattr(stream, "flush", None)
+        if callable(flush):
+            flush()
+        return True
+
+    def show_agent_state(self, agent_name: str, state: str) -> bool:
+        if not self.enabled or state not in self._ACTIVE_STATES:
+            return False
+        with self._lock:
+            if not self._write_control(f"\r\x1b[2K{agent_name} is {state}..."):
+                self.console.print(f"\r\x1b[2K{agent_name} is {state}...", end="")
+            self._visible = True
+        return True
+
+    def clear(self) -> bool:
+        if not self.enabled:
+            return False
+        with self._lock:
+            if not self._visible:
+                return False
+            if not self._write_control("\r\x1b[2K"):
+                self.console.print("\r\x1b[2K", end="")
+            self._visible = False
+        return True
+
+    def print(self, value: object = "", *args, **kwargs) -> None:
+        with self._lock:
+            if self.enabled and self._visible:
+                if not self._write_control("\r\x1b[2K"):
+                    self.console.print("\r\x1b[2K", end="")
+                self._visible = False
+            self.console.print(value, *args, **kwargs)
+
+
 def _format_live_thread_entry(entry: dict[str, object]) -> str:
     participants = ", ".join(str(name) for name in entry.get("participants", []))
     attached_agents = entry.get("attached_agents", [])
@@ -1104,12 +1154,16 @@ def _render_live_event(
     *,
     actor: str,
     seen_message_ids: set[str],
+    status_display: _LiveStatusDisplay | None = None,
 ) -> int:
     event_type = event.get("type")
     if event_type == "listener_error":
         error = event.get("error")
         if isinstance(error, str) and error:
-            console.print(f"[yellow]live event stream ended:[/yellow] {error}")
+            if status_display is not None:
+                status_display.print(f"[yellow]live event stream ended:[/yellow] {error}")
+            else:
+                console.print(f"[yellow]live event stream ended:[/yellow] {error}")
         return 1
     if event_type == "agent_session_state":
         agent_name = event.get("agent_name")
@@ -1124,6 +1178,14 @@ def _render_live_event(
             "failed",
             "fallback",
         }:
+            if status_display is not None:
+                if status_display.show_agent_state(agent_name, state):
+                    return 1
+                if state == "done":
+                    status_display.clear()
+                    return 1
+                status_display.print(f"{agent_name} is {state}")
+                return 1
             console.print(f"{agent_name} is {state}")
             return 1
         return 0
@@ -1138,7 +1200,11 @@ def _render_live_event(
         if not isinstance(content, str) or not content.strip():
             return 0
         targets = event.get("target_agents") if isinstance(event.get("target_agents"), list) else []
-        console.print(_format_live_message(sender, content, actor=actor, targets=targets))
+        formatted = _format_live_message(sender, content, actor=actor, targets=targets)
+        if status_display is not None:
+            status_display.print(formatted)
+        else:
+            console.print(formatted)
         if isinstance(message_id, str) and message_id:
             seen_message_ids.add(message_id)
         return 1
@@ -1151,19 +1217,30 @@ def _render_live_events(
     actor: str,
     seen_message_ids: set[str],
     wait_seconds: float = 0.0,
+    status_display: _LiveStatusDisplay | None = None,
 ) -> int:
     rendered = 0
 
     if wait_seconds > 0:
         try:
             first = events.get(timeout=wait_seconds)
-            rendered += _render_live_event(first, actor=actor, seen_message_ids=seen_message_ids)
+            rendered += _render_live_event(
+                first,
+                actor=actor,
+                seen_message_ids=seen_message_ids,
+                status_display=status_display,
+            )
         except queue_module.Empty:
             return 0
 
     while True:
         try:
-            rendered += _render_live_event(events.get_nowait(), actor=actor, seen_message_ids=seen_message_ids)
+            rendered += _render_live_event(
+                events.get_nowait(),
+                actor=actor,
+                seen_message_ids=seen_message_ids,
+                status_display=status_display,
+            )
         except queue_module.Empty:
             break
     return rendered
@@ -1174,6 +1251,7 @@ def _start_live_event_printer(
     *,
     actor: str,
     seen_message_ids: set[str],
+    status_display: _LiveStatusDisplay | None = None,
 ) -> tuple[threading.Event, threading.Thread]:
     stop_event = threading.Event()
 
@@ -1183,7 +1261,12 @@ def _start_live_event_printer(
                 event = events.get(timeout=0.2)
             except queue_module.Empty:
                 continue
-            _render_live_event(event, actor=actor, seen_message_ids=seen_message_ids)
+            _render_live_event(
+                event,
+                actor=actor,
+                seen_message_ids=seen_message_ids,
+                status_display=status_display,
+            )
 
     thread = threading.Thread(
         target=worker,
@@ -1893,6 +1976,7 @@ def live_enter(
     seen_message_ids: set[str] = set()
     stdin = typer.get_text_stream("stdin")
     interactive_stdin = bool(getattr(stdin, "isatty", lambda: False)())
+    status_display = _LiveStatusDisplay(enabled=interactive_stdin)
     stop_printer: threading.Event | None = None
     printer_thread: threading.Thread | None = None
     if interactive_stdin:
@@ -1900,11 +1984,15 @@ def live_enter(
             events,
             actor=actor,
             seen_message_ids=seen_message_ids,
+            status_display=status_display,
         )
 
     try:
+        status_display.clear()
         console.print(_render_live_enter_snapshot(snapshot))
+        status_display.clear()
         _print_live_enter_help()
+        status_display.clear()
         _render_live_inbox_messages(thread_id, actor, seen_message_ids=seen_message_ids)
 
         while True:
@@ -1921,31 +2009,43 @@ def live_enter(
                 if command == "exit":
                     break
                 if command == "help":
+                    status_display.clear()
                     _print_live_enter_help()
                     continue
                 if command == "status":
                     snapshot = _load_live_enter_snapshot(thread_id, actor, config)
+                    status_display.clear()
                     console.print(_render_live_enter_snapshot(snapshot))
                     continue
                 if command == "inbox":
+                    status_display.clear()
                     if _render_live_inbox_messages(thread_id, actor, seen_message_ids=seen_message_ids) == 0:
                         console.print("[dim]No new messages.[/dim]")
                     continue
+                status_display.clear()
                 console.print(f"[yellow]Unknown command:[/yellow] /{command}")
                 continue
 
+            status_display.clear()
             console.print(_format_live_message(actor, decision.content, actor=actor, targets=decision.targets))
             message = _live_enter_send_message(thread_id, actor, decision, config)
             message_id = message.get("message_id")
             if isinstance(message_id, str) and message_id:
                 seen_message_ids.add(message_id)
             if not interactive_stdin:
-                _render_live_events(events, actor=actor, seen_message_ids=seen_message_ids, wait_seconds=8.0)
+                _render_live_events(
+                    events,
+                    actor=actor,
+                    seen_message_ids=seen_message_ids,
+                    wait_seconds=8.0,
+                    status_display=status_display,
+                )
     finally:
         if stop_printer is not None:
             stop_printer.set()
         if printer_thread is not None:
             printer_thread.join(timeout=0.5)
+        status_display.clear()
 
 
 @thread_app.command("enter")

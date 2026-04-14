@@ -19,6 +19,28 @@ def _parse_json_output(output: str):
     return json.loads(output.strip())
 
 
+class _FakeConsole:
+    def __init__(self):
+        self.calls: list[dict[str, object]] = []
+        self.stream_writes: list[str] = []
+        self.file = self
+
+    def write(self, value: str):
+        self.stream_writes.append(value)
+
+    def flush(self):
+        return None
+
+    def print(self, value="", *args, **kwargs):
+        self.calls.append(
+            {
+                "value": value,
+                "args": args,
+                "kwargs": kwargs,
+            }
+        )
+
+
 def test_live_threads_attached_renders_human_summary(monkeypatch):
     monkeypatch.setattr(main, "_get_config", lambda: _attached_config())
 
@@ -164,3 +186,42 @@ def test_live_enter_renders_human_chat_and_event_reply(monkeypatch):
     assert "alice is thinking" in result.output
     assert "alice: hello from alice" in result.output
     assert sent_messages[0]["delivery_mode"] == "direct"
+
+
+def test_render_live_event_uses_transient_status_line_for_interactive_updates(monkeypatch):
+    fake_console = _FakeConsole()
+    monkeypatch.setattr(main, "console", fake_console)
+    status_display = main._LiveStatusDisplay(console=fake_console, enabled=True)
+    seen_message_ids: set[str] = set()
+
+    rendered_state = main._render_live_event(
+        {
+            "type": "agent_session_state",
+            "resource_id": "thread-1",
+            "agent_name": "alice",
+            "state": "thinking",
+        },
+        actor="user",
+        seen_message_ids=seen_message_ids,
+        status_display=status_display,
+    )
+    rendered_message = main._render_live_event(
+        {
+            "type": "message_sent",
+            "resource_id": "thread-1",
+            "from_agent": "alice",
+            "content": "hello from alice",
+            "message_id": "msg-2",
+        },
+        actor="user",
+        seen_message_ids=seen_message_ids,
+        status_display=status_display,
+    )
+
+    assert rendered_state == 1
+    assert rendered_message == 1
+    assert fake_console.stream_writes == [
+        "\r\x1b[2Kalice is thinking...",
+        "\r\x1b[2K",
+    ]
+    assert fake_console.calls[0]["value"] == "alice: hello from alice"
