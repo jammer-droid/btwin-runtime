@@ -24,6 +24,7 @@ _TURN_COMPLETE_KINDS = {
     "turn_complete",
     "turn.completed",
     "turn/completed",
+    "item.completed",
     "complete",
     "done",
     "final",
@@ -70,7 +71,7 @@ def _normalize_runtime_event(
 
     if kind in _TURN_COMPLETE_KINDS:
         if not content:
-            content = _event_turn_id(event)
+            return []
         return [NormalizedRuntimeEvent(kind="turn_complete", content=content, metadata=metadata)]
 
     return []
@@ -155,22 +156,6 @@ def _event_session_id(event: Any) -> str | None:
             nested = value.get("id")
             if isinstance(nested, str) and nested:
                 return nested
-    return None
-
-
-def _event_turn_id(event: Any) -> str | None:
-    if isinstance(event, Mapping):
-        turn = event.get("turn")
-        if isinstance(turn, Mapping):
-            value = turn.get("id")
-            if isinstance(value, str) and value:
-                return value
-        return None
-    value = getattr(event, "turn", None)
-    if isinstance(value, Mapping):
-        nested = value.get("id")
-        if isinstance(nested, str) and nested:
-            return nested
     return None
 
 
