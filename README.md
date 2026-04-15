@@ -170,6 +170,46 @@ curl -s http://localhost:8787/api/sessions/status
 This flow is mainly for local development, smoke tests, and debugging from the
 repo clone. It does not make `btwin` globally available to your shell or MCP client.
 
+## Codex Session Safety
+
+Long-running Codex sessions can accumulate stale MCP child processes and hit
+`Too many open files (os error 24)`, especially when multiple Codex sessions,
+subagents, or failed `/fork` attempts pile up on the same machine.
+
+Recommended safety rules:
+
+1. if you see `Too many open files`, `MCP startup failed`, or repeated session
+   creation failures, stop retrying inside that session
+2. save a handoff first, then restart in a fresh Codex session
+3. keep parallel/background Codex sessions to the minimum needed
+
+This repo includes a helper script for diagnosing and cleaning up that state:
+
+```bash
+scripts/codex_session_health.sh warn
+scripts/codex_session_health.sh cleanup --pid <codex_pid> --dry-run
+scripts/codex_session_health.sh install-local
+```
+
+`warn` is read-only and prints the current soft open-files limit together with
+Codex, `btwin mcp-proxy`, and Pencil MCP process counts.
+
+`cleanup` is intentionally bounded:
+
+- `--pid <codex_pid>` targets one explicit Codex parent session and its child MCP processes
+- `--orphans` targets only MCP children whose parent is no longer a live Codex session
+
+After `install-local`, you can use personal helpers from `~/.local/bin`:
+
+```bash
+codex-safe-start
+codex-health
+codex-clean-stale --pid <codex_pid>
+```
+
+`codex-safe-start` raises the soft open-files limit for the launched Codex
+process when possible before `exec`ing `codex`.
+
 ## macOS Background Service
 
 This section is the detailed reference for the background service used in the
