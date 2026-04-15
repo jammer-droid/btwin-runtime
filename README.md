@@ -270,11 +270,22 @@ environment separate from the normal global store. The activation step is
   --port 8788
 
 source .btwin-attached-test/env.sh
-btwin serve-api --port 8788
+btwin_test_up
+btwin_test_hud
 ```
 
-After you source `env.sh`, plain `btwin` commands in that shell use the
-isolated environment:
+After you source `env.sh`, the generated test helpers stay scoped to that shell
+and use only the isolated attached environment:
+
+```bash
+btwin_test_status
+btwin_test_up
+btwin_test_hud --thread <thread_id>
+btwin_test_down
+```
+
+Plain `btwin` commands in that same sourced shell also use the isolated
+environment:
 
 ```bash
 btwin hud
@@ -290,6 +301,7 @@ This is useful for:
 The activation is shell-local only. When you use this isolated mode, remember:
 
 - `BTWIN_CONFIG_PATH` and `BTWIN_DATA_DIR` should usually point at the same local root
+- `btwin_test_up`, `btwin_test_hud`, `btwin_test_status`, and `btwin_test_down` only affect the sourced isolated env
 - many `btwin` commands will keep reading and writing that repo-local store while those paths stay active
 - shells that do not source `env.sh` continue to use the global `~/.btwin` default
 - the repo-local `.btwin/` directory is local runtime state and should be ignored by git
