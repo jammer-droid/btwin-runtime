@@ -54,6 +54,27 @@ def test_bootstrap_script_start_skip_server_creates_isolated_env(tmp_path):
     assert f'if [[ -d "{repo_venv_bin}" ]]; then' in env_text
     assert f'export PATH="{repo_venv_bin}:$PATH"' in env_text
 
+    smoke = subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            'source "$1"; command -v btwin; printf "%s\\n" "$PATH"',
+            "_",
+            str(env_file),
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        env={"HOME": os.environ["HOME"], "PATH": "/usr/bin:/bin"},
+        check=False,
+    )
+    assert smoke.returncode == 0, smoke.stderr or smoke.stdout
+    smoke_lines = [line for line in smoke.stdout.splitlines() if line.strip()]
+    assert smoke_lines[0] == str(repo_venv_bin / "btwin")
+    assert smoke_lines[1].startswith(f"{repo_venv_bin}:")
+
     assert providers_path.exists()
     assert codex_config.exists()
     codex_text = codex_config.read_text(encoding="utf-8")
