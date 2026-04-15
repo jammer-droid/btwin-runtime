@@ -301,16 +301,69 @@ may keep using the older environment until the client reconnects.
 Use the isolated bootstrap when you explicitly want a disposable test
 environment separate from the normal global store. For the primary user path,
 prefer the `btwin test-env` CLI. `btwin test-env up` prepares the repo-scoped
-test project root at `.btwin-test-env/project` and prints the exact `cd`
-command to launch Codex there:
+test root at `.btwin-test-env/`, prepares the test project root at
+`.btwin-test-env/project`, and starts or reuses only the test environment's
+owned attached `serve-api`. It prints the exact `cd` command to launch Codex
+from the test project root:
+
+### Quick Start
+
+Run these commands from this repository root:
 
 ```bash
 btwin test-env up
+btwin test-env status
+cd .btwin-test-env/project
+codex
+```
+
+The test project root is where you should run Codex, not this repository root.
+`btwin test-env up` also prepares test-local Codex assets there, including:
+
+- `.codex/config.toml`
+- `.codex/hooks.json`
+- a test-env-specific `AGENTS.md`
+
+The repository's own `AGENTS.md` is left unchanged.
+
+Quick verification after `btwin test-env up`:
+
+```bash
+btwin test-env status
+ls .btwin-test-env/project/.codex
+sed -n '1,40p' .btwin-test-env/project/AGENTS.md
+```
+
+You should see:
+
+- the isolated root at `.btwin-test-env/`
+- the test project root at `.btwin-test-env/project`
+- `API health: ok`
+- `.codex/config.toml`
+- `.codex/hooks.json`
+- a test-env-specific `AGENTS.md`
+
+When you are done testing:
+
+```bash
+cd /path/to/btwin-runtime
+btwin test-env down
+```
+
+### Optional HUD
+
+If you want to monitor the test thread from a second terminal, open the HUD
+separately:
+
+```bash
+cd /path/to/btwin-runtime
 btwin test-env hud
 ```
 
-Run Codex from that test project root, not from this repository root. The
-repo's `AGENTS.md` is left unchanged.
+`btwin test-env status` is the quickest way to confirm which isolated root,
+project root, config path, data dir, and API URL are active for the test
+environment. `btwin test-env down` stops only the test env's owned `serve-api`
+and leaves the normal global `~/.btwin` service untouched.
 
 ### Legacy Shell Helper Fallback
 
@@ -377,9 +430,16 @@ binds a thread, advances the protocol through the shared API path, clears the
 runtime binding, and finishes by checking the attached `agent inbox --json`
 surface.
 
-For workflow-constraints validation, keep a second terminal open after you
-have already sourced `env.sh` in that shell so it is pointed at the isolated
-attached environment, with either:
+For workflow-constraints validation in the preferred `btwin test-env` flow,
+keep a second terminal open with:
+
+```bash
+btwin test-env hud --thread <thread_id>
+```
+
+If you are using the legacy `env.sh` fallback instead, keep a second terminal
+open after you have already sourced `env.sh` in that shell so it is pointed at
+the isolated attached environment, with either:
 
 ```bash
 btwin hud --thread <thread_id>

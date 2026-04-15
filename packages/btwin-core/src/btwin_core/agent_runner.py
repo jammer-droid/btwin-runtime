@@ -38,6 +38,7 @@ MAX_CHAIN_DEPTH = 5
 INVOKE_TIMEOUT = 300  # 5 minutes
 PROMPT_MAX_BYTES = 24_000
 LIVE_TRANSPORT_STARTUP_TIMEOUT = 180.0
+CODEX_IDLE_COMPLETION_GRACE_SECONDS = 1.0
 SUBPROCESS_STREAM_LIMIT = 1024 * 1024
 
 
@@ -1092,6 +1093,32 @@ class AgentRunner:
         )
         return transport.mode == "live_process_transport"
 
+    def _is_codex_idle_completion_event(
+        self,
+        event: object,
+        *,
+        active_turn_id: str | None,
+    ) -> bool:
+        if active_turn_id is None:
+            return False
+        metadata = getattr(event, "metadata", None)
+        if not isinstance(metadata, dict):
+            return False
+        if metadata.get("provider") != "codex-app-server":
+            return False
+        raw = metadata.get("raw")
+        if not isinstance(raw, dict):
+            return False
+        if raw.get("method") != "thread/status/changed":
+            return False
+        params = raw.get("params")
+        if not isinstance(params, dict):
+            return False
+        status = params.get("status")
+        if not isinstance(status, dict):
+            return False
+        return status.get("type") == "idle"
+
     async def _run_live_transport(
         self,
         session: AgentSession,
@@ -1137,6 +1164,7 @@ class AgentRunner:
             idle_timeout, turn_timeout = self._live_transport_timeout_policy(session)
             turn_deadline = loop.time() + turn_timeout if turn_timeout is not None else None
             idle_deadline = loop.time() + idle_timeout if idle_timeout is not None else None
+            codex_idle_completion_deadline: float | None = None
 
             while True:
                 now = loop.time()
@@ -1146,7 +1174,17 @@ class AgentRunner:
                 if idle_deadline is not None:
                     idle_remaining = max(idle_deadline - now, 0.0)
                     timeout_seconds = idle_remaining if timeout_seconds is None else min(timeout_seconds, idle_remaining)
+                if codex_idle_completion_deadline is not None:
+                    idle_completion_remaining = max(codex_idle_completion_deadline - now, 0.0)
+                    timeout_seconds = (
+                        idle_completion_remaining
+                        if timeout_seconds is None
+                        else min(timeout_seconds, idle_completion_remaining)
+                    )
                 if timeout_seconds is not None and timeout_seconds <= 0:
+                    if codex_idle_completion_deadline is not None and now >= codex_idle_completion_deadline:
+                        turn_complete_seen = True
+                        break
                     if idle_deadline is not None and now >= idle_deadline:
                         raise TimeoutError(
                             f"live transport timed out after {idle_timeout:.2f}s of inactivity"
@@ -1160,9 +1198,14 @@ class AgentRunner:
                     else:
                         event = await asyncio.wait_for(anext(event_iterator), timeout=timeout_seconds)
                 except StopAsyncIteration:
+                    if codex_idle_completion_deadline is not None:
+                        turn_complete_seen = True
                     break
                 except asyncio.TimeoutError as exc:
                     now = loop.time()
+                    if codex_idle_completion_deadline is not None and now >= codex_idle_completion_deadline:
+                        turn_complete_seen = True
+                        break
                     if idle_deadline is not None and now >= idle_deadline:
                         raise TimeoutError(
                             f"live transport timed out after {idle_timeout:.2f}s of inactivity"
@@ -1175,6 +1218,7 @@ class AgentRunner:
                     idle_deadline = loop.time() + idle_timeout
                 if event.kind == "turn_started" and isinstance(event.content, str) and event.content:
                     active_turn_id = event.content
+                    codex_idle_completion_deadline = None
                 for normalized in normalize_runtime_events([event], provider_name=session.provider):
                     if normalized.kind == "session_started":
                         if normalized.content:
@@ -1213,6 +1257,13 @@ class AgentRunner:
                         break
                 if turn_complete_seen:
                     break
+                if self._is_codex_idle_completion_event(event, active_turn_id=active_turn_id):
+                    grace_deadline = loop.time() + CODEX_IDLE_COMPLETION_GRACE_SECONDS
+                    codex_idle_completion_deadline = (
+                        grace_deadline
+                        if turn_deadline is None
+                        else min(turn_deadline, grace_deadline)
+                    )
 
             if not turn_complete_seen:
                 raise RuntimeError("live transport ended before turn completed")

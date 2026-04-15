@@ -97,10 +97,11 @@ def test_runtime_bind_persists_binding_and_current(tmp_path, monkeypatch):
 def test_runtime_bind_attached_resolves_thread_via_shared_api(tmp_path, monkeypatch):
     project_root, agent_store, thread_store, thread = _seed_runtime_context(tmp_path)
     data_dir = tmp_path / ".btwin"
+    shared_data_dir = agent_store.data_dir
 
     monkeypatch.setattr(main, "_project_root", lambda: project_root)
     monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
-    monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
+    monkeypatch.setattr(main, "_service_data_dir", lambda: shared_data_dir)
 
     def fail_local_thread_store():
         raise AssertionError("local thread store should not be used in attached mode")
@@ -144,6 +145,10 @@ def test_runtime_bind_attached_resolves_thread_via_shared_api(tmp_path, monkeypa
     assert current_payload["bound"] is True
     assert current_payload["thread"]["thread_id"] == thread["thread_id"]
     assert current_payload["thread"]["topic"] == thread["topic"]
+    assert current_payload["agent"]["name"] == "alice"
+
+    binding_file = shared_data_dir / "runtime" / "binding.json"
+    assert binding_file.exists()
 
     assert attached_calls == [f"/api/threads/{thread['thread_id']}", f"/api/threads/{thread['thread_id']}"]
 
@@ -234,7 +239,7 @@ def test_runtime_bind_rejects_non_participant_agent_attached(tmp_path, monkeypat
 
     monkeypatch.setattr(main, "_project_root", lambda: project_root)
     monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
-    monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
+    monkeypatch.setattr(main, "_service_data_dir", lambda: agent_store.data_dir)
     monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
 
     def fake_attached_get(path: str, params: dict | None = None):
@@ -323,13 +328,14 @@ def test_runtime_current_reports_malformed_binding_error(tmp_path, monkeypatch):
 def test_runtime_current_is_best_effort_in_attached_mode(tmp_path, monkeypatch):
     project_root, agent_store, thread_store, thread = _seed_runtime_context(tmp_path)
     data_dir = tmp_path / ".btwin"
+    shared_data_dir = agent_store.data_dir
 
     monkeypatch.setattr(main, "_project_root", lambda: project_root)
     monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
-    monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
+    monkeypatch.setattr(main, "_service_data_dir", lambda: shared_data_dir)
     monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
 
-    binding_store = RuntimeBindingStore(project_root / ".btwin")
+    binding_store = RuntimeBindingStore(shared_data_dir)
     binding_store.bind(thread["thread_id"], "alice")
 
     def fail_api_get(path: str, params: dict | None = None):
@@ -342,6 +348,7 @@ def test_runtime_current_is_best_effort_in_attached_mode(tmp_path, monkeypatch):
     current_payload = _parse_json_output(current_result.output)
     assert current_payload["bound"] is True
     assert current_payload["binding"]["thread_id"] == thread["thread_id"]
+    assert current_payload["agent"]["name"] == "alice"
     assert current_payload["thread_error"]
     assert "shared api unavailable" in current_payload["thread_error"]
 

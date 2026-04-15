@@ -168,6 +168,61 @@ def test_hud_attached_thread_view_shows_runtime_diagnostics(monkeypatch, tmp_pat
     assert "runtime transport fell back" in rendered
 
 
+def test_hud_attached_uses_shared_runtime_state_for_binding_and_workflow_events(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    project_data_dir = project_root / ".btwin"
+    shared_data_dir = tmp_path / "shared-btwin"
+    project_root.mkdir()
+
+    RuntimeBindingStore(shared_data_dir).bind("thread-1", "alice")
+    WorkflowEventLog(shared_data_dir / "threads" / "thread-1" / "workflow-events.jsonl").append(
+        {
+            "timestamp": "2026-04-15T14:41:29+00:00",
+            "thread_id": "thread-1",
+            "agent": "alice",
+            "phase": "context",
+            "event_type": "phase_attempt_started",
+            "summary": "Current phase: context. Required result type: contribution.",
+            "source": "codex.hook",
+            "session_id": "shared-session",
+        }
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(project_data_dir))
+    monkeypatch.setattr(main, "_service_data_dir", lambda: shared_data_dir)
+
+    def fake_api_get(path: str, params: dict | None = None):
+        if path == "/api/threads/thread-1":
+            return {
+                "thread_id": "thread-1",
+                "topic": "Attached HUD thread",
+                "protocol": "debate",
+                "current_phase": "context",
+            }
+        if path == "/api/threads/thread-1/status":
+            return {
+                "thread_id": "thread-1",
+                "current_phase": "context",
+                "agents": [{"name": "alice", "status": "joined"}],
+            }
+        if path == "/api/agent-runtime-status":
+            return {"agents": {}}
+        if path == "/api/runtime/logs":
+            return {"events": []}
+        raise AssertionError(f"unexpected path: {path} params={params}")
+
+    monkeypatch.setattr(main, "_api_get", fake_api_get)
+
+    result = runner.invoke(app, ["hud"])
+
+    assert result.exit_code == 0, result.output
+    assert "binding=alice" in result.output
+    assert "thread-1" in result.output
+    assert "shared-session" in result.output
+    assert "Phase attempt started" in result.output
+
+
 def test_render_thread_runtime_diagnostics_shows_long_term_app_server_sessions(monkeypatch, tmp_path):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"
@@ -510,6 +565,7 @@ def test_hud_attached_mode_shows_thread_lookup_error_instead_of_exiting(tmp_path
 
     monkeypatch.setattr(main, "_project_root", lambda: project_root)
     monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+    monkeypatch.setattr(main, "_service_data_dir", lambda: project_root / ".btwin")
 
     def fake_api_get(path: str, params: dict | None = None):
         raise RuntimeError(f"404 thread missing for {path}")

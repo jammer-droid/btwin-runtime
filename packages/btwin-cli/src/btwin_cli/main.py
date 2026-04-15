@@ -183,7 +183,17 @@ def _read_codex_hook_payload() -> CodexHookPayload | None:
     return CodexHookPayload.from_text(typer.get_text_stream("stdin").read())
 
 
+def _shared_runtime_data_dir(config: BTwinConfig | None = None) -> Path:
+    current_config = config or _get_config()
+    if _use_attached_api(current_config):
+        return _service_data_dir()
+    return _project_root() / ".btwin"
+
+
 def _workflow_event_log(thread_id: str) -> WorkflowEventLog:
+    current_config = _get_config()
+    if _use_attached_api(current_config):
+        return WorkflowEventLog(_shared_runtime_data_dir(current_config) / "threads" / thread_id / "workflow-events.jsonl")
     return WorkflowEventLog(_get_thread_store().workflow_event_log_path(thread_id))
 
 
@@ -1117,7 +1127,14 @@ def _require_attached_live(config: BTwinConfig) -> None:
 
 
 def _get_runtime_binding_store() -> RuntimeBindingStore:
-    return RuntimeBindingStore(_project_root() / ".btwin")
+    return RuntimeBindingStore(_shared_runtime_data_dir())
+
+
+def _get_runtime_agent_store(config: BTwinConfig | None = None) -> AgentStore:
+    current_config = config or _get_config()
+    if _use_attached_api(current_config):
+        return AgentStore(_shared_runtime_data_dir(current_config))
+    return _get_agent_store()
 
 
 def _observe_runtime_binding_on_hook_event(
@@ -1275,7 +1292,7 @@ def _runtime_binding_payload(
     if thread_error is not None:
         payload["thread_error"] = thread_error
 
-    store = agent_store or _get_agent_store()
+    store = agent_store or _get_runtime_agent_store(current_config)
     agent = store.get_agent(state.binding.agent_name)
     if agent is not None:
         payload["agent"] = agent
@@ -4467,7 +4484,7 @@ def runtime_bind(
         console.print(f"[red]Thread not found:[/red] {thread_id}")
         raise typer.Exit(4)
 
-    agent_store = _get_agent_store()
+    agent_store = _get_runtime_agent_store(config)
     agent = agent_store.get_agent(agent_name)
     if agent is None:
         console.print(f"[red]Agent not found:[/red] {agent_name}")
