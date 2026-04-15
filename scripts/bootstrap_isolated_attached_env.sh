@@ -53,6 +53,20 @@ LOG_DIR="${ROOT_DIR}/logs"
 PID_PATH="${ROOT_DIR}/serve-api.pid"
 ENV_PATH="${ROOT_DIR}/env.sh"
 API_URL="http://127.0.0.1:${PORT}"
+BTWIN_BIN_PATH=""
+BTWIN_TEST_OWNER_ID=""
+
+resolve_btwin_bin_path() {
+  if [[ -z "$BTWIN_BIN_PATH" ]]; then
+    BTWIN_BIN_PATH="$(command -v "$BTWIN_BIN")"
+  fi
+}
+
+ensure_test_owner_id() {
+  if [[ -z "$BTWIN_TEST_OWNER_ID" ]]; then
+    BTWIN_TEST_OWNER_ID="$(date +%s%N)-$$"
+  fi
+}
 
 require_btwin() {
   if ! command -v "$BTWIN_BIN" >/dev/null 2>&1; then
@@ -68,8 +82,12 @@ export BTWIN_CONFIG_PATH="${CONFIG_PATH}"
 export BTWIN_DATA_DIR="${DATA_DIR}"
 export BTWIN_API_URL="${API_URL}"
 export BTWIN_TEST_ROOT="${ROOT_DIR}"
+export BTWIN_TEST_BTWIN_BIN="${BTWIN_BIN_PATH}"
+export BTWIN_TEST_OWNER_ID="${BTWIN_TEST_OWNER_ID}"
+export BTWIN_TEST_OWNER_FILE="${PID_PATH}.owner"
 export BTWIN_TEST_PID_PATH="${PID_PATH}"
 export BTWIN_TEST_LOG_DIR="${LOG_DIR}"
+export BTWIN_TEST_PORT="${PORT}"
 if [[ -d "${REPO_ROOT}/.venv/bin" ]]; then
   export PATH="${REPO_ROOT}/.venv/bin:\$PATH"
 fi
@@ -77,6 +95,7 @@ fi
 btwin_test_status() {
   echo "Root: \${BTWIN_TEST_ROOT}"
   echo "API: \${BTWIN_API_URL}"
+  echo "BTWIN bin: \${BTWIN_TEST_BTWIN_BIN}"
   echo "PID file: \${BTWIN_TEST_PID_PATH}"
   if [[ -f "\${BTWIN_TEST_PID_PATH}" ]]; then
     echo "PID: \$(cat "\${BTWIN_TEST_PID_PATH}")"
@@ -90,25 +109,60 @@ btwin_test_status() {
   fi
 }
 
+btwin_test_owner_matches_current() {
+  if [[ ! -f "\${BTWIN_TEST_OWNER_FILE}" ]]; then
+    return 1
+  fi
+  [[ "\$(cat "\${BTWIN_TEST_OWNER_FILE}")" == "\${BTWIN_TEST_OWNER_ID}" ]]
+}
+
+btwin_test_owned_pid() {
+  if [[ ! -f "\${BTWIN_TEST_PID_PATH}" ]]; then
+    return 1
+  fi
+  cat "\${BTWIN_TEST_PID_PATH}"
+}
+
+btwin_test_server_command_matches() {
+  local pid
+  pid="\$(btwin_test_owned_pid)" || return 1
+  [[ -n "\${pid}" ]] || return 1
+  if ! kill -0 "\${pid}" >/dev/null 2>&1; then
+    return 1
+  fi
+  local command_line
+  command_line="\$(ps -p "\${pid}" -o command= 2>/dev/null | sed 's/^ *//')"
+  [[ "\${command_line}" == *"\${BTWIN_TEST_BTWIN_BIN} serve-api --port \${BTWIN_TEST_PORT}"* ]]
+}
+
+btwin_test_server_is_owned() {
+  btwin_test_owner_matches_current && btwin_test_server_command_matches
+}
+
 btwin_test_up() {
-  if curl -fsS "\${BTWIN_API_URL}/api/sessions/status" >/dev/null 2>&1; then
+  if btwin_test_server_is_owned && curl -fsS "\${BTWIN_API_URL}/api/sessions/status" >/dev/null 2>&1; then
     echo "Isolated attached API already running."
     return 0
   fi
-  mkdir -p "\${BTWIN_TEST_LOG_DIR}"
-  if [[ -f "\${BTWIN_TEST_PID_PATH}" ]]; then
-    local pid
-    pid="\$(cat "\${BTWIN_TEST_PID_PATH}")"
-    if [[ -n "\${pid}" ]] && kill -0 "\${pid}" >/dev/null 2>&1; then
-      echo "Isolated attached API already running."
-      return 0
-    fi
+  if curl -fsS "\${BTWIN_API_URL}/api/sessions/status" >/dev/null 2>&1; then
+    echo "Isolated attached API is already in use by another process." >&2
+    return 1
   fi
-  nohup btwin serve-api --port "\${BTWIN_API_URL##*:}" \\
+  mkdir -p "\${BTWIN_TEST_LOG_DIR}"
+  if [[ -f "\${BTWIN_TEST_PID_PATH}" ]] && ! btwin_test_server_is_owned; then
+    rm -f "\${BTWIN_TEST_PID_PATH}" "\${BTWIN_TEST_OWNER_FILE}"
+  fi
+  nohup env \
+    BTWIN_TEST_OWNER_ID="\${BTWIN_TEST_OWNER_ID}" \
+    BTWIN_CONFIG_PATH="\${BTWIN_CONFIG_PATH}" \
+    BTWIN_DATA_DIR="\${BTWIN_DATA_DIR}" \
+    BTWIN_API_URL="\${BTWIN_API_URL}" \
+    "\${BTWIN_TEST_BTWIN_BIN}" serve-api --port "\${BTWIN_TEST_PORT}" \\
     </dev/null \\
     >"\${BTWIN_TEST_LOG_DIR}/serve-api.stdout.log" \\
     2>"\${BTWIN_TEST_LOG_DIR}/serve-api.stderr.log" &
   printf '%s\\n' "\$!" > "\${BTWIN_TEST_PID_PATH}"
+  printf '%s\\n' "\${BTWIN_TEST_OWNER_ID}" > "\${BTWIN_TEST_OWNER_FILE}"
   local attempt
   for attempt in \$(seq 1 40); do
     if curl -fsS "\${BTWIN_API_URL}/api/sessions/status" >/dev/null 2>&1; then
@@ -118,6 +172,7 @@ btwin_test_up() {
     sleep 0.25
   done
   echo "Timed out waiting for serve-api at \${BTWIN_API_URL}" >&2
+  rm -f "\${BTWIN_TEST_PID_PATH}" "\${BTWIN_TEST_OWNER_FILE}"
   return 1
 }
 
@@ -126,19 +181,22 @@ btwin_test_hud() {
     echo "Isolated attached API is not running. Run btwin_test_up first." >&2
     return 1
   fi
-  btwin hud "\$@"
+  "\${BTWIN_TEST_BTWIN_BIN}" hud "\$@"
 }
 
 btwin_test_down() {
-  if [[ -f "\${BTWIN_TEST_PID_PATH}" ]]; then
+  if btwin_test_server_is_owned; then
     local pid
-    pid="\$(cat "\${BTWIN_TEST_PID_PATH}")"
+    pid="\$(btwin_test_owned_pid)"
     if [[ -n "\${pid}" ]] && kill -0 "\${pid}" >/dev/null 2>&1; then
       kill "\${pid}" >/dev/null 2>&1 || true
     fi
-    rm -f "\${BTWIN_TEST_PID_PATH}"
+    rm -f "\${BTWIN_TEST_PID_PATH}" "\${BTWIN_TEST_OWNER_FILE}"
+    echo "Stopped isolated attached API."
+    return 0
   fi
-  echo "Stopped isolated attached API (if running)."
+  rm -f "\${BTWIN_TEST_PID_PATH}" "\${BTWIN_TEST_OWNER_FILE}"
+  echo "No owned isolated API to stop."
 }
 EOF
 }
@@ -147,7 +205,7 @@ run_btwin() {
   BTWIN_CONFIG_PATH="$CONFIG_PATH" \
   BTWIN_DATA_DIR="$DATA_DIR" \
   BTWIN_API_URL="$API_URL" \
-  "$BTWIN_BIN" "$@"
+  "$BTWIN_BIN_PATH" "$@"
 }
 
 wait_for_api() {
@@ -176,6 +234,8 @@ stop_server() {
 
 start_env() {
   require_btwin
+  resolve_btwin_bin_path
+  ensure_test_owner_id
   mkdir -p "$DATA_DIR" "$LOG_DIR" "$PROJECT_ROOT"
   write_env_file
 
@@ -199,7 +259,7 @@ start_env() {
     BTWIN_CONFIG_PATH="$CONFIG_PATH" \
     BTWIN_DATA_DIR="$DATA_DIR" \
     BTWIN_API_URL="$API_URL" \
-    "$BTWIN_BIN" serve-api --port "$PORT" \
+    "$BTWIN_BIN_PATH" serve-api --port "$PORT" \
     </dev/null \
     >"$LOG_DIR/serve-api.stdout.log" \
     2>"$LOG_DIR/serve-api.stderr.log" &
@@ -217,6 +277,8 @@ start_env() {
 }
 
 print_env() {
+  resolve_btwin_bin_path
+  ensure_test_owner_id
   write_env_file
   cat "$ENV_PATH"
 }
