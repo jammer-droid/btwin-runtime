@@ -67,9 +67,79 @@ write_env_file() {
 export BTWIN_CONFIG_PATH="${CONFIG_PATH}"
 export BTWIN_DATA_DIR="${DATA_DIR}"
 export BTWIN_API_URL="${API_URL}"
+export BTWIN_TEST_ROOT="${ROOT_DIR}"
+export BTWIN_TEST_PID_PATH="${PID_PATH}"
+export BTWIN_TEST_LOG_DIR="${LOG_DIR}"
 if [[ -d "${REPO_ROOT}/.venv/bin" ]]; then
   export PATH="${REPO_ROOT}/.venv/bin:\$PATH"
 fi
+
+btwin_test_status() {
+  echo "Root: \${BTWIN_TEST_ROOT}"
+  echo "API: \${BTWIN_API_URL}"
+  echo "PID file: \${BTWIN_TEST_PID_PATH}"
+  if [[ -f "\${BTWIN_TEST_PID_PATH}" ]]; then
+    echo "PID: \$(cat "\${BTWIN_TEST_PID_PATH}")"
+  else
+    echo "PID: missing"
+  fi
+  if curl -fsS "\${BTWIN_API_URL}/api/sessions/status" >/dev/null 2>&1; then
+    echo "API health: ok"
+  else
+    echo "API health: unavailable"
+  fi
+}
+
+btwin_test_up() {
+  if curl -fsS "\${BTWIN_API_URL}/api/sessions/status" >/dev/null 2>&1; then
+    echo "Isolated attached API already running."
+    return 0
+  fi
+  mkdir -p "\${BTWIN_TEST_LOG_DIR}"
+  if [[ -f "\${BTWIN_TEST_PID_PATH}" ]]; then
+    local pid
+    pid="\$(cat "\${BTWIN_TEST_PID_PATH}")"
+    if [[ -n "\${pid}" ]] && kill -0 "\${pid}" >/dev/null 2>&1; then
+      echo "Isolated attached API already running."
+      return 0
+    fi
+  fi
+  nohup btwin serve-api --port "\${BTWIN_API_URL##*:}" \\
+    </dev/null \\
+    >"\${BTWIN_TEST_LOG_DIR}/serve-api.stdout.log" \\
+    2>"\${BTWIN_TEST_LOG_DIR}/serve-api.stderr.log" &
+  printf '%s\\n' "\$!" > "\${BTWIN_TEST_PID_PATH}"
+  local attempt
+  for attempt in \$(seq 1 40); do
+    if curl -fsS "\${BTWIN_API_URL}/api/sessions/status" >/dev/null 2>&1; then
+      echo "Isolated attached API ready."
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "Timed out waiting for serve-api at \${BTWIN_API_URL}" >&2
+  return 1
+}
+
+btwin_test_hud() {
+  if ! curl -fsS "\${BTWIN_API_URL}/api/sessions/status" >/dev/null 2>&1; then
+    echo "Isolated attached API is not running. Run btwin_test_up first." >&2
+    return 1
+  fi
+  btwin hud "\$@"
+}
+
+btwin_test_down() {
+  if [[ -f "\${BTWIN_TEST_PID_PATH}" ]]; then
+    local pid
+    pid="\$(cat "\${BTWIN_TEST_PID_PATH}")"
+    if [[ -n "\${pid}" ]] && kill -0 "\${pid}" >/dev/null 2>&1; then
+      kill "\${pid}" >/dev/null 2>&1 || true
+    fi
+    rm -f "\${BTWIN_TEST_PID_PATH}"
+  fi
+  echo "Stopped isolated attached API (if running)."
+}
 EOF
 }
 
