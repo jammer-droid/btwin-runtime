@@ -2134,6 +2134,37 @@ def _project_root() -> Path:
     return Path.cwd()
 
 
+def _test_env_root() -> Path:
+    return _REPO_ROOT / ".btwin-test-env"
+
+
+def _test_env_project_root() -> Path:
+    return _test_env_root() / "project"
+
+
+def _test_env_api_url(port: int = 8792) -> str:
+    return f"http://127.0.0.1:{port}"
+
+
+def _test_env_pid_path() -> Path:
+    return _test_env_root() / "serve-api.pid"
+
+
+def _test_env_log_dir() -> Path:
+    return _test_env_root() / "logs"
+
+
+def _preferred_test_env_btwin() -> Path:
+    repo_local_btwin = _REPO_ROOT / ".venv" / "bin" / "btwin"
+    if repo_local_btwin.is_file():
+        return repo_local_btwin
+    resolved = shutil.which("btwin")
+    if resolved is None:
+        console.print("[red]Could not find `btwin` executable in PATH.[/red]")
+        raise typer.Exit(1)
+    return Path(resolved).expanduser().resolve()
+
+
 def _is_valid_cron_schedule(value: str) -> bool:
     parts = value.strip().split()
     if len(parts) != 5:
