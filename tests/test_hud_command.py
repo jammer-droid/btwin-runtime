@@ -140,9 +140,10 @@ def test_hud_attached_thread_view_shows_runtime_diagnostics(monkeypatch, tmp_pat
     rendered = main._render_hud("thread-1", limit=5)
 
     assert "Runtime" in rendered
+    assert "[yellow]alice  transport=resume_invocation_transport  surface=exec  kind=short-term[/yellow]" in rendered
     assert (
-        "[yellow]alice  transport=resume_invocation_transport  surface=exec  "
-        "kind=short-term  status=failed  fallback=yes[/yellow]"
+        "[yellow]       primary=resume_invocation_transport  status=failed  fallback=yes  "
+        "degraded=yes  recoverable=no  recovering=no  recovery_attempts=0[/yellow]"
     ) in rendered
     assert "[red]last_error: live transport timed out after 6.00s of inactivity[/red]" in rendered
     assert "[yellow]04:32:23  runtime_transport_fallback  transport=resume_invocation_transport[/yellow]" in rendered
@@ -180,7 +181,48 @@ def test_render_thread_runtime_diagnostics_shows_long_term_app_server_sessions(m
     lines = main._render_thread_runtime_diagnostics("thread-1", _attached_config(data_dir))
 
     assert lines == [
-        "[green]alice  transport=live_process_transport  surface=app-server  kind=long-term  status=done  fallback=no[/green]"
+        "[green]alice  transport=live_process_transport  surface=app-server  kind=long-term[/green]",
+        "[green]       primary=live_process_transport  status=done  fallback=no  degraded=no  recoverable=no  recovering=no  recovery_attempts=0[/green]",
+    ]
+
+
+def test_render_thread_runtime_diagnostics_shows_recovery_state(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+
+    def fake_api_get(path: str, params: dict | None = None):
+        if path == "/api/agent-runtime-status":
+            return {
+                "agents": {
+                    "alice": [
+                        {
+                            "thread_id": "thread-1",
+                            "transport_mode": "resume_invocation_transport",
+                            "primary_transport_mode": "live_process_transport",
+                            "status": "received",
+                            "fallback_transport_involved": True,
+                            "recoverable": True,
+                            "degraded": True,
+                            "recovery_attempts": 1,
+                        }
+                    ]
+                }
+            }
+        if path == "/api/runtime/logs":
+            return {"events": []}
+        raise AssertionError(f"unexpected path: {path} params={params}")
+
+    monkeypatch.setattr(main, "_api_get", fake_api_get)
+
+    lines = main._render_thread_runtime_diagnostics("thread-1", _attached_config(data_dir))
+
+    assert lines == [
+        "[yellow]alice  transport=resume_invocation_transport  surface=exec  kind=short-term[/yellow]",
+        "[yellow]       primary=live_process_transport  status=received  fallback=yes  degraded=yes  recoverable=yes  recovering=no  recovery_attempts=1[/yellow]",
     ]
 
 
@@ -346,6 +388,103 @@ def test_render_thread_watch_colors_allow_and_noop_headlines():
 
     assert "[yellow]04:04:46  BTWIN -> CODEX  UserPromptSubmit no-op[/yellow]" in rendered
     assert "[green]04:07:27  BTWIN -> CODEX  Stop allowed[/green]" in rendered
+
+
+def test_render_thread_watch_adds_app_server_hint_to_agents_summary(monkeypatch, tmp_path):
+    data_dir = tmp_path / ".btwin"
+    thread = {
+        "thread_id": "thread-1",
+        "protocol": "debate",
+        "current_phase": "context",
+    }
+    status_summary = {"agents": [{"name": "alice", "status": "contributed"}]}
+
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+    monkeypatch.setattr(
+        main,
+        "_runtime_sessions_for_thread",
+        lambda thread_id, config: [
+            (
+                "alice",
+                {
+                    "thread_id": thread_id,
+                    "transport_mode": "live_process_transport",
+                    "fallback_transport_involved": False,
+                    "recoverable": False,
+                },
+            )
+        ],
+    )
+    monkeypatch.setattr(main, "_render_thread_runtime_diagnostics", lambda thread_id, config: [])
+
+    rendered = main._render_thread_watch(thread, status_summary, [])
+
+    assert "Agents  alice=contributed (app-server)" in rendered
+
+
+def test_render_thread_watch_adds_exec_fallback_recovery_hint_to_agents_summary(monkeypatch, tmp_path):
+    data_dir = tmp_path / ".btwin"
+    thread = {
+        "thread_id": "thread-1",
+        "protocol": "debate",
+        "current_phase": "context",
+    }
+    status_summary = {"agents": [{"name": "alice", "status": "contributed"}]}
+
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+    monkeypatch.setattr(
+        main,
+        "_runtime_sessions_for_thread",
+        lambda thread_id, config: [
+            (
+                "alice",
+                {
+                    "thread_id": thread_id,
+                    "transport_mode": "resume_invocation_transport",
+                    "fallback_transport_involved": True,
+                    "recoverable": True,
+                },
+            )
+        ],
+    )
+    monkeypatch.setattr(main, "_render_thread_runtime_diagnostics", lambda thread_id, config: [])
+
+    rendered = main._render_thread_watch(thread, status_summary, [])
+
+    assert "Agents  alice=contributed (exec fallback, recoverable)" in rendered
+
+
+def test_render_thread_watch_adds_recovering_hint_to_agents_summary(monkeypatch, tmp_path):
+    data_dir = tmp_path / ".btwin"
+    thread = {
+        "thread_id": "thread-1",
+        "protocol": "debate",
+        "current_phase": "context",
+    }
+    status_summary = {"agents": [{"name": "alice", "status": "contributed"}]}
+
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+    monkeypatch.setattr(
+        main,
+        "_runtime_sessions_for_thread",
+        lambda thread_id, config: [
+            (
+                "alice",
+                {
+                    "thread_id": thread_id,
+                    "transport_mode": "resume_invocation_transport",
+                    "fallback_transport_involved": True,
+                    "recoverable": False,
+                    "recovery_pending": True,
+                },
+            )
+        ],
+    )
+    monkeypatch.setattr(main, "_render_thread_runtime_diagnostics", lambda thread_id, config: [])
+
+    rendered = main._render_thread_watch(thread, status_summary, [])
+
+    assert "Agents  alice=contributed (exec fallback, recovering)" in rendered
 
 
 def test_hud_attached_mode_shows_thread_lookup_error_instead_of_exiting(tmp_path, monkeypatch):

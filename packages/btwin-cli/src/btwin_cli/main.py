@@ -194,21 +194,32 @@ def _try_load_thread_snapshot(thread_id: str, config: BTwinConfig) -> tuple[dict
 
 
 def _render_thread_watch(thread: dict[str, object], status_summary: dict[str, object], events: list[dict[str, object]]) -> str:
+    config = _get_config()
+    thread_id = str(thread.get("thread_id", ""))
     lines = [
-        f"Thread  {thread.get('thread_id')}  {thread.get('protocol')}  phase={thread.get('current_phase')}",
+        f"Thread  {thread_id}  {thread.get('protocol')}  phase={thread.get('current_phase')}",
     ]
+    runtime_sessions = {
+        agent_name: session
+        for agent_name, session in _runtime_sessions_for_thread(thread_id, config)
+    }
     agents = status_summary.get("agents", [])
     if isinstance(agents, list) and agents:
         parts = []
         for agent in agents:
             if isinstance(agent, dict):
-                parts.append(f"{agent.get('name')}={agent.get('status')}")
+                agent_name = str(agent.get("name") or "")
+                part = f"{agent_name}={agent.get('status')}"
+                runtime_summary = _runtime_session_summary(runtime_sessions.get(agent_name))
+                if runtime_summary:
+                    part += f" ({runtime_summary})"
+                parts.append(part)
         if parts:
             lines.append(f"Agents  {', '.join(parts)}")
     topic = thread.get("topic")
     if topic:
         lines.append(f"Topic   {topic}")
-    runtime_lines = _render_thread_runtime_diagnostics(str(thread.get("thread_id", "")), _get_config())
+    runtime_lines = _render_thread_runtime_diagnostics(thread_id, config)
     if runtime_lines:
         lines.extend(["", "Runtime"])
         lines.extend(runtime_lines)
@@ -293,9 +304,11 @@ def _runtime_session_style(session: dict[str, object]) -> str | None:
 def _runtime_event_style(event_type: str) -> str | None:
     if event_type == "runtime_transport_fallback":
         return "yellow"
+    if event_type == "runtime_recovery_failed":
+        return "red"
     if event_type == "runtime_session_failed":
         return "red"
-    if event_type in {"runtime_session_started", "runtime_session_recovered"}:
+    if event_type in {"runtime_session_started", "runtime_session_recovered", "runtime_recovery_succeeded"}:
         return "green"
     return None
 
@@ -307,6 +320,50 @@ def _runtime_transport_surface_and_kind(transport_mode: object) -> tuple[str, st
     if mode == "resume_invocation_transport":
         return "exec", "short-term"
     return "unknown", "unknown"
+
+
+def _runtime_session_summary(session: dict[str, object] | None) -> str | None:
+    if not isinstance(session, dict):
+        return None
+    surface, _kind = _runtime_transport_surface_and_kind(session.get("transport_mode"))
+    fallback = bool(session.get("fallback_transport_involved"))
+    recoverable = bool(session.get("recoverable"))
+    recovery_pending = bool(session.get("recovery_pending"))
+    if surface == "app-server" and not fallback:
+        return "app-server"
+    if surface == "exec":
+        if fallback and recovery_pending:
+            return "exec fallback, recovering"
+        if fallback and recoverable:
+            return "exec fallback, recoverable"
+        if fallback:
+            return "exec fallback"
+        return "exec"
+    return None
+
+
+def _render_runtime_session_lines(agent_name: str, session: dict[str, object]) -> list[str]:
+    transport_mode = session.get("transport_mode", "-")
+    surface, kind = _runtime_transport_surface_and_kind(transport_mode)
+    primary_transport_mode = session.get("primary_transport_mode") or transport_mode
+    status = session.get("status", "-")
+    fallback = "yes" if session.get("fallback_transport_involved") else "no"
+    degraded = "yes" if session.get("degraded", bool(session.get("fallback_transport_involved"))) else "no"
+    recoverable = "yes" if session.get("recoverable", False) else "no"
+    recovering = "yes" if session.get("recovery_pending", False) else "no"
+    recovery_attempts = int(session.get("recovery_attempts") or 0)
+    style = _runtime_session_style(session)
+    return [
+        _style_hud_line(
+            f"{agent_name}  transport={transport_mode}  surface={surface}  kind={kind}",
+            style,
+        ),
+        _style_hud_line(
+            f"       primary={primary_transport_mode}  status={status}  fallback={fallback}  "
+            f"degraded={degraded}  recoverable={recoverable}  recovering={recovering}  recovery_attempts={recovery_attempts}",
+            style,
+        ),
+    ]
 
 
 def _runtime_sessions_for_thread(thread_id: str, config: BTwinConfig) -> list[tuple[str, dict[str, object]]]:
@@ -351,14 +408,7 @@ def _render_thread_runtime_diagnostics(thread_id: str, config: BTwinConfig) -> l
     lines: list[str] = []
     sessions = _runtime_sessions_for_thread(thread_id, config)
     for agent_name, session in sessions:
-        transport_mode = session.get("transport_mode", "-")
-        surface, kind = _runtime_transport_surface_and_kind(transport_mode)
-        status = session.get("status", "-")
-        fallback = "yes" if session.get("fallback_transport_involved") else "no"
-        lines.append(_style_hud_line(
-            f"{agent_name}  transport={transport_mode}  surface={surface}  kind={kind}  status={status}  fallback={fallback}",
-            _runtime_session_style(session),
-        ))
+        lines.extend(_render_runtime_session_lines(agent_name, session))
         last_error = session.get("last_transport_error")
         if isinstance(last_error, str) and last_error.strip():
             lines.append(_style_hud_line(f"last_error: {_truncate_hud_text(last_error)}", "red"))
@@ -2678,6 +2728,35 @@ def live_attach(
     console.print(f"attached {agent_name} -> {thread_id} ({mode})")
 
 
+@live_app.command("recover")
+def live_recover(
+    thread_id: str = typer.Option(..., "--thread", help="Thread id"),
+    agent_name: str = typer.Option(..., "--agent", help="Agent name"),
+    full_auto: bool = typer.Option(
+        True,
+        "--full-auto/--no-full-auto",
+        help="Allow the recovered helper agent to run without interactive approval prompts.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Recover one attached agent runtime session for a live thread."""
+    config = _get_config()
+    _require_attached_live(config)
+    payload = _attached_api_call_or_exit(
+        f"/api/threads/{thread_id}/recover-agent",
+        {
+            "agentName": agent_name,
+            "bypassPermissions": full_auto,
+            "projectRoot": str(_project_root()),
+        },
+    )
+    if as_json:
+        _emit_payload(payload, as_json=True)
+        return
+    mode = "full-auto" if full_auto else "approval-required"
+    console.print(f"recovered {agent_name} -> {thread_id} ({mode})")
+
+
 @live_app.command("close")
 def live_close(
     thread_id: str = typer.Option(..., "--thread", help="Thread id"),
@@ -3064,13 +3143,26 @@ def contribution_submit(
     as_json: bool = typer.Option(False, "--json", help="Output JSON"),
 ):
     """Persist a structured contribution for the current protocol phase."""
-    contribution = _get_thread_store().submit_contribution(
-        thread_id=thread_id,
-        agent_name=agent_name,
-        phase=phase,
-        content=_resolve_content(content),
-        tldr=tldr,
-    )
+    current_config = _get_config()
+    resolved_content = _resolve_content(content)
+    if _use_attached_api(current_config):
+        contribution = _attached_api_call_or_exit(
+            f"/api/threads/{thread_id}/contributions",
+            {
+                "agentName": agent_name,
+                "phase": phase,
+                "content": resolved_content,
+                "tldr": tldr,
+            },
+        )
+    else:
+        contribution = _get_thread_store().submit_contribution(
+            thread_id=thread_id,
+            agent_name=agent_name,
+            phase=phase,
+            content=resolved_content,
+            tldr=tldr,
+        )
     if contribution is None:
         console.print(f"[red]Thread not found or closed:[/red] {thread_id}")
         raise typer.Exit(4)

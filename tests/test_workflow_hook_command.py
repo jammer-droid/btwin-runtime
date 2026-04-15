@@ -19,6 +19,10 @@ def _standalone_config(data_dir: Path) -> BTwinConfig:
     return BTwinConfig(runtime=RuntimeConfig(mode="standalone"), data_dir=data_dir)
 
 
+def _attached_config(data_dir: Path) -> BTwinConfig:
+    return BTwinConfig(runtime=RuntimeConfig(mode="attached"), data_dir=data_dir)
+
+
 def _parse_json_output(output: str):
     return json.loads(output.strip())
 
@@ -301,3 +305,58 @@ def test_contribution_submit_records_workflow_event(tmp_path, monkeypatch):
     assert events[0]["agent"] == "alice"
     assert events[0]["phase"] == "implementation"
     assert events[0]["summary"] == "implemented"
+
+
+def test_contribution_submit_uses_attached_api_when_runtime_is_attached(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    calls: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+
+    def fake_attached_call(path: str, data: dict) -> dict:
+        calls.append((path, data))
+        return {
+            "contribution_id": "contrib-1",
+            "agent": data["agentName"],
+            "phase": data["phase"],
+            "tldr": data["tldr"],
+        }
+
+    monkeypatch.setattr(main, "_attached_api_call_or_exit", fake_attached_call)
+
+    result = runner.invoke(
+        app,
+        [
+            "contribution",
+            "submit",
+            "--thread",
+            "thread-1",
+            "--agent",
+            "alice",
+            "--phase",
+            "implementation",
+            "--content",
+            "## completed\nDone.\n",
+            "--tldr",
+            "implemented",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        (
+            "/api/threads/thread-1/contributions",
+            {
+                "agentName": "alice",
+                "phase": "implementation",
+                "content": "## completed\nDone.\n",
+                "tldr": "implemented",
+            },
+        )
+    ]
+    payload = _parse_json_output(result.output)
+    assert payload["contribution_id"] == "contrib-1"

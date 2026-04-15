@@ -37,8 +37,7 @@ logger = logging.getLogger(__name__)
 MAX_CHAIN_DEPTH = 5
 INVOKE_TIMEOUT = 300  # 5 minutes
 PROMPT_MAX_BYTES = 24_000
-LIVE_TRANSPORT_IDLE_TIMEOUT = 6.0
-LIVE_TRANSPORT_TURN_TIMEOUT = 30.0
+LIVE_TRANSPORT_STARTUP_TIMEOUT = 180.0
 SUBPROCESS_STREAM_LIMIT = 1024 * 1024
 
 
@@ -416,6 +415,7 @@ class AgentRunner:
             if launch is None:
                 logger.warning("Launch resolution failed for %s", runtime_session.provider)
                 return SessionDeliveryResult(ok=False)
+            attempted_transport_mode = self._session_transport_mode_for_invoke(runtime_session)
             self._emit_session_state(thread_id, agent_name, "received")
             runtime_prompt = self._apply_prompt_budget(thread_id, agent_name, runtime_prompt)
 
@@ -436,12 +436,13 @@ class AgentRunner:
                         runtime_session.provider_session_id = result.session_id_captured
                     runtime_session.invocation_count += 1
                     runtime_session.last_invoked_at = _now_iso()
+                    self._mark_recovery_succeeded(runtime_session)
                     return SessionDeliveryResult(
                         ok=True,
                         response_text=result.response_text,
                         provider_session_id=result.session_id_captured,
                     )
-                if runtime_session.transport_mode == "live_process_transport":
+                if attempted_transport_mode == "live_process_transport":
                     runtime_session.last_transport_error = (
                         final_result.stderr_summary
                         or final_result.response_text
@@ -456,7 +457,7 @@ class AgentRunner:
                     ):
                         fallback_transport_mode = "resume_invocation_transport"
                     if fallback_transport_mode:
-                        previous_transport_mode = runtime_session.transport_mode
+                        previous_transport_mode = attempted_transport_mode
                         if fallback_transport_mode != "live_process_transport":
                             runtime_session.transport_capability = None
                             runtime_session.continuity_mode = None
@@ -464,6 +465,12 @@ class AgentRunner:
                         runtime_session.transport_mode = fallback_transport_mode
                         runtime_session.fallback_mode = fallback_transport_mode
                         runtime_session.provider_session_id = None
+                        self._refresh_session_recovery_state(runtime_session, log_event=True)
+                        self._mark_recovery_failed(
+                            runtime_session,
+                            previous_transport_mode=previous_transport_mode,
+                            next_transport_mode=runtime_session.transport_mode,
+                        )
                         self._log_runtime_event(
                             "runtime_transport_fallback",
                             thread_id=thread_id,
@@ -492,6 +499,7 @@ class AgentRunner:
                             transport_mode=runtime_session.transport_mode,
                         )
                     else:
+                        self._mark_recovery_failed(runtime_session)
                         self._log_runtime_event(
                             "runtime_session_failed",
                             thread_id=thread_id,
@@ -534,6 +542,8 @@ class AgentRunner:
                     runtime_session.provider_session_id = result.session_id_captured
                 runtime_session.invocation_count += 1
                 runtime_session.last_invoked_at = _now_iso()
+                self._refresh_session_recovery_state(runtime_session)
+                self._mark_recovery_succeeded(runtime_session)
                 self._log_runtime_event(
                     "runtime_session_recovered" if preserve_transport_error else (
                         "runtime_session_reused" if used_resume else "runtime_session_started"
@@ -583,6 +593,11 @@ class AgentRunner:
                     runtime_session.provider_session_id = result.session_id_captured
                 runtime_session.invocation_count += 1
                 runtime_session.last_invoked_at = _now_iso()
+                self._refresh_session_recovery_state(runtime_session)
+                if result.ok:
+                    self._mark_recovery_succeeded(runtime_session)
+                else:
+                    self._mark_recovery_failed(runtime_session)
                 self._log_runtime_event(
                     "runtime_session_recovered" if result.ok else "runtime_session_failed",
                     thread_id=thread_id,
@@ -606,6 +621,7 @@ class AgentRunner:
                     provider_session_id=result.session_id_captured,
                 )
 
+            self._mark_recovery_failed(runtime_session)
             self._log_runtime_event(
                 "runtime_session_failed",
                 thread_id=thread_id,
@@ -645,6 +661,7 @@ class AgentRunner:
         *,
         bypass_permissions: bool | None = None,
         workspace_root: Path | None = None,
+        connect_only_bootstrap: bool = False,
     ) -> bool:
         """Register agent immediately, invoke in background."""
         key = (thread_id, agent_name)
@@ -661,6 +678,7 @@ class AgentRunner:
             session.bypass_permissions = bypass_permissions
         if workspace_root is not None:
             session.workspace_root = workspace_root
+        session.connect_only_bootstrap = connect_only_bootstrap
 
         # Register BEFORE invoke — messages will be routed to this agent
         self._managed_sessions.add(key)
@@ -669,11 +687,95 @@ class AgentRunner:
         asyncio.create_task(self._background_spawn(thread_id, agent_name))
         return True
 
+    async def attach_or_resume_for_thread(
+        self,
+        thread_id: str,
+        agent_name: str,
+        *,
+        bypass_permissions: bool | None = None,
+        workspace_root: Path | None = None,
+    ) -> dict[str, object] | None:
+        """Attach a participant by reusing, recovering, or resuming as needed."""
+        existing = self._session_supervisor.get_session(thread_id, agent_name)
+        if existing is not None:
+            if bypass_permissions is not None:
+                existing.bypass_permissions = bypass_permissions
+            if workspace_root is not None:
+                existing.workspace_root = workspace_root
+            self._managed_sessions.add((thread_id, agent_name))
+            self._refresh_session_recovery_state(existing, log_event=True)
+            if existing.recoverable:
+                recovered = await self.recover_for_thread(
+                    thread_id,
+                    agent_name,
+                    bypass_permissions=bypass_permissions,
+                    workspace_root=workspace_root,
+                )
+                if recovered is None:
+                    return None
+                return {**recovered, "reused_session": False, "resumed_from_state": False}
+
+            status = self.get_runtime_session_status(thread_id, agent_name)
+            if status is None:
+                return None
+            return {
+                **status,
+                "recovery_started": False,
+                "reused_session": True,
+                "resumed_from_state": False,
+            }
+
+        thread = self._threads.get_thread(thread_id) or {}
+        participant_names = {
+            participant.get("name", str(participant))
+            for participant in thread.get("participants", [])
+            if isinstance(participant, dict)
+        } | {
+            str(participant)
+            for participant in thread.get("participants", [])
+            if not isinstance(participant, dict)
+        }
+        resumed_from_state = agent_name in participant_names
+
+        success = await self.spawn_for_thread(
+            thread_id,
+            agent_name,
+            bypass_permissions=bypass_permissions,
+            workspace_root=workspace_root,
+            connect_only_bootstrap=resumed_from_state,
+        )
+        if not success:
+            return None
+        status = self.get_runtime_session_status(thread_id, agent_name)
+        if status is None:
+            return None
+        return {
+            **status,
+            "recovery_started": False,
+            "reused_session": False,
+            "resumed_from_state": resumed_from_state,
+        }
+
     async def _background_spawn(self, thread_id: str, agent_name: str) -> None:
         """Background task: run initial invocation and save response."""
         key = (thread_id, agent_name)
         try:
             self._emit_session_state(thread_id, agent_name, "queued")
+            session = self._session_supervisor.get_session(thread_id, agent_name)
+            if session is not None and session.connect_only_bootstrap:
+                if self._should_use_live_transport(session):
+                    connected = await self._connect_live_transport_only(
+                        session,
+                        thread_id=thread_id,
+                        agent_name=agent_name,
+                    )
+                    session.connect_only_bootstrap = False
+                    if not connected:
+                        self._managed_sessions.discard(key)
+                        return
+                    await self._drain_inbox(thread_id, agent_name, chain_depth=1)
+                    return
+                session.connect_only_bootstrap = False
             prompt = self._build_initial_context(thread_id, agent_name)
             result = await self.invoke(thread_id, agent_name, prompt)
 
@@ -718,7 +820,15 @@ class AgentRunner:
 
         # Batch queued messages into one prompt
         batched = "Messages received while you were busy:\n\n" + "\n---\n".join(prompts)
-        result = await self.invoke(thread_id, agent_name, batched)
+        session = self._session_supervisor.get_session(thread_id, agent_name)
+        prompt = batched
+        if session is not None and session.invocation_count == 0:
+            snapshot = self._build_thread_snapshot(thread_id, agent_name)
+            prompt = ContextFormatter.render_oneshot_prompt(
+                snapshot=snapshot,
+                ask=batched,
+            )
+        result = await self.invoke(thread_id, agent_name, prompt)
         if result.ok and result.response_text.strip():
             self._save_agent_message(
                 thread_id, agent_name,
@@ -757,6 +867,26 @@ class AgentRunner:
             for managed_thread_id, agent_name in self._managed_sessions
             if managed_thread_id == thread_id
         }
+        explicit_resume_targets: set[str] = set()
+        if metadata.get("delivery_mode") == "direct":
+            requested_targets = {
+                str(target)
+                for target in (metadata.get("target_agents") or [])
+            }
+            participant_names = {
+                participant.get("name", str(participant))
+                for participant in thread.get("participants", [])
+                if isinstance(participant, dict)
+            } | {
+                str(participant)
+                for participant in thread.get("participants", [])
+                if not isinstance(participant, dict)
+            }
+            explicit_resume_targets = {
+                target
+                for target in requested_targets
+                if target in participant_names and target != from_agent
+            }
         decision = self._message_router.route(
             thread=thread,
             envelope={
@@ -765,7 +895,7 @@ class AgentRunner:
                 "target_agents": metadata.get("target_agents", []),
                 "content": content,
             },
-            managed_agents=managed_agents,
+            managed_agents=managed_agents | explicit_resume_targets,
             snapshot=self._build_thread_snapshot(thread_id, ""),
         )
         self._event_bus.publish(SSEEvent(
@@ -786,15 +916,30 @@ class AgentRunner:
 
         for agent_name in decision.targets:
             key = (thread_id, agent_name)
-
-            self._emit_session_state(thread_id, agent_name, "queued")
-
             relay = ContextFormatter.format_message_relay(
                 from_agent=from_agent,
                 content=content,
                 thread_id=thread_id,
                 phase_name=thread.get("current_phase"),
             )
+
+            if self._session_supervisor.get_session(thread_id, agent_name) is None:
+                spawned = await self.spawn_for_thread(
+                    thread_id,
+                    agent_name,
+                    connect_only_bootstrap=True,
+                )
+                if not spawned:
+                    continue
+                if key not in self._inbox:
+                    self._inbox[key] = asyncio.Queue()
+                await self._inbox[key].put(relay)
+                self._emit_session_state(thread_id, agent_name, "queued")
+                continue
+            if key not in self._managed_sessions:
+                self._managed_sessions.add(key)
+
+            self._emit_session_state(thread_id, agent_name, "queued")
 
             lock = self._session_locks.get(key)
             if lock and lock.locked():
@@ -879,12 +1024,18 @@ class AgentRunner:
             payload: dict[str, object] = {
                 "thread_id": session.thread_id,
                 "provider": session.provider,
+                "primary_transport_mode": session.primary_transport_mode,
                 "transport_mode": session.transport_mode,
                 "fallback_mode": session.fallback_mode,
                 "status": str(session.status),
                 "provider_session_id": session.provider_session_id,
                 "last_activity_at": session.last_activity_at,
                 "last_transport_error": session.last_transport_error,
+                "degraded": session.degraded,
+                "recoverable": session.recoverable,
+                "recovery_attempts": session.recovery_attempts,
+                "recovery_pending": session.recovery_pending,
+                "recovery_target_transport_mode": session.recovery_target_transport_mode,
             }
             payload["fallback_transport_involved"] = (
                 isinstance(session.fallback_mode, str)
@@ -933,7 +1084,7 @@ class AgentRunner:
         ))
 
     def _should_use_live_transport(self, session: AgentSession) -> bool:
-        if session.transport_mode != "live_process_transport":
+        if self._session_transport_mode_for_invoke(session) != "live_process_transport":
             return False
         transport = build_transport_for_provider(
             session.provider,
@@ -953,91 +1104,13 @@ class AgentRunner:
         defer_typing_done: bool = False,
     ) -> InvocationResult:
         key = (thread_id, agent_name)
-        launch_context = self._build_transport_launch_context(session, launch)
-        transport = build_transport_for_provider(
-            session.provider,
-            runtime_config=self._config.runtime,
-        )
-        refreshing_live_adapter = self._live_transport_requires_fresh_start(session, launch_context)
-        adapter = self._live_transport_adapters.get(key)
-        reused_existing_adapter = adapter is not None and not refreshing_live_adapter
         try:
-            if adapter is not None and not refreshing_live_adapter and transport.requires_health_check_before_reuse:
-                try:
-                    health = await adapter.health_check()
-                except Exception:
-                    health = None
-                if health is None or not health.ok:
-                    refreshing_live_adapter = True
-                    await self._close_live_transport_adapter_async(key)
-                    adapter = None
-            if adapter is not None and refreshing_live_adapter:
-                await self._close_live_transport_adapter_async(key)
-                adapter = None
-            if adapter is None:
-                try:
-                    adapter = transport.build_adapter(launch_context)
-                except TypeError:
-                    adapter = transport.build_adapter()
-                if adapter is None:
-                    return InvocationResult(ok=False, stderr_summary="live transport unavailable")
-                build_session_config = getattr(transport, "build_session_config", None)
-                if callable(build_session_config):
-                    resume_session_id = None if refreshing_live_adapter else session.provider_session_id
-                    session_config = build_session_config(
-                        launch_context,
-                        resume_session_id=resume_session_id,
-                    )
-                else:
-                    session_config = None
-                if session_config is None:
-                    start_metadata = dict(launch.metadata)
-                    if session.provider_session_id and not refreshing_live_adapter:
-                        start_metadata["resume_session_id"] = session.provider_session_id
-                    session_config = SessionConfig(
-                        options={"env": dict(launch.env)} if launch.env else {},
-                        metadata=start_metadata,
-                    )
-                start_result = await adapter.start(
-                    session_config
-                )
-                if start_result.metadata.get("ok") is False:
-                    message = start_result.metadata.get("message")
-                    raise RuntimeError(str(message or "live transport start failed"))
-                self._live_transport_adapters[key] = adapter
-                self._live_transport_launch_contexts[key] = launch_context
-                self._populate_runtime_session_metadata(session, launch.metadata)
-                start_metadata = {
-                    key: value
-                    for key, value in start_result.metadata.items()
-                    if isinstance(value, str) and value
-                }
-                self._populate_runtime_session_metadata(session, start_metadata)
-                if start_result.session_id:
-                    session.provider_session_id = start_result.session_id
-                self._log_runtime_event(
-                    "runtime_session_started",
-                    thread_id=thread_id,
-                    agent_name=agent_name,
-                    provider=session.provider,
-                    transport_mode=session.transport_mode,
-                    message="runtime session started",
-                    details={
-                        "providerSessionId": start_result.session_id or session.provider_session_id,
-                        "refreshedAdapter": refreshing_live_adapter,
-                    },
-                )
-            elif reused_existing_adapter:
-                self._log_runtime_event(
-                    "runtime_session_reused",
-                    thread_id=thread_id,
-                    agent_name=agent_name,
-                    provider=session.provider,
-                    transport_mode=session.transport_mode,
-                    message="runtime session reused",
-                    details={"providerSessionId": session.provider_session_id},
-                )
-
+            adapter = await self._ensure_live_transport_connected(
+                session,
+                launch,
+                thread_id=thread_id,
+                agent_name=agent_name,
+            )
             self._emit_session_state(
                 thread_id,
                 agent_name,
@@ -1061,37 +1134,45 @@ class AgentRunner:
             active_turn_id: str | None = None
             event_iterator = adapter.read_events().__aiter__()
             loop = asyncio.get_running_loop()
-            turn_deadline = loop.time() + LIVE_TRANSPORT_TURN_TIMEOUT
-            idle_deadline = loop.time() + LIVE_TRANSPORT_IDLE_TIMEOUT
+            idle_timeout, turn_timeout = self._live_transport_timeout_policy(session)
+            turn_deadline = loop.time() + turn_timeout if turn_timeout is not None else None
+            idle_deadline = loop.time() + idle_timeout if idle_timeout is not None else None
 
             while True:
                 now = loop.time()
-                timeout_seconds = max(turn_deadline - now, 0.0)
+                timeout_seconds: float | None = None
+                if turn_deadline is not None:
+                    timeout_seconds = max(turn_deadline - now, 0.0)
                 if idle_deadline is not None:
-                    timeout_seconds = min(timeout_seconds, max(idle_deadline - now, 0.0))
-                if timeout_seconds <= 0:
+                    idle_remaining = max(idle_deadline - now, 0.0)
+                    timeout_seconds = idle_remaining if timeout_seconds is None else min(timeout_seconds, idle_remaining)
+                if timeout_seconds is not None and timeout_seconds <= 0:
                     if idle_deadline is not None and now >= idle_deadline:
                         raise TimeoutError(
-                            f"live transport timed out after {LIVE_TRANSPORT_IDLE_TIMEOUT:.2f}s of inactivity"
+                            f"live transport timed out after {idle_timeout:.2f}s of inactivity"
                         )
                     raise TimeoutError(
-                        f"live transport timed out after {LIVE_TRANSPORT_TURN_TIMEOUT:.2f}s"
+                        f"live transport timed out after {turn_timeout:.2f}s"
                     )
                 try:
-                    event = await asyncio.wait_for(anext(event_iterator), timeout=timeout_seconds)
+                    if timeout_seconds is None:
+                        event = await anext(event_iterator)
+                    else:
+                        event = await asyncio.wait_for(anext(event_iterator), timeout=timeout_seconds)
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError as exc:
                     now = loop.time()
                     if idle_deadline is not None and now >= idle_deadline:
                         raise TimeoutError(
-                            f"live transport timed out after {LIVE_TRANSPORT_IDLE_TIMEOUT:.2f}s of inactivity"
+                            f"live transport timed out after {idle_timeout:.2f}s of inactivity"
                         ) from exc
                     raise TimeoutError(
-                        f"live transport timed out after {LIVE_TRANSPORT_TURN_TIMEOUT:.2f}s"
+                        f"live transport timed out after {turn_timeout:.2f}s"
                     ) from exc
 
-                idle_deadline = loop.time() + LIVE_TRANSPORT_IDLE_TIMEOUT
+                if idle_timeout is not None:
+                    idle_deadline = loop.time() + idle_timeout
                 if event.kind == "turn_started" and isinstance(event.content, str) and event.content:
                     active_turn_id = event.content
                 for normalized in normalize_runtime_events([event], provider_name=session.provider):
@@ -1177,6 +1258,145 @@ class AgentRunner:
                     self._emit_agent_typing_done(thread_id, agent_name)
                     typing_state.done_published = True
 
+    async def _ensure_live_transport_connected(
+        self,
+        session: AgentSession,
+        launch: LaunchResolution,
+        *,
+        thread_id: str,
+        agent_name: str,
+    ) -> PersistentSessionAdapter:
+        key = (thread_id, agent_name)
+        launch_context = self._build_transport_launch_context(session, launch)
+        transport = build_transport_for_provider(
+            session.provider,
+            runtime_config=self._config.runtime,
+        )
+        refreshing_live_adapter = self._live_transport_requires_fresh_start(session, launch_context)
+        adapter = self._live_transport_adapters.get(key)
+        reused_existing_adapter = adapter is not None and not refreshing_live_adapter
+        if adapter is not None and not refreshing_live_adapter and transport.requires_health_check_before_reuse:
+            try:
+                health = await adapter.health_check()
+            except Exception:
+                health = None
+            if health is None or not health.ok:
+                refreshing_live_adapter = True
+                await self._close_live_transport_adapter_async(key)
+                adapter = None
+        if adapter is not None and refreshing_live_adapter:
+            await self._close_live_transport_adapter_async(key)
+            adapter = None
+        if adapter is None:
+            try:
+                adapter = transport.build_adapter(launch_context)
+            except TypeError:
+                adapter = transport.build_adapter()
+            if adapter is None:
+                raise RuntimeError("live transport unavailable")
+            build_session_config = getattr(transport, "build_session_config", None)
+            if callable(build_session_config):
+                resume_session_id = None if refreshing_live_adapter else session.provider_session_id
+                session_config = build_session_config(
+                    launch_context,
+                    resume_session_id=resume_session_id,
+                )
+            else:
+                session_config = None
+            if session_config is None:
+                start_metadata = dict(launch.metadata)
+                if session.provider_session_id and not refreshing_live_adapter:
+                    start_metadata["resume_session_id"] = session.provider_session_id
+                session_config = SessionConfig(
+                    options={"env": dict(launch.env)} if launch.env else {},
+                    metadata=start_metadata,
+                )
+            start_result = await adapter.start(session_config)
+            if start_result.metadata.get("ok") is False:
+                message = start_result.metadata.get("message")
+                raise RuntimeError(str(message or "live transport start failed"))
+            self._live_transport_adapters[key] = adapter
+            self._live_transport_launch_contexts[key] = launch_context
+            self._populate_runtime_session_metadata(session, launch.metadata)
+            start_metadata = {
+                meta_key: value
+                for meta_key, value in start_result.metadata.items()
+                if isinstance(value, str) and value
+            }
+            self._populate_runtime_session_metadata(session, start_metadata)
+            if start_result.session_id:
+                session.provider_session_id = start_result.session_id
+            self._log_runtime_event(
+                "runtime_session_started",
+                thread_id=thread_id,
+                agent_name=agent_name,
+                provider=session.provider,
+                transport_mode=session.transport_mode,
+                message="runtime session started",
+                details={
+                    "providerSessionId": start_result.session_id or session.provider_session_id,
+                    "refreshedAdapter": refreshing_live_adapter,
+                },
+            )
+        elif reused_existing_adapter:
+            self._log_runtime_event(
+                "runtime_session_reused",
+                thread_id=thread_id,
+                agent_name=agent_name,
+                provider=session.provider,
+                transport_mode=session.transport_mode,
+                message="runtime session reused",
+                details={"providerSessionId": session.provider_session_id},
+            )
+        return adapter
+
+    def _live_transport_timeout_policy(self, session: AgentSession) -> tuple[float | None, float | None]:
+        is_startup_turn = session.invocation_count == 0 or session.recovery_pending
+        if is_startup_turn:
+            return (LIVE_TRANSPORT_STARTUP_TIMEOUT, LIVE_TRANSPORT_STARTUP_TIMEOUT)
+        return (None, None)
+
+    async def _connect_live_transport_only(
+        self,
+        session: AgentSession,
+        *,
+        thread_id: str,
+        agent_name: str,
+    ) -> bool:
+        launch = self._resolve_launch_resolution(session)
+        if launch is None:
+            return False
+        previous_transport_mode = session.transport_mode
+        try:
+            await self._ensure_live_transport_connected(
+                session,
+                launch,
+                thread_id=thread_id,
+                agent_name=agent_name,
+            )
+            session.last_transport_error = None
+            self._mark_recovery_succeeded(
+                session,
+                previous_transport_mode=previous_transport_mode,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            session.last_transport_error = str(exc)
+            await self._close_live_transport_adapter_async((thread_id, agent_name))
+            self._emit_session_state(
+                thread_id,
+                agent_name,
+                "failed",
+                reason="live_transport_failed",
+                last_transport_error=session.last_transport_error,
+            )
+            self._mark_recovery_failed(
+                session,
+                previous_transport_mode=previous_transport_mode,
+                next_transport_mode=session.transport_mode,
+            )
+            return False
+
     def _close_live_transport_adapter(self, key: tuple[str, str]) -> None:
         adapter = self._detach_live_transport_adapter(key)
         if adapter is None:
@@ -1255,13 +1475,18 @@ class AgentRunner:
         }
         return TransportLaunchContext(
             provider_name=launch.provider.name,
-            transport_mode=session.transport_mode,
+            transport_mode=self._session_transport_mode_for_invoke(session),
             auth_mode=auth_mode if isinstance(auth_mode, str) and auth_mode else None,
             token_ref=token_ref if isinstance(token_ref, str) and token_ref else None,
             gateway_metadata=gateway_metadata,
             env=dict(launch.env),
             cwd=str(self._workspace_root(session.workspace_root)) if session.workspace_root is not None else None,
         )
+
+    def _session_transport_mode_for_invoke(self, session: AgentSession) -> str:
+        if session.recovery_pending and session.recovery_target_transport_mode:
+            return session.recovery_target_transport_mode
+        return session.transport_mode
 
     def _resolve_session_metadata(self, session: AgentSession) -> dict[str, str] | None:
         agent = self._agents.get_agent(session.agent_name)
@@ -1354,8 +1579,10 @@ class AgentRunner:
             bypass_permissions=bool(agent.get("bypass_permissions", False)),
             workspace_root=workspace_root,
         )
+        session.primary_transport_mode = session.primary_transport_mode or transport.mode
         session.fallback_mode = transport.fallback_mode
         self._resolve_session_metadata(session)
+        self._refresh_session_recovery_state(session)
         return session
 
     def _populate_runtime_session_metadata(
@@ -1390,6 +1617,175 @@ class AgentRunner:
         last_transport_error = metadata.get("last_transport_error")
         if isinstance(last_transport_error, str) and last_transport_error:
             session.last_transport_error = last_transport_error
+
+    def _refresh_session_recovery_state(
+        self,
+        session: AgentSession,
+        *,
+        log_event: bool = False,
+    ) -> None:
+        primary_transport_mode = session.primary_transport_mode or session.transport_mode
+        session.primary_transport_mode = primary_transport_mode
+        session.degraded = session.transport_mode != primary_transport_mode
+        session.recoverable = bool(
+            not session.recovery_pending
+            and session.recovery_target_transport_mode is None
+            and
+            session.degraded
+            and primary_transport_mode == "live_process_transport"
+            and session.recovery_attempts < 2
+            and session.last_transport_error
+        )
+        if log_event:
+            self._log_runtime_event(
+                "runtime_recoverability_evaluated",
+                thread_id=session.thread_id,
+                agent_name=session.agent_name,
+                provider=session.provider,
+                transport_mode=session.transport_mode,
+                message="runtime recoverability evaluated",
+                details={
+                    "primaryTransportMode": session.primary_transport_mode,
+                    "degraded": session.degraded,
+                    "recoverable": session.recoverable,
+                    "recoveryAttempts": session.recovery_attempts,
+                    "lastTransportError": session.last_transport_error,
+                },
+            )
+
+    def _log_recovery_outcome(
+        self,
+        session: AgentSession,
+        *,
+        event_type: str,
+        message: str,
+        previous_transport_mode: str | None = None,
+        next_transport_mode: str | None = None,
+        level: str = "info",
+    ) -> None:
+        self._log_runtime_event(
+            event_type,
+            thread_id=session.thread_id,
+            agent_name=session.agent_name,
+            provider=session.provider,
+            transport_mode=session.transport_mode,
+            level=level,
+            message=message,
+            details={
+                "previousTransportMode": previous_transport_mode,
+                "nextTransportMode": next_transport_mode or session.transport_mode,
+                "recoveryAttempts": session.recovery_attempts,
+                "lastTransportError": session.last_transport_error,
+            },
+        )
+
+    def _mark_recovery_succeeded(self, session: AgentSession, *, previous_transport_mode: str | None = None) -> None:
+        session.connect_only_bootstrap = False
+        if not session.recovery_pending:
+            return
+        if session.recovery_target_transport_mode:
+            session.transport_mode = session.recovery_target_transport_mode
+        session.last_transport_error = None
+        session.degraded = False
+        session.recoverable = False
+        session.recovery_target_transport_mode = None
+        session.recovery_pending = False
+        self._log_recovery_outcome(
+            session,
+            event_type="runtime_recovery_succeeded",
+            message="runtime recovery succeeded",
+            previous_transport_mode=previous_transport_mode,
+        )
+
+    def _mark_recovery_failed(
+        self,
+        session: AgentSession,
+        *,
+        previous_transport_mode: str | None = None,
+        next_transport_mode: str | None = None,
+    ) -> None:
+        session.connect_only_bootstrap = False
+        if not session.recovery_pending:
+            return
+        session.recovery_target_transport_mode = None
+        session.recovery_pending = False
+        self._log_recovery_outcome(
+            session,
+            event_type="runtime_recovery_failed",
+            message="runtime recovery failed",
+            previous_transport_mode=previous_transport_mode,
+            next_transport_mode=next_transport_mode,
+            level="warning",
+        )
+
+    def get_runtime_session_status(self, thread_id: str, agent_name: str) -> dict[str, object] | None:
+        session = self._session_supervisor.get_session(thread_id, agent_name)
+        if session is None:
+            return None
+        self._refresh_session_recovery_state(session)
+        return {
+            "thread_id": session.thread_id,
+            "agent_name": session.agent_name,
+            "provider": session.provider,
+            "primary_transport_mode": session.primary_transport_mode,
+            "transport_mode": session.transport_mode,
+            "fallback_mode": session.fallback_mode,
+            "status": str(session.status),
+            "degraded": session.degraded,
+            "recoverable": session.recoverable,
+            "recovery_attempts": session.recovery_attempts,
+            "recovery_pending": session.recovery_pending,
+            "recovery_target_transport_mode": session.recovery_target_transport_mode,
+            "last_transport_error": session.last_transport_error,
+        }
+
+    async def recover_for_thread(
+        self,
+        thread_id: str,
+        agent_name: str,
+        *,
+        bypass_permissions: bool | None = None,
+        workspace_root: Path | None = None,
+    ) -> dict[str, object] | None:
+        session = self._session_supervisor.get_session(thread_id, agent_name)
+        if session is None:
+            return None
+        if bypass_permissions is not None:
+            session.bypass_permissions = bypass_permissions
+        if workspace_root is not None:
+            session.workspace_root = workspace_root
+        self._refresh_session_recovery_state(session, log_event=True)
+        if not session.recoverable:
+            status = self.get_runtime_session_status(thread_id, agent_name)
+            if status is None:
+                return None
+            return {**status, "recovery_started": False}
+
+        previous_transport_mode = session.transport_mode
+        session.recovery_attempts += 1
+        session.recovery_target_transport_mode = session.primary_transport_mode or session.transport_mode
+        session.recoverable = False
+        session.recovery_pending = True
+        session.connect_only_bootstrap = True
+        self._log_runtime_event(
+            "runtime_recovery_started",
+            thread_id=thread_id,
+            agent_name=agent_name,
+            provider=session.provider,
+            transport_mode=session.transport_mode,
+            message="runtime recovery started",
+            details={
+                "previousTransportMode": previous_transport_mode,
+                "nextTransportMode": session.recovery_target_transport_mode or session.transport_mode,
+                "recoveryAttempts": session.recovery_attempts,
+            },
+        )
+        self._managed_sessions.add((thread_id, agent_name))
+        asyncio.create_task(self._background_spawn(thread_id, agent_name))
+        status = self.get_runtime_session_status(thread_id, agent_name)
+        if status is None:
+            return None
+        return {**status, "recovery_started": True}
 
     def _live_transport_requires_fresh_start(
         self,

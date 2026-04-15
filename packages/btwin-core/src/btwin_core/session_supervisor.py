@@ -27,6 +27,7 @@ class RuntimeSession:
     agent_name: str
     provider: str
     transport_mode: str = "oneshot"
+    primary_transport_mode: str | None = None
     auth_mode: str | None = None
     gateway_mode: str | None = None
     gateway_route: str | None = None
@@ -34,6 +35,12 @@ class RuntimeSession:
     continuity_mode: str | None = None
     launch_strategy: str | None = None
     last_transport_error: str | None = None
+    degraded: bool = False
+    recoverable: bool = False
+    recovery_attempts: int = 0
+    recovery_pending: bool = False
+    recovery_target_transport_mode: str | None = None
+    connect_only_bootstrap: bool = False
     status: RuntimeSessionStatus = RuntimeSessionStatus.IDLE
     fallback_mode: str | None = None
     last_activity_at: str = field(default_factory=_now_iso)
@@ -119,6 +126,7 @@ class SessionSupervisor:
             agent_name=agent_name,
             provider=provider,
             transport_mode=transport_mode,
+            primary_transport_mode=transport_mode,
             bypass_permissions=bypass_permissions,
             workspace_root=workspace_root,
         )

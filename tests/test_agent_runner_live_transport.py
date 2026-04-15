@@ -130,3 +130,74 @@ async def test_live_transport_accepts_codex_item_completed_text(
     assert result.response_text == "Hello from Codex"
     assert adapter.sent_turns[0].content == "prompt text"
     assert adapter.closed is False
+
+
+def test_live_transport_timeout_policy_uses_startup_grace_for_first_turn(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    runner = AgentRunner(
+        ThreadStore(data_dir / "threads"),
+        ProtocolStore(data_dir / "protocols"),
+        AgentStore(data_dir),
+        EventBus(),
+        config=BTwinConfig(data_dir=data_dir),
+    )
+    session = RuntimeSession(
+        thread_id="thread-123",
+        agent_name="agent-1",
+        provider="codex",
+        transport_mode="live_process_transport",
+    )
+
+    idle_timeout, turn_timeout = runner._live_transport_timeout_policy(session)
+
+    assert idle_timeout == 180.0
+    assert turn_timeout == 180.0
+
+
+def test_live_transport_timeout_policy_disables_deadlines_after_startup_turn(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    runner = AgentRunner(
+        ThreadStore(data_dir / "threads"),
+        ProtocolStore(data_dir / "protocols"),
+        AgentStore(data_dir),
+        EventBus(),
+        config=BTwinConfig(data_dir=data_dir),
+    )
+    session = RuntimeSession(
+        thread_id="thread-123",
+        agent_name="agent-1",
+        provider="codex",
+        transport_mode="live_process_transport",
+        invocation_count=1,
+    )
+
+    idle_timeout, turn_timeout = runner._live_transport_timeout_policy(session)
+
+    assert idle_timeout is None
+    assert turn_timeout is None
+
+
+def test_live_transport_timeout_policy_uses_startup_grace_for_recovery_turn(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    runner = AgentRunner(
+        ThreadStore(data_dir / "threads"),
+        ProtocolStore(data_dir / "protocols"),
+        AgentStore(data_dir),
+        EventBus(),
+        config=BTwinConfig(data_dir=data_dir),
+    )
+    session = RuntimeSession(
+        thread_id="thread-123",
+        agent_name="agent-1",
+        provider="codex",
+        transport_mode="resume_invocation_transport",
+        primary_transport_mode="live_process_transport",
+        recovery_pending=True,
+        recovery_target_transport_mode="live_process_transport",
+        invocation_count=4,
+    )
+
+    idle_timeout, turn_timeout = runner._live_transport_timeout_policy(session)
+
+    assert idle_timeout == 180.0
+    assert turn_timeout == 180.0

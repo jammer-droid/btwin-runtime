@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 _RUNTIME_SESSION_FIELDS = (
     "thread_id",
     "provider",
+    "primary_transport_mode",
     "transport_mode",
     "fallback_mode",
     "status",
@@ -34,6 +35,11 @@ _RUNTIME_SESSION_FIELDS = (
     "continuity_mode",
     "launch_strategy",
     "last_transport_error",
+    "degraded",
+    "recoverable",
+    "recovery_attempts",
+    "recovery_pending",
+    "recovery_target_transport_mode",
 )
 
 
@@ -51,6 +57,8 @@ def _runtime_session_fields(session: Any) -> dict[str, object]:
 
 def _normalize_runtime_session_record(session: Any) -> dict[str, object]:
     record = _runtime_session_fields(session)
+    if "primary_transport_mode" not in record and "transport_mode" in record:
+        record["primary_transport_mode"] = record["transport_mode"]
 
     for key in ("auth_mode", "gateway_mode", "gateway_route"):
         if key in record and record[key] is None:
@@ -62,6 +70,11 @@ def _normalize_runtime_session_record(session: Any) -> dict[str, object]:
         and bool(fallback_mode)
         and transport_mode == fallback_mode
     )
+    record.setdefault("degraded", bool(record["fallback_transport_involved"]))
+    record.setdefault("recoverable", False)
+    record.setdefault("recovery_attempts", 0)
+    record.setdefault("recovery_pending", False)
+    record.setdefault("recovery_target_transport_mode", None)
     return record
 
 
@@ -115,6 +128,7 @@ def _enrich_runtime_event(event: SSEEvent, agent_runner: Any | None) -> SSEEvent
     metadata = dict(event.metadata)
     for key in (
         "provider",
+        "primary_transport_mode",
         "transport_mode",
         "fallback_mode",
         "fallback_transport_involved",
@@ -125,6 +139,9 @@ def _enrich_runtime_event(event: SSEEvent, agent_runner: Any | None) -> SSEEvent
         "continuity_mode",
         "launch_strategy",
         "last_transport_error",
+        "degraded",
+        "recoverable",
+        "recovery_attempts",
     ):
         value = session.get(key)
         if value is not None:
@@ -195,6 +212,13 @@ class AdvancePhaseRequest(BaseModel):
 
 
 class SpawnAgentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    agent_name: str = Field(alias="agentName")
+    bypass_permissions: bool | None = Field(default=None, alias="bypassPermissions")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+
+class RecoverAgentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     agent_name: str = Field(alias="agentName")
     bypass_permissions: bool | None = Field(default=None, alias="bypassPermissions")
@@ -504,15 +528,57 @@ def create_threads_router(
         if agent_runner is None:
             raise HTTPException(status_code=503, detail="Agent runner not configured")
 
+        workspace_root = Path(req.project_root).expanduser() if req.project_root else None
+        if hasattr(agent_runner, "get_runtime_session_status"):
+            existing_session = agent_runner.get_runtime_session_status(thread_id, req.agent_name)
+            if isinstance(existing_session, dict) and hasattr(agent_runner, "attach_or_resume_for_thread"):
+                updated = thread_store.join_thread(thread_id, agent_name=req.agent_name)
+                if updated is None:
+                    raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")
+                attached = await agent_runner.attach_or_resume_for_thread(
+                    thread_id,
+                    req.agent_name,
+                    bypass_permissions=req.bypass_permissions,
+                    workspace_root=workspace_root,
+                )
+                if attached is None:
+                    raise HTTPException(status_code=400, detail=f"Failed to attach agent '{req.agent_name}'")
+                event_bus.publish(
+                    SSEEvent(
+                        type="thread_updated",
+                        resource_id=thread_id,
+                        metadata={"agent_attached": req.agent_name},
+                    )
+                )
+                return attached
+
         updated = thread_store.join_thread(thread_id, agent_name=req.agent_name)
         if updated is None:
             raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")
+
+        if hasattr(agent_runner, "attach_or_resume_for_thread"):
+            attached = await agent_runner.attach_or_resume_for_thread(
+                thread_id,
+                req.agent_name,
+                bypass_permissions=req.bypass_permissions,
+                workspace_root=workspace_root,
+            )
+            if attached is None:
+                raise HTTPException(status_code=400, detail=f"Failed to attach agent '{req.agent_name}'")
+            event_bus.publish(
+                SSEEvent(
+                    type="thread_updated",
+                    resource_id=thread_id,
+                    metadata={"agent_attached": req.agent_name},
+                )
+            )
+            return attached
 
         success = await agent_runner.spawn_for_thread(
             thread_id,
             req.agent_name,
             bypass_permissions=req.bypass_permissions,
-            workspace_root=Path(req.project_root).expanduser() if req.project_root else None,
+            workspace_root=workspace_root,
         )
         if not success:
             raise HTTPException(status_code=400, detail=f"Failed to spawn agent '{req.agent_name}'")
@@ -525,6 +591,37 @@ def create_threads_router(
             )
         )
         return updated
+
+    @router.post("/api/threads/{thread_id}/recover-agent")
+    async def recover_agent(thread_id: str, req: RecoverAgentRequest):
+        if agent_store is None or agent_store.get_agent(req.agent_name) is None:
+            raise HTTPException(status_code=404, detail=f"Agent '{req.agent_name}' not found")
+
+        if thread_store.get_thread(thread_id) is None:
+            raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")
+
+        if agent_runner is None or not hasattr(agent_runner, "recover_for_thread"):
+            raise HTTPException(status_code=503, detail="Agent runner recovery not configured")
+
+        recovered = await agent_runner.recover_for_thread(
+            thread_id,
+            req.agent_name,
+            bypass_permissions=req.bypass_permissions,
+            workspace_root=Path(req.project_root).expanduser() if req.project_root else None,
+        )
+        if recovered is None:
+            raise HTTPException(status_code=404, detail=f"Runtime session for '{req.agent_name}' not found")
+        if not bool(recovered.get("recovery_started", False)):
+            raise HTTPException(status_code=409, detail=recovered)
+
+        event_bus.publish(
+            SSEEvent(
+                type="thread_updated",
+                resource_id=thread_id,
+                metadata={"agent_recovered": req.agent_name},
+            )
+        )
+        return recovered
 
     @router.get("/api/threads/{thread_id}/phase-context")
     def phase_context(thread_id: str):

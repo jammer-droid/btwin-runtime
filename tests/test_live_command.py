@@ -103,6 +103,34 @@ def test_live_attach_attached_calls_spawn_agent(monkeypatch):
     assert payload["thread_id"] == "thread-1"
 
 
+def test_live_recover_attached_calls_recover_agent(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config())
+    monkeypatch.setattr(main, "_project_root", lambda: Path("/tmp/test-project"))
+
+    def fake_attached_call(path: str, data: dict) -> dict:
+        calls.append((path, data))
+        return {"thread_id": "thread-1", "agent_name": "alice", "recoverable": True}
+
+    monkeypatch.setattr(main, "_attached_api_call_or_exit", fake_attached_call)
+
+    result = runner.invoke(app, ["live", "recover", "--thread", "thread-1", "--agent", "alice", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        (
+            "/api/threads/thread-1/recover-agent",
+            {
+                "agentName": "alice",
+                "bypassPermissions": True,
+                "projectRoot": "/tmp/test-project",
+            },
+        )
+    ]
+    payload = _parse_json_output(result.output)
+    assert payload["thread_id"] == "thread-1"
+
+
 def test_live_close_attached_calls_thread_close(monkeypatch):
     calls: list[tuple[str, dict]] = []
     monkeypatch.setattr(main, "_get_config", lambda: _attached_config())
