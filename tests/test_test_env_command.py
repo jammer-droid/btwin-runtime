@@ -100,6 +100,7 @@ def test_test_env_start_records_process_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_REPO_ROOT", repo_root)
     monkeypatch.setattr(main, "_test_env_project_name", lambda: "repo-test-env")
     monkeypatch.setattr(main, "_test_env_api_is_healthy", lambda api_url: True, raising=False)
+    monkeypatch.setattr(main, "_test_env_nonce", lambda: "nonce-abc")
     main._test_env_root().mkdir(parents=True, exist_ok=True)
     main._test_env_data_dir().mkdir(parents=True, exist_ok=True)
     main._test_env_log_dir().mkdir(parents=True, exist_ok=True)
@@ -111,7 +112,10 @@ def test_test_env_start_records_process_identity(tmp_path, monkeypatch):
         def terminate(self):
             raise AssertionError("terminate should not be called")
 
+    popen_argv: list[str] = []
+
     def fake_popen(*args, **kwargs):
+        popen_argv[:] = list(args[0])
         return FakeProcess()
 
     def fake_ps_run(args, capture_output, text, check):
@@ -130,10 +134,19 @@ def test_test_env_start_records_process_identity(tmp_path, monkeypatch):
     pid = main._start_test_env_process(Path("/opt/btwin/bin/btwin"), 8792, "http://127.0.0.1:8792")
 
     assert pid == 4242
+    assert popen_argv[0] == main.sys.executable
+    assert popen_argv[1] == str(main._test_env_wrapper_path())
+    assert popen_argv[2] == "--nonce=nonce-abc"
+    assert popen_argv[3] == "/opt/btwin/bin/btwin"
+    assert popen_argv[4] == "8792"
+    assert main._test_env_wrapper_path().exists()
+    wrapper_text = main._test_env_wrapper_path().read_text(encoding="utf-8")
+    assert "child.terminate()" in wrapper_text
+    assert "signal.signal(signal.SIGTERM" in wrapper_text
     identity_path = main._test_env_identity_path()
     assert identity_path.exists()
     identity = json.loads(identity_path.read_text(encoding="utf-8"))
-    assert identity == {"pid": 4242, "start_time": "Mon Apr 15 12:34:56 2026"}
+    assert identity == {"pid": 4242, "start_time": "Mon Apr 15 12:34:56 2026", "nonce": "nonce-abc"}
 
 
 def test_test_env_hud_scopes_global_hud_to_test_env(tmp_path, monkeypatch):
@@ -200,6 +213,7 @@ def test_test_env_down_stops_only_owned_process(tmp_path, monkeypatch):
     repo_root.mkdir()
 
     monkeypatch.setattr(main, "_REPO_ROOT", repo_root)
+    monkeypatch.setattr(main, "_test_env_nonce", lambda: "nonce-abc")
 
     root = main._test_env_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -209,7 +223,7 @@ def test_test_env_down_stops_only_owned_process(tmp_path, monkeypatch):
     pid_path.write_text("4242\n", encoding="utf-8")
     owner_path.write_text(f"{main._test_env_owner_id()}\n", encoding="utf-8")
     identity_path.write_text(
-        json.dumps({"pid": 4242, "start_time": "Mon Apr 15 12:34:56 2026"}, indent=2) + "\n",
+        json.dumps({"pid": 4242, "start_time": "Mon Apr 15 12:34:56 2026", "nonce": "nonce-abc"}, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -221,6 +235,13 @@ def test_test_env_down_stops_only_owned_process(tmp_path, monkeypatch):
                 args=args,
                 returncode=0,
                 stdout="Mon Apr 15 12:34:56 2026\n",
+                stderr="",
+            )
+        if args == ["ps", "-p", "4242", "-o", "command="]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=f"/usr/bin/python {main._test_env_wrapper_path()} --nonce=nonce-abc /opt/btwin/bin/btwin 8792\n",
                 stderr="",
             )
         raise AssertionError(f"unexpected ps call: {args}")
@@ -306,12 +327,11 @@ def test_test_env_down_skips_unowned_process(tmp_path, monkeypatch):
     assert not identity_path.exists()
 
 
-def test_test_env_down_refuses_recycled_pid_with_new_start_time(tmp_path, monkeypatch):
+def test_test_env_down_refuses_nonce_mismatch(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
     monkeypatch.setattr(main, "_REPO_ROOT", repo_root)
-    monkeypatch.setattr(main, "_preferred_test_env_btwin", lambda: Path("/opt/btwin/bin/btwin"))
 
     root = main._test_env_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -321,7 +341,8 @@ def test_test_env_down_refuses_recycled_pid_with_new_start_time(tmp_path, monkey
     pid_path.write_text("4242\n", encoding="utf-8")
     owner_path.write_text(f"{main._test_env_owner_id()}\n", encoding="utf-8")
     identity_path.write_text(
-        json.dumps({"pid": 4242, "start_time": "Mon Apr 15 12:34:56 2026"}, indent=2) + "\n",
+        json.dumps({"pid": 4242, "start_time": "Mon Apr 15 12:34:56 2026", "nonce": "nonce-recorded"}, indent=2)
+        + "\n",
         encoding="utf-8",
     )
 
@@ -332,7 +353,14 @@ def test_test_env_down_refuses_recycled_pid_with_new_start_time(tmp_path, monkey
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
-                stdout="Mon Apr 15 12:35:02 2026\n",
+                stdout="Mon Apr 15 12:34:56 2026\n",
+                stderr="",
+            )
+        if args == ["ps", "-p", "4242", "-o", "command="]:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=f"/usr/bin/python {main._test_env_wrapper_path()} --nonce=nonce-other /opt/btwin/bin/btwin 8792\n",
                 stderr="",
             )
         raise AssertionError(f"unexpected ps call: {args}")

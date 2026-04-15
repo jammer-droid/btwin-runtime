@@ -17,6 +17,7 @@ if _LEGACY_SRC.exists():
 import json
 import os
 import plistlib
+import secrets
 import queue as queue_module
 import re
 import select
@@ -104,6 +105,47 @@ app.add_typer(handoff_app, name="handoff")
 console = Console(soft_wrap=True)
 logger = logging.getLogger(__name__)
 _SERVICE_LABEL = "com.btwin.serve-api"
+_TEST_ENV_WRAPPER_SCRIPT = """#!/usr/bin/env python3
+from __future__ import annotations
+
+import signal
+import subprocess
+import sys
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if len(argv) != 3:
+        return 2
+    nonce_arg, btwin_bin, port = argv
+    if not nonce_arg.startswith("--nonce="):
+        return 2
+
+    child = subprocess.Popen([btwin_bin, "serve-api", "--port", port])
+
+    def _forward_termination(_signum, _frame) -> None:
+        if child.poll() is None:
+            try:
+                child.terminate()
+            except OSError:
+                pass
+
+    signal.signal(signal.SIGTERM, _forward_termination)
+    signal.signal(signal.SIGINT, _forward_termination)
+
+    try:
+        return child.wait()
+    finally:
+        if child.poll() is None:
+            try:
+                child.terminate()
+            except OSError:
+                pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
 
 
 def _emit_payload(payload: object, as_json: bool) -> None:
@@ -2176,6 +2218,10 @@ def _test_env_identity_path() -> Path:
     return _test_env_root() / "serve-api.pid.identity"
 
 
+def _test_env_wrapper_path() -> Path:
+    return _test_env_root() / "serve-api-wrapper.py"
+
+
 def _test_env_log_dir() -> Path:
     return _test_env_root() / "logs"
 
@@ -2186,6 +2232,10 @@ def _test_env_agents_path() -> Path:
 
 def _test_env_owner_id() -> str:
     return f"btwin-test-env::{_test_env_root()}"
+
+
+def _test_env_nonce() -> str:
+    return secrets.token_hex(16)
 
 
 def _preferred_test_env_btwin() -> Path:
@@ -2253,11 +2303,11 @@ def _test_env_process_start_time(pid: int) -> str | None:
     return start_time or None
 
 
-def _test_env_record_process_identity(pid: int) -> bool:
+def _test_env_record_process_identity(pid: int, nonce: str) -> bool:
     start_time = _test_env_process_start_time(pid)
     if start_time is None:
         return False
-    _atomic_write_json(_test_env_identity_path(), {"pid": pid, "start_time": start_time})
+    _atomic_write_json(_test_env_identity_path(), {"pid": pid, "start_time": start_time, "nonce": nonce})
     return True
 
 
@@ -2272,6 +2322,22 @@ def _test_env_read_process_identity() -> dict[str, object] | None:
     if not isinstance(payload, dict):
         return None
     return payload
+
+
+def _test_env_wrapper_nonce_matches(pid: int, nonce: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    command_line = result.stdout.strip()
+    return f"--nonce={nonce}" in command_line
 
 
 def _cleanup_test_env_pid_files() -> None:
@@ -2294,7 +2360,14 @@ def _stop_owned_test_env_process() -> None:
     if not isinstance(recorded_start_time, str):
         _cleanup_test_env_pid_files()
         return
+    recorded_nonce = identity.get("nonce")
+    if not isinstance(recorded_nonce, str):
+        _cleanup_test_env_pid_files()
+        return
     if _test_env_process_start_time(pid) != recorded_start_time:
+        _cleanup_test_env_pid_files()
+        return
+    if not _test_env_wrapper_nonce_matches(pid, recorded_nonce):
         _cleanup_test_env_pid_files()
         return
     try:
@@ -2343,10 +2416,13 @@ def _prepare_test_env_workspace(project_name: str) -> None:
     _write_codex_project_config(_test_env_project_root() / ".codex" / "config.toml", project_name)
     _write_codex_project_hooks(_test_env_project_root() / ".codex" / "hooks.json")
     _write_test_env_agents(_test_env_agents_path())
+    _write_test_env_wrapper_script(_test_env_wrapper_path())
 
 
 def _start_test_env_process(btwin_bin: Path, port: int, api_url: str) -> int:
     env = os.environ.copy()
+    nonce = _test_env_nonce()
+    _write_test_env_wrapper_script(_test_env_wrapper_path())
     env.update(
         {
             "BTWIN_CONFIG_PATH": str(_test_env_config_path()),
@@ -2358,7 +2434,13 @@ def _start_test_env_process(btwin_bin: Path, port: int, api_url: str) -> int:
     stderr_log = (_test_env_log_dir() / "serve-api.stderr.log").open("a", encoding="utf-8")
     try:
         process = subprocess.Popen(
-            [str(btwin_bin), "serve-api", "--port", str(port)],
+            [
+                sys.executable,
+                str(_test_env_wrapper_path()),
+                f"--nonce={nonce}",
+                str(btwin_bin),
+                str(port),
+            ],
             env=env,
             stdout=stdout_log,
             stderr=stderr_log,
@@ -2368,7 +2450,7 @@ def _start_test_env_process(btwin_bin: Path, port: int, api_url: str) -> int:
         stderr_log.close()
     _test_env_pid_path().write_text(f"{process.pid}\n", encoding="utf-8")
     _test_env_owner_path().write_text(f"{_test_env_owner_id()}\n", encoding="utf-8")
-    if not _test_env_record_process_identity(process.pid):
+    if not _test_env_record_process_identity(process.pid, nonce):
         try:
             process.terminate()
         except OSError:
@@ -2466,6 +2548,13 @@ def _atomic_write_json(path: Path, data: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _write_test_env_wrapper_script(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(_TEST_ENV_WRAPPER_SCRIPT, encoding="utf-8")
     tmp_path.replace(path)
 
 
