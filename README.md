@@ -1,4 +1,4 @@
-# btwin-runtime
+# btwin
 
 Packaged runtime workspace for B-TWIN.
 
@@ -90,8 +90,8 @@ the background and let Codex connect through `btwin mcp-proxy`.
 Install and verify the repo-local environment:
 
 ```bash
-git clone https://github.com/jammer-droid/btwin-runtime.git
-cd btwin-runtime
+git clone https://github.com/jammer-droid/btwin.git
+cd btwin
 uv sync
 uv run btwin --help
 ```
@@ -99,7 +99,7 @@ uv run btwin --help
 Install `btwin` as a normal CLI so Codex and launchd can call it directly:
 
 ```bash
-cd btwin-runtime
+cd btwin
 uv tool install -e .
 btwin --help
 ```
@@ -157,7 +157,7 @@ uv run btwin serve-api
 In another terminal, start the MCP proxy:
 
 ```bash
-cd btwin-runtime
+cd btwin
 uv run btwin mcp-proxy
 ```
 
@@ -332,6 +332,25 @@ The script creates a fresh temp project root, starts the isolated attached API,
 binds a thread, advances the protocol through the shared API path, clears the
 runtime binding, and finishes by checking the attached `agent inbox --json`
 surface.
+
+For workflow-constraints validation, keep a second terminal open with either:
+
+```bash
+uv run btwin hud --thread <thread_id>
+```
+
+or:
+
+```bash
+uv run btwin thread watch <thread_id> --follow
+```
+
+Use `thread watch` when you want the canonical workflow event feed for one
+thread, and use `hud` when you want the thread feed alongside the broader
+runtime dashboard. `uv run btwin runtime current --json` is still the source of
+truth for binding state, especially because deterministic stale cleanup is
+currently triggered by command paths such as `runtime current` rather than by
+every observation surface.
 
 ## Repository Layout
 
