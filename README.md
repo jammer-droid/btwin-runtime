@@ -260,21 +260,22 @@ may keep using the older environment until the client reconnects.
 
 Use the isolated bootstrap when you explicitly want a disposable test
 environment separate from the normal global store. For the primary user path,
-prefer the `btwin test-env` CLI:
+prefer the `btwin test-env` CLI. `btwin test-env up` prepares the repo-scoped
+test project root at `.btwin-test-env/project` and prints the exact `cd`
+command to launch Codex there:
 
 ```bash
 btwin test-env up
 btwin test-env hud
 ```
 
-Run Codex from the test project root that `btwin test-env up` prepares, not
-from this repository root. In the current workflow-constraints setup, that
-project root is the isolated directory passed to the bootstrap helper, and the
+Run Codex from that test project root, not from this repository root. The
 repo's `AGENTS.md` is left unchanged.
 
-### Quick Helper Flow
+### Legacy Shell Helper Fallback
 
-The legacy helper-first path is still available for shell-scoped workflows:
+If you still need the generated shell-scoped helpers, the older flow remains
+available for fallback use:
 
 ```bash
 ./scripts/bootstrap_isolated_attached_env.sh start --skip-server \
