@@ -21,11 +21,14 @@ import re
 import select
 import shlex
 import shutil
+import signal
 import subprocess
 import threading
 import time
 import tty
 import termios
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -77,6 +80,7 @@ thread_app = typer.Typer(help="Manage B-TWIN protocol threads.")
 contribution_app = typer.Typer(help="Manage B-TWIN protocol contributions.")
 workflow_app = typer.Typer(help="Evaluate workflow contract hooks.")
 service_app = typer.Typer(help="Manage the macOS launchd service for B-TWIN API.")
+test_env_app = typer.Typer(help="Manage an isolated test environment for btwin.")
 handoff_app = typer.Typer(
     help="Write or inspect project handoff snapshots and archive.",
     invoke_without_command=True,
@@ -93,6 +97,7 @@ app.add_typer(thread_app, name="thread")
 app.add_typer(contribution_app, name="contribution")
 app.add_typer(workflow_app, name="workflow")
 app.add_typer(service_app, name="service")
+app.add_typer(test_env_app, name="test-env")
 app.add_typer(handoff_app, name="handoff")
 
 console = Console(soft_wrap=True)
@@ -2142,16 +2147,40 @@ def _test_env_project_root() -> Path:
     return _test_env_root() / "project"
 
 
+def _test_env_project_name() -> str:
+    return f"{_detect_project_name()}-test-env"
+
+
 def _test_env_api_url(port: int = 8792) -> str:
     return f"http://127.0.0.1:{port}"
+
+
+def _test_env_config_path() -> Path:
+    return _test_env_root() / "config.yaml"
+
+
+def _test_env_data_dir() -> Path:
+    return _test_env_root() / "data"
 
 
 def _test_env_pid_path() -> Path:
     return _test_env_root() / "serve-api.pid"
 
 
+def _test_env_owner_path() -> Path:
+    return _test_env_root() / "serve-api.pid.owner"
+
+
 def _test_env_log_dir() -> Path:
     return _test_env_root() / "logs"
+
+
+def _test_env_agents_path() -> Path:
+    return _test_env_project_root() / "AGENTS.md"
+
+
+def _test_env_owner_id() -> str:
+    return f"btwin-test-env::{_test_env_root()}"
 
 
 def _preferred_test_env_btwin() -> Path:
@@ -2163,6 +2192,176 @@ def _preferred_test_env_btwin() -> Path:
         console.print("[red]Could not find `btwin` executable in PATH.[/red]")
         raise typer.Exit(1)
     return Path(resolved).expanduser().resolve()
+
+
+def _test_env_api_is_healthy(api_url: str) -> bool:
+    try:
+        with urllib.request.urlopen(f"{api_url}/api/sessions/status", timeout=1.0) as response:
+            return response.status == 200
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return False
+
+
+def _test_env_pid() -> int | None:
+    pid_path = _test_env_pid_path()
+    if not pid_path.exists():
+        return None
+    try:
+        return int(pid_path.read_text(encoding="utf-8").strip())
+    except ValueError:
+        return None
+
+
+def _test_env_owner_matches() -> bool:
+    owner_path = _test_env_owner_path()
+    if not owner_path.exists():
+        return False
+    return owner_path.read_text(encoding="utf-8").strip() == _test_env_owner_id()
+
+
+def _test_env_pid_is_running(pid: int | None) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _cleanup_test_env_pid_files() -> None:
+    for path in (_test_env_pid_path(), _test_env_owner_path()):
+        if path.exists():
+            path.unlink()
+
+
+def _stop_owned_test_env_process() -> None:
+    pid = _test_env_pid()
+    if not (_test_env_owner_matches() and _test_env_pid_is_running(pid)):
+        _cleanup_test_env_pid_files()
+        return
+    assert pid is not None
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+    _cleanup_test_env_pid_files()
+
+
+def _write_test_env_agents(path: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "# Test-Env Workspace",
+                "",
+                "This workspace is an isolated test environment for `btwin`.",
+                "",
+                "- Use the local `.codex/config.toml` generated here.",
+                "- Do not assume the global `~/.btwin` runtime is active.",
+                "- Run thread, agent, and workflow checks against this isolated env.",
+                "- Use `btwin test-env status` to confirm the root, API URL, or owned PID.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _prepare_test_env_workspace(project_name: str) -> None:
+    root = _test_env_root()
+    root.mkdir(parents=True, exist_ok=True)
+    _test_env_data_dir().mkdir(parents=True, exist_ok=True)
+    _test_env_log_dir().mkdir(parents=True, exist_ok=True)
+    _test_env_project_root().mkdir(parents=True, exist_ok=True)
+
+    _atomic_write_yaml(
+        _test_env_config_path(),
+        {
+            "llm": {"provider": "anthropic", "model": "claude-haiku-4-5-20251001"},
+            "session": {"timeout_minutes": 10},
+            "promotion": {"enabled": True, "schedule": "0 9,21 * * *"},
+            "data_dir": str(_test_env_data_dir()),
+        },
+    )
+    write_provider_config(_test_env_data_dir() / "providers.json", build_provider_config("codex"))
+    _write_codex_project_config(_test_env_project_root() / ".codex" / "config.toml", project_name)
+    _write_codex_project_hooks(_test_env_project_root() / ".codex" / "hooks.json")
+    _write_test_env_agents(_test_env_agents_path())
+
+
+def _start_test_env_process(btwin_bin: Path, port: int, api_url: str) -> int:
+    env = os.environ.copy()
+    env.update(
+        {
+            "BTWIN_CONFIG_PATH": str(_test_env_config_path()),
+            "BTWIN_DATA_DIR": str(_test_env_data_dir()),
+            "BTWIN_API_URL": api_url,
+        }
+    )
+    stdout_log = (_test_env_log_dir() / "serve-api.stdout.log").open("a", encoding="utf-8")
+    stderr_log = (_test_env_log_dir() / "serve-api.stderr.log").open("a", encoding="utf-8")
+    try:
+        process = subprocess.Popen(
+            [str(btwin_bin), "serve-api", "--port", str(port)],
+            env=env,
+            stdout=stdout_log,
+            stderr=stderr_log,
+        )
+    finally:
+        stdout_log.close()
+        stderr_log.close()
+    _test_env_pid_path().write_text(f"{process.pid}\n", encoding="utf-8")
+    _test_env_owner_path().write_text(f"{_test_env_owner_id()}\n", encoding="utf-8")
+    return process.pid
+
+
+def _wait_for_test_env_api(api_url: str, attempts: int = 40, delay_seconds: float = 0.25) -> bool:
+    for _ in range(attempts):
+        if _test_env_api_is_healthy(api_url):
+            return True
+        time.sleep(delay_seconds)
+    return False
+
+
+def _ensure_test_env_up(port: int = 8792) -> tuple[int | None, bool]:
+    validate_provider_cli("codex")
+    btwin_bin = _preferred_test_env_btwin()
+    api_url = _test_env_api_url(port)
+    _prepare_test_env_workspace(_test_env_project_name())
+
+    pid = _test_env_pid()
+    if _test_env_owner_matches() and _test_env_pid_is_running(pid) and _test_env_api_is_healthy(api_url):
+        return pid, True
+
+    if _test_env_api_is_healthy(api_url):
+        console.print("[red]Test env API is already in use by another process.[/red]")
+        raise typer.Exit(1)
+
+    if _test_env_owner_matches():
+        _stop_owned_test_env_process()
+    else:
+        _cleanup_test_env_pid_files()
+
+    pid = _start_test_env_process(btwin_bin, port, api_url)
+    if not _wait_for_test_env_api(api_url):
+        _stop_owned_test_env_process()
+        console.print(f"[red]Timed out waiting for test env API at {api_url}[/red]")
+        raise typer.Exit(1)
+    return pid, False
+
+
+def _print_test_env_status(port: int = 8792) -> None:
+    pid = _test_env_pid()
+    console.print(f"Root: {_test_env_root()}")
+    console.print(f"Project root: {_test_env_project_root()}")
+    console.print(f"Config: {_test_env_config_path()}")
+    console.print(f"Data dir: {_test_env_data_dir()}")
+    console.print(f"API: {_test_env_api_url(port)}")
+    if pid is None:
+        console.print("PID: missing")
+    else:
+        console.print(f"PID: {pid}")
+    console.print(f"API health: {'ok' if _test_env_api_is_healthy(_test_env_api_url(port)) else 'unavailable'}")
 
 
 def _is_valid_cron_schedule(value: str) -> bool:
@@ -3568,6 +3767,28 @@ def setup():
         "  4. [bold]btwin search[/bold] <query>             — Search past entries\n"
         "  5. [bold]btwin serve[/bold]                      — Start the stdio MCP entrypoint via the shared HTTP proxy path\n"
     )
+
+
+@test_env_app.command("up")
+def test_env_up():
+    """Prepare and start the isolated btwin test environment."""
+    pid, reused = _ensure_test_env_up()
+    if reused:
+        console.print("[green]Isolated test env already running.[/green]")
+    else:
+        console.print("[green]Isolated test env ready.[/green]")
+    console.print(f"Root: {_test_env_root()}")
+    console.print(f"Project root: {_test_env_project_root()}")
+    console.print(f"API: {_test_env_api_url()}")
+    if pid is not None:
+        console.print(f"PID: {pid}")
+    console.print(f'Next: cd "{_test_env_project_root()}" && codex')
+
+
+@test_env_app.command("status")
+def test_env_status():
+    """Show status for the isolated btwin test environment."""
+    _print_test_env_status()
 
 
 @app.command()
