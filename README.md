@@ -259,8 +259,22 @@ may keep using the older environment until the client reconnects.
 ## Isolated Testing Mode
 
 Use the isolated bootstrap when you explicitly want a disposable test
-environment separate from the normal global store. The activation step is
-`source <env.sh>` in the current shell:
+environment separate from the normal global store. For the primary user path,
+prefer the `btwin test-env` CLI:
+
+```bash
+btwin test-env up
+btwin test-env hud
+```
+
+Run Codex from the test project root that `btwin test-env up` prepares, not
+from this repository root. In the current workflow-constraints setup, that
+project root is the isolated directory passed to the bootstrap helper, and the
+repo's `AGENTS.md` is left unchanged.
+
+### Quick Helper Flow
+
+The legacy helper-first path is still available for shell-scoped workflows:
 
 ```bash
 ./scripts/bootstrap_isolated_attached_env.sh start --skip-server \
@@ -291,6 +305,9 @@ environment:
 btwin hud
 btwin runtime current --json
 ```
+
+When you need to launch Codex in this legacy flow, `cd` into the test project
+root first and then start `codex` from there.
 
 This is useful for:
 
