@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from btwin_cli.api_threads import create_threads_router
@@ -14,12 +16,13 @@ class _FakeAgentRunner:
     def list_active_threads_by_agent(self):
         return self._active_threads_by_agent
 
-    async def spawn_for_thread(self, thread_id, agent_name, *, bypass_permissions=None):
+    async def spawn_for_thread(self, thread_id, agent_name, *, bypass_permissions=None, workspace_root=None):
         self.spawn_calls.append(
             {
                 "thread_id": thread_id,
                 "agent_name": agent_name,
                 "bypass_permissions": bypass_permissions,
+                "workspace_root": workspace_root,
             }
         )
         self._active_threads_by_agent.setdefault(agent_name, []).append(thread_id)
@@ -139,7 +142,7 @@ def test_spawn_agent_accepts_bypass_permissions_flag(tmp_path):
 
     response = client.post(
         f"/api/threads/{thread['thread_id']}/spawn-agent",
-        json={"agentName": "alice", "bypassPermissions": True},
+        json={"agentName": "alice", "bypassPermissions": True, "projectRoot": "/tmp/test-project"},
     )
 
     assert response.status_code == 200
@@ -148,5 +151,6 @@ def test_spawn_agent_accepts_bypass_permissions_flag(tmp_path):
             "thread_id": thread["thread_id"],
             "agent_name": "alice",
             "bypass_permissions": True,
+            "workspace_root": Path("/tmp/test-project"),
         }
     ]

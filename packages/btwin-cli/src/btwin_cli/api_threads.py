@@ -198,6 +198,7 @@ class SpawnAgentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     agent_name: str = Field(alias="agentName")
     bypass_permissions: bool | None = Field(default=None, alias="bypassPermissions")
+    project_root: str | None = Field(default=None, alias="projectRoot")
 
 
 class InteractionModeRequest(BaseModel):
@@ -511,6 +512,7 @@ def create_threads_router(
             thread_id,
             req.agent_name,
             bypass_permissions=req.bypass_permissions,
+            workspace_root=Path(req.project_root).expanduser() if req.project_root else None,
         )
         if not success:
             raise HTTPException(status_code=400, detail=f"Failed to spawn agent '{req.agent_name}'")

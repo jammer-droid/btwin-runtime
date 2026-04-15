@@ -197,18 +197,20 @@ class ClaudeCodeProvider(CLIProvider):
 class CodexProvider(CLIProvider):
     """Provider for the Codex CLI (`codex`)."""
 
+    _HOOKS_FEATURE_FLAG = ("--enable", "codex_hooks")
+
     @property
     def name(self) -> str:
         return "codex"
 
     def build_command(self, session_id: str | None, bypass_permissions: bool) -> list[str]:
         if session_id:
-            cmd = ["codex", "exec", "resume", session_id, "--json"]
+            cmd = ["codex", "exec", "resume", session_id, *self._HOOKS_FEATURE_FLAG, "--json"]
         else:
-            cmd = ["codex", "exec", "--json"]
+            cmd = ["codex", "exec", *self._HOOKS_FEATURE_FLAG, "--json"]
         cmd.append("--skip-git-repo-check")
         if bypass_permissions:
-            cmd.append("--full-auto")
+            cmd.append("--dangerously-bypass-approvals-and-sandbox")
         return cmd
 
     def parse_stream_line(self, line: str) -> StreamEvent | None:

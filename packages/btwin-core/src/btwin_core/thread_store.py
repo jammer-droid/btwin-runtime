@@ -50,6 +50,10 @@ class ThreadStore:
         """Return the project data directory that contains the threads directory."""
         return self._dir.parent
 
+    def workflow_event_log_path(self, thread_id: str) -> Path:
+        """Return the canonical workflow event log path for one thread."""
+        return self._dir / thread_id / "workflow-events.jsonl"
+
     # -- Lifecycle --
 
     def create_thread(

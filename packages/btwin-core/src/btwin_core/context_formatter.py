@@ -212,7 +212,15 @@ class ContextFormatter:
         parts.append("Acknowledge your participation and state your initial position briefly.")
         parts.append("Do NOT perform extensive research, read files, or run tools at this stage.")
         parts.append("Detailed work will be requested in subsequent messages.")
-        parts.append("Use btwin_thread_contribute for structured contributions when the protocol phase requires it.")
+        if agent_name and thread.get("thread_id") and thread.get("current_phase"):
+            parts.append(
+                "If this helper needs to record a required protocol contribution, prefer the CLI form "
+                f"`btwin contribution submit --thread {thread['thread_id']} --agent {agent_name} "
+                f"--phase {thread['current_phase']}` with `--content` and `--tldr`."
+            )
+            parts.append("Use btwin_thread_contribute only if the CLI contribution path is unavailable.")
+        else:
+            parts.append("Use btwin_thread_contribute for structured contributions when the protocol phase requires it.")
         parts.append("Regular messages are captured automatically.")
 
         # Language directive — only when agent_name is provided

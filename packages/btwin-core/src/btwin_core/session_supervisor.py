@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+from pathlib import Path
 
 
 def _now_iso() -> str:
@@ -37,6 +38,7 @@ class RuntimeSession:
     fallback_mode: str | None = None
     last_activity_at: str = field(default_factory=_now_iso)
     bypass_permissions: bool = False
+    workspace_root: Path | None = None
     invocation_count: int = 0
     created_at: str = field(default_factory=_now_iso)
     last_invoked_at: str = ""
@@ -85,6 +87,7 @@ class SessionSupervisor:
         provider: str,
         transport_mode: str = "oneshot",
         bypass_permissions: bool = False,
+        workspace_root: Path | None = None,
     ) -> RuntimeSession:
         return self.ensure_session_nowait(
             thread_id,
@@ -92,6 +95,7 @@ class SessionSupervisor:
             provider=provider,
             transport_mode=transport_mode,
             bypass_permissions=bypass_permissions,
+            workspace_root=workspace_root,
         )
 
     def ensure_session_nowait(
@@ -102,10 +106,13 @@ class SessionSupervisor:
         provider: str,
         transport_mode: str = "oneshot",
         bypass_permissions: bool = False,
+        workspace_root: Path | None = None,
     ) -> RuntimeSession:
         key = (thread_id, agent_name)
         session = self._sessions.get(key)
         if session is not None:
+            if workspace_root is not None:
+                session.workspace_root = workspace_root
             return session
         session = RuntimeSession(
             thread_id=thread_id,
@@ -113,6 +120,7 @@ class SessionSupervisor:
             provider=provider,
             transport_mode=transport_mode,
             bypass_permissions=bypass_permissions,
+            workspace_root=workspace_root,
         )
         self._sessions[key] = session
         return session

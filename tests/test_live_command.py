@@ -1,5 +1,6 @@
 import json
 import queue
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -77,6 +78,7 @@ def test_live_threads_attached_renders_human_summary(monkeypatch):
 def test_live_attach_attached_calls_spawn_agent(monkeypatch):
     calls: list[tuple[str, dict]] = []
     monkeypatch.setattr(main, "_get_config", lambda: _attached_config())
+    monkeypatch.setattr(main, "_project_root", lambda: Path("/tmp/test-project"))
 
     def fake_attached_call(path: str, data: dict) -> dict:
         calls.append((path, data))
@@ -87,7 +89,16 @@ def test_live_attach_attached_calls_spawn_agent(monkeypatch):
     result = runner.invoke(app, ["live", "attach", "--thread", "thread-1", "--agent", "alice", "--json"])
 
     assert result.exit_code == 0, result.output
-    assert calls == [("/api/threads/thread-1/spawn-agent", {"agentName": "alice", "bypassPermissions": True})]
+    assert calls == [
+        (
+            "/api/threads/thread-1/spawn-agent",
+            {
+                "agentName": "alice",
+                "bypassPermissions": True,
+                "projectRoot": "/tmp/test-project",
+            },
+        )
+    ]
     payload = _parse_json_output(result.output)
     assert payload["thread_id"] == "thread-1"
 

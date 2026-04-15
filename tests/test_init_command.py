@@ -1,4 +1,5 @@
 import json
+import sys
 
 from typer.testing import CliRunner
 
@@ -38,6 +39,21 @@ def test_init_local_creates_provider_config_and_project_codex_registration(tmp_p
     codex_config = tmp_path / ".codex" / "config.toml"
     assert codex_config.exists()
     assert 'args = ["mcp-proxy", "--project", "demo-project"]' in codex_config.read_text(encoding="utf-8")
+
+
+def test_init_local_writes_hooks_using_current_btwin_executable(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("btwin_cli.provider_init.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(sys, "executable", "/tmp/current-python")
+
+    result = runner.invoke(app, ["init", "demo-project", "--local"])
+
+    assert result.exit_code == 0, result.output
+    hooks_path = tmp_path / ".codex" / "hooks.json"
+    assert hooks_path.exists()
+    hooks_text = hooks_path.read_text(encoding="utf-8")
+    assert '"/tmp/current-python -m btwin_cli.main workflow hook"' in hooks_text
 
 
 def test_init_requires_codex_cli_in_path(tmp_path, monkeypatch):

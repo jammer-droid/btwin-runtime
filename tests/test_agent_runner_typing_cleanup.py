@@ -253,6 +253,73 @@ async def test_subprocess_failure_still_publishes_typing_done(
 
 
 @pytest.mark.asyncio
+async def test_run_subprocess_uses_raised_stream_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _build_runner(tmp_path)
+    captured_kwargs: dict[str, object] = {}
+    fake_proc = _FakeSubprocess([], returncode=0)
+
+    async def fake_create_subprocess_exec(*args, **kwargs):  # noqa: ANN001, ANN202
+        del args
+        captured_kwargs.update(kwargs)
+        return fake_proc
+
+    monkeypatch.setattr(
+        "btwin_core.agent_runner.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    result = await runner._run_subprocess(
+        ["fake-codex"],
+        "prompt text",
+        _FakeStreamingProvider(),
+        thread_id="thread-123",
+        agent_name="agent-1",
+    )
+
+    assert result.ok is True
+    assert captured_kwargs["limit"] == 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_run_subprocess_prefers_session_workspace_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _build_runner(tmp_path)
+    captured_kwargs: dict[str, object] = {}
+
+    fake_proc = _FakeSubprocess([], returncode=0)
+
+    async def fake_create_subprocess_exec(*args, **kwargs):  # noqa: ANN001, ANN202
+        del args
+        captured_kwargs.update(kwargs)
+        return fake_proc
+
+    monkeypatch.setattr(
+        "btwin_core.agent_runner.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    workspace_root = tmp_path / "project-root"
+    workspace_root.mkdir()
+
+    result = await runner._run_subprocess(
+        ["fake-codex"],
+        "prompt text",
+        _FakeStreamingProvider(),
+        thread_id="thread-123",
+        agent_name="agent-1",
+        workspace_root=workspace_root,
+    )
+
+    assert result.ok is True
+    assert captured_kwargs["cwd"] == str(workspace_root)
+
+
+@pytest.mark.asyncio
 async def test_invoke_publishes_typing_done_once_across_live_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

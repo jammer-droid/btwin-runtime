@@ -18,14 +18,22 @@ import os
 import plistlib
 import queue as queue_module
 import re
+import select
+import shlex
 import shutil
 import subprocess
 import threading
 import time
+import tty
+import termios
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import typer
 import yaml
 from rich.console import Console
+from rich.live import Live
+from rich.markup import escape
 from rich.markdown import Markdown
 
 from btwin_core.agent_store import AgentStore
@@ -39,8 +47,10 @@ from btwin_core.sources import SourceRegistry
 from btwin_core.runtime_binding_store import RuntimeBindingState, RuntimeBindingStore
 from btwin_core.thread_chat import parse_thread_chat_input
 from btwin_core.thread_store import ThreadStore
+from btwin_core.workflow_event_log import WorkflowEventLog
 from btwin_core.storage import Storage
 from btwin_core.workflow_engine import WorkflowEngine
+from btwin_core.workflow_constraints import CodexHookPayload, build_codex_hook_response, evaluate_workflow_hook
 from btwin_cli.provider_init import (
     available_provider_names,
     build_provider_config,
@@ -64,6 +74,7 @@ agent_app = typer.Typer(help="Manage B-TWIN agent definitions.")
 protocol_app = typer.Typer(help="Manage B-TWIN protocol definitions.")
 thread_app = typer.Typer(help="Manage B-TWIN protocol threads.")
 contribution_app = typer.Typer(help="Manage B-TWIN protocol contributions.")
+workflow_app = typer.Typer(help="Evaluate workflow contract hooks.")
 service_app = typer.Typer(help="Manage the macOS launchd service for B-TWIN API.")
 handoff_app = typer.Typer(
     help="Write or inspect project handoff snapshots and archive.",
@@ -79,6 +90,7 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(protocol_app, name="protocol")
 app.add_typer(thread_app, name="thread")
 app.add_typer(contribution_app, name="contribution")
+app.add_typer(workflow_app, name="workflow")
 app.add_typer(service_app, name="service")
 app.add_typer(handoff_app, name="handoff")
 
@@ -112,6 +124,544 @@ def _resolve_content(content: str | None) -> str:
     if not stdin_content.strip():
         raise typer.BadParameter("Content is required via --content or stdin.")
     return stdin_content
+
+
+def _emit_raw_json(payload: dict[str, object]) -> None:
+    typer.echo(json.dumps(payload, ensure_ascii=False))
+
+
+def _read_codex_hook_payload() -> CodexHookPayload | None:
+    return CodexHookPayload.from_text(typer.get_text_stream("stdin").read())
+
+
+def _workflow_event_log(thread_id: str) -> WorkflowEventLog:
+    return WorkflowEventLog(_get_thread_store().workflow_event_log_path(thread_id))
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _append_workflow_event(thread_id: str, **event: object) -> None:
+    record = {"timestamp": _iso_now(), "thread_id": thread_id, **event}
+    _workflow_event_log(thread_id).append(record)
+
+
+def _load_thread_snapshot(thread_id: str, config: BTwinConfig) -> tuple[dict[str, object], dict[str, object]]:
+    if _use_attached_api(config):
+        thread = _attached_api_get_or_exit(f"/api/threads/{thread_id}")
+        status_summary = _attached_api_get_or_exit(f"/api/threads/{thread_id}/status")
+    else:
+        store = _get_thread_store()
+        thread = store.get_thread(thread_id)
+        if thread is None:
+            console.print(f"[red]Thread not found:[/red] {thread_id}")
+            raise typer.Exit(4)
+        status_summary = store.get_status(thread_id)
+    return dict(thread), dict(status_summary)
+
+
+def _try_load_thread_snapshot(thread_id: str, config: BTwinConfig) -> tuple[dict[str, object] | None, dict[str, object] | None, str | None]:
+    if _use_attached_api(config):
+        import httpx
+
+        try:
+            thread = _api_get(f"/api/threads/{thread_id}")
+            status_summary = _api_get(f"/api/threads/{thread_id}/status")
+        except httpx.HTTPStatusError as exc:
+            response = exc.response
+            detail = None
+            try:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    detail = payload.get("detail")
+            except Exception:
+                detail = None
+            detail_text = detail if isinstance(detail, str) else response.text.strip() or exc.__class__.__name__
+            return None, None, f"thread lookup error for {thread_id}: {response.status_code} {detail_text}"
+        except httpx.RequestError as exc:
+            return None, None, f"thread lookup error for {thread_id}: {exc.__class__.__name__}: {exc}"
+        except Exception as exc:
+            return None, None, f"thread lookup error for {thread_id}: {exc}"
+        return dict(thread), dict(status_summary), None
+
+    try:
+        thread, status_summary = _load_thread_snapshot(thread_id, config)
+    except Exception as exc:
+        return None, None, f"thread lookup error for {thread_id}: {exc}"
+    return thread, status_summary, None
+
+
+def _render_thread_watch(thread: dict[str, object], status_summary: dict[str, object], events: list[dict[str, object]]) -> str:
+    lines = [
+        f"Thread  {thread.get('thread_id')}  {thread.get('protocol')}  phase={thread.get('current_phase')}",
+    ]
+    agents = status_summary.get("agents", [])
+    if isinstance(agents, list) and agents:
+        parts = []
+        for agent in agents:
+            if isinstance(agent, dict):
+                parts.append(f"{agent.get('name')}={agent.get('status')}")
+        if parts:
+            lines.append(f"Agents  {', '.join(parts)}")
+    topic = thread.get("topic")
+    if topic:
+        lines.append(f"Topic   {topic}")
+    if events:
+        lines.append("")
+        for event in events:
+            timestamp = str(event.get("timestamp", ""))
+            time_label = timestamp[11:19] if "T" in timestamp and len(timestamp) >= 19 else timestamp
+            event_type = str(event.get("event_type", "event"))
+            hook_name = str(event.get("hook_event_name") or "").strip()
+            decision = str(event.get("decision") or "").strip()
+            source = str(event.get("source") or "").strip()
+            lane = "BTWIN -> CODEX" if source.startswith("btwin.") or event_type == "hook_decision" else "CODEX -> BTWIN"
+            if event_type == "hook_received":
+                headline = f"{hook_name or 'Hook'} check requested"
+            elif event_type == "hook_decision":
+                if decision == "block":
+                    headline = f"{hook_name or 'Hook'} blocked"
+                elif decision == "allow":
+                    headline = f"{hook_name or 'Hook'} allowed"
+                elif decision == "noop":
+                    headline = f"{hook_name or 'Hook'} no-op"
+                else:
+                    headline = f"{hook_name or 'Hook'} decision"
+            else:
+                headline = event_type.replace("_", " ")
+            agent = event.get("agent")
+            phase = event.get("phase")
+            reason = event.get("reason")
+            session_id = event.get("session_id")
+            turn_id = event.get("turn_id")
+            lines.append(f"{time_label}  {lane}  {headline}")
+            details = []
+            if agent:
+                details.append(f"agent: {agent}")
+            if phase:
+                details.append(f"phase: {phase}")
+            if reason:
+                details.append(f"reason: {reason}")
+            if details:
+                lines.append(f"          {'  '.join(details)}")
+            ids = []
+            if session_id:
+                ids.append(f"session: {session_id}")
+            if turn_id:
+                ids.append(f"turn: {turn_id}")
+            if ids:
+                lines.append(f"          {'  '.join(ids)}")
+            summary = event.get("summary")
+            if summary:
+                lines.append(f"          summary: {summary}")
+    return "\n".join(lines)
+
+
+def _resolve_bound_thread_id() -> str | None:
+    state = _get_runtime_binding_store().read_state()
+    if state.binding is None:
+        return None
+    return state.binding.thread_id
+
+
+def _render_hud(thread_id: str | None, limit: int) -> str:
+    config = _get_config()
+    binding_state = _get_runtime_binding_store().read_state()
+    binding = binding_state.binding
+    lines = ["B-TWIN HUD"]
+
+    binding_label = "none"
+    if binding is not None:
+        binding_label = binding.agent_name
+    lines.append(f"Runtime  mode={config.runtime.mode}  binding={binding_label}")
+    if binding_state.binding_error:
+        lines.append(f"Binding  error={binding_state.binding_error}")
+
+    target_thread_id = thread_id or (binding.thread_id if binding is not None else None)
+    if target_thread_id is None:
+        return "\n".join(lines)
+
+    thread, status_summary, lookup_error = _try_load_thread_snapshot(target_thread_id, config)
+    if lookup_error is not None:
+        lines.append(f"Thread   {target_thread_id}")
+        lines.append(f"Status   {lookup_error}")
+        lines.append("Hint     current binding points to a thread this runtime surface cannot resolve")
+        return "\n".join(lines)
+
+    lines.append("")
+    lines.append(_render_thread_watch(thread, status_summary, _workflow_event_log(target_thread_id).list_events(limit=limit)))
+    return "\n".join(lines)
+
+
+def _list_hud_threads(config: BTwinConfig) -> list[dict[str, object]]:
+    if _use_attached_api(config):
+        threads = _api_get("/api/threads", params={"status": "active"})
+    else:
+        threads = _get_thread_store().list_threads(status="active")
+    if not isinstance(threads, list):
+        return []
+    return [thread for thread in threads if isinstance(thread, dict)]
+
+
+@dataclass
+class _HudNavigatorState:
+    screen: str = "menu"
+    menu_index: int = 0
+    thread_index: int = 0
+    selected_thread_id: str | None = None
+
+
+def _hud_is_interactive() -> bool:
+    stdin = typer.get_text_stream("stdin")
+    stdout = typer.get_text_stream("stdout")
+    return bool(
+        getattr(stdin, "isatty", lambda: False)()
+        and getattr(stdout, "isatty", lambda: False)()
+    )
+
+
+def _hud_menu_items() -> list[str]:
+    return ["threads"]
+
+
+def _clamp_index(index: int, count: int) -> int:
+    if count <= 0:
+        return 0
+    return max(0, min(index, count - 1))
+
+
+def _hud_key_from_bytes(data: bytes) -> str | None:
+    if not data:
+        return None
+    text = data.decode(errors="ignore")
+    if text.startswith("\x1b[A"):
+        return "up"
+    if text.startswith("\x1b[B"):
+        return "down"
+    if text in {"\r", "\n"}:
+        return "enter"
+    if text.lower() == "q":
+        return "quit"
+    if text.lower() == "b":
+        return "back"
+    if text.lower() == "c":
+        return "close"
+    return None
+
+
+def _read_hud_key(timeout: float) -> str | None:
+    stdin = typer.get_text_stream("stdin")
+    if not hasattr(stdin, "fileno"):
+        time.sleep(timeout)
+        return None
+    readable, _, _ = select.select([stdin], [], [], timeout)
+    if not readable:
+        return None
+    data = os.read(stdin.fileno(), 8)
+    return _hud_key_from_bytes(data)
+
+
+class _HudRawInput:
+    def __enter__(self):
+        self._stdin = typer.get_text_stream("stdin")
+        self._enabled = False
+        if hasattr(self._stdin, "fileno") and getattr(self._stdin, "isatty", lambda: False)():
+            self._fd = self._stdin.fileno()
+            self._old_settings = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+            self._enabled = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._enabled:
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_settings)
+        return False
+
+
+def _close_hud_thread(thread_id: str, config: BTwinConfig) -> None:
+    summary = "Closed from B-TWIN HUD."
+    if _use_attached_api(config):
+        _attached_api_call_or_exit(f"/api/threads/{thread_id}/close", {"summary": summary})
+        return
+
+    closed = _get_thread_store().close_thread(thread_id, summary=summary)
+    if closed is None:
+        raise typer.BadParameter(f"Thread not found: {thread_id}")
+
+
+def _render_hud_menu(state: _HudNavigatorState) -> str:
+    items = _hud_menu_items()
+    lines = ["B-TWIN HUD", "", "Menu", ""]
+    for index, item in enumerate(items):
+        prefix = ">" if index == state.menu_index else " "
+        lines.append(f"{prefix} {escape(f'[{item}]')}")
+    lines.extend(["", "Controls  up/down move  enter select  q quit"])
+    return "\n".join(lines)
+
+
+def _render_hud_threads(state: _HudNavigatorState, config: BTwinConfig, limit: int) -> str:
+    threads = _list_hud_threads(config)
+    state.thread_index = _clamp_index(state.thread_index, len(threads))
+    lines = ["B-TWIN HUD", "", "Threads", ""]
+    if not threads:
+        lines.extend(["  [dim]No active threads[/dim]", "", "Controls  b back  q quit"])
+        return "\n".join(lines)
+
+    for index, thread in enumerate(threads):
+        prefix = ">" if index == state.thread_index else " "
+        lines.append(
+            f"{prefix} {thread.get('thread_id')}  {thread.get('topic')}  "
+            f"{thread.get('protocol')}  phase={thread.get('current_phase')}"
+        )
+
+    focused = threads[state.thread_index]
+    focused_thread_id = focused.get("thread_id")
+    lines.extend(["", "Preview", ""])
+    if isinstance(focused_thread_id, str):
+        lines.append(_render_hud(focused_thread_id, min(limit, 5)))
+    lines.extend(["", "Controls  up/down move  enter open  c close  b back  q quit"])
+    return "\n".join(lines)
+
+
+def _render_hud_thread_live(state: _HudNavigatorState, limit: int) -> str:
+    lines = ["B-TWIN HUD", ""]
+    if state.selected_thread_id is None:
+        lines.extend(["No thread selected.", "", "Controls  b back  q quit"])
+        return "\n".join(lines)
+    lines.append(_render_hud(state.selected_thread_id, limit))
+    lines.extend(["", "Controls  c close  b back  q quit"])
+    return "\n".join(lines)
+
+
+def _render_hud_navigator(state: _HudNavigatorState, config: BTwinConfig, limit: int) -> str:
+    if state.screen == "threads":
+        return _render_hud_threads(state, config, limit)
+    if state.screen == "thread":
+        return _render_hud_thread_live(state, limit)
+    return _render_hud_menu(state)
+
+
+def _apply_hud_key(
+    state: _HudNavigatorState,
+    key: str | None,
+    config: BTwinConfig,
+) -> bool:
+    if key is None:
+        return False
+    if key == "quit":
+        return True
+
+    if state.screen == "menu":
+        items = _hud_menu_items()
+        if key == "up":
+            state.menu_index = _clamp_index(state.menu_index - 1, len(items))
+        elif key == "down":
+            state.menu_index = _clamp_index(state.menu_index + 1, len(items))
+        elif key == "enter" and items[state.menu_index] == "threads":
+            state.screen = "threads"
+            state.thread_index = 0
+        return False
+
+    if state.screen == "threads":
+        threads = _list_hud_threads(config)
+        if key == "back":
+            state.screen = "menu"
+            return False
+        if key == "up":
+            state.thread_index = _clamp_index(state.thread_index - 1, len(threads))
+        elif key == "down":
+            state.thread_index = _clamp_index(state.thread_index + 1, len(threads))
+        elif key == "enter" and threads:
+            state.thread_index = _clamp_index(state.thread_index, len(threads))
+            selected = threads[state.thread_index].get("thread_id")
+            if isinstance(selected, str) and selected:
+                state.selected_thread_id = selected
+                state.screen = "thread"
+        elif key == "close" and threads:
+            state.thread_index = _clamp_index(state.thread_index, len(threads))
+            selected = threads[state.thread_index].get("thread_id")
+            if isinstance(selected, str) and selected:
+                _close_hud_thread(selected, config)
+                remaining = _list_hud_threads(config)
+                state.thread_index = _clamp_index(state.thread_index, len(remaining))
+        return False
+
+    if state.screen == "thread":
+        if key == "back":
+            state.screen = "threads"
+            return False
+        if key == "close" and state.selected_thread_id is not None:
+            _close_hud_thread(state.selected_thread_id, config)
+            state.selected_thread_id = None
+            state.screen = "threads"
+            remaining = _list_hud_threads(config)
+            state.thread_index = _clamp_index(state.thread_index, len(remaining))
+            return False
+
+    return False
+
+
+def _run_hud_navigator(limit: int, interval: float) -> None:
+    config = _get_config()
+    state = _HudNavigatorState()
+    try:
+        with _HudRawInput(), Live(
+            _render_hud_navigator(state, config, limit),
+            console=console,
+            auto_refresh=False,
+            screen=True,
+        ) as live:
+            while True:
+                live.update(_render_hud_navigator(state, config, limit), refresh=True)
+                key = _read_hud_key(interval)
+                if _apply_hud_key(state, key, config):
+                    return
+    except KeyboardInterrupt:
+        return
+
+
+def _prompt_hud_thread_selection(config: BTwinConfig) -> str | None:
+    console.print("B-TWIN HUD")
+    console.print("Views")
+    console.print("  [1] threads")
+    console.print("  [q] quit")
+
+    view_choice = console.input("Select view: ").strip().lower()
+    if view_choice in {"q", "quit", "exit"}:
+        raise typer.Exit(0)
+    if view_choice != "1":
+        raise typer.BadParameter("Only the threads view is currently supported.")
+
+    threads = _list_hud_threads(config)
+    console.print("")
+    console.print("Active Threads")
+    if not threads:
+        console.print("  [dim]No active threads found.[/dim]")
+        raise typer.Exit(0)
+
+    for index, thread in enumerate(threads, start=1):
+        thread_id = thread.get("thread_id", "-")
+        topic = thread.get("topic", "-")
+        protocol = thread.get("protocol", "-")
+        phase = thread.get("current_phase", "-")
+        console.print(f"  [{index}] {thread_id}  {topic}  {protocol}  phase={phase}")
+
+    choice = console.input("Select thread: ").strip().lower()
+    if choice in {"q", "quit", "exit"}:
+        raise typer.Exit(0)
+    if not choice.isdigit():
+        raise typer.BadParameter("Thread selection must be a number.")
+
+    selected_index = int(choice) - 1
+    if selected_index < 0 or selected_index >= len(threads):
+        raise typer.BadParameter("Thread selection is out of range.")
+
+    selected_thread_id = threads[selected_index].get("thread_id")
+    if not isinstance(selected_thread_id, str) or not selected_thread_id:
+        raise typer.BadParameter("Selected thread is missing a thread_id.")
+    return selected_thread_id
+
+
+def _tmux_layout_name(thread_id: str | None) -> str:
+    suffix = thread_id.split("-")[-1] if thread_id else _project_root().name or "btwin"
+    return f"btwin-{suffix}"
+
+
+def _tmux_command(command: str) -> str:
+    return command
+
+
+def _inherit_shell_env(command: str, env_keys: tuple[str, ...] = ("BTWIN_CONFIG_PATH", "BTWIN_DATA_DIR", "BTWIN_API_URL")) -> str:
+    prefixes = []
+    for key in env_keys:
+        value = os.environ.get(key)
+        if value:
+            prefixes.append(f"{key}={shlex.quote(value)}")
+    if not prefixes:
+        return command
+    return f"{' '.join(prefixes)} {command}"
+
+
+def _interactive_shell_exec(command: str) -> str:
+    shell_path = os.environ.get("SHELL") or "/bin/zsh"
+    return f"{shlex.quote(shell_path)} -ic {shlex.quote(f'exec {command}')}"
+
+
+def _run_live_view(render_once, interval: float) -> None:
+    try:
+        with Live(render_once(), console=console, auto_refresh=False, screen=False) as live:
+            while True:
+                live.update(render_once(), refresh=True)
+                time.sleep(interval)
+    except KeyboardInterrupt:
+        return
+
+
+def _format_workflow_event_line(event: dict[str, object]) -> list[str]:
+    timestamp = str(event.get("timestamp", ""))
+    time_label = timestamp[11:19] if "T" in timestamp and len(timestamp) >= 19 else timestamp
+    event_type = str(event.get("event_type", "event"))
+    hook_name = event.get("hook_event_name")
+    decision = event.get("decision")
+    agent = event.get("agent")
+    phase = event.get("phase")
+    label_parts = [event_type]
+    if hook_name:
+        label_parts.append(str(hook_name))
+    if decision:
+        label_parts.append(str(decision))
+    suffix = " ".join(part for part in [str(agent) if agent else "", str(phase) if phase else ""] if part)
+    first_line = f"{time_label} {' '.join(label_parts)}"
+    if suffix:
+        first_line += f" {suffix}"
+    lines = [first_line]
+    summary = event.get("summary")
+    if summary:
+        lines.append(f"  {summary}")
+    return lines
+
+
+def _run_hud_stream(thread_id: str | None, interval: float) -> None:
+    last_thread_id: str | None = None
+    last_event_count = 0
+    waiting_shown = False
+    try:
+        while True:
+            target_thread_id = thread_id or _resolve_bound_thread_id()
+            if target_thread_id is None:
+                if not waiting_shown:
+                    console.print("B-TWIN HUD stream")
+                    console.print("waiting for runtime binding...")
+                    waiting_shown = True
+                time.sleep(interval)
+                continue
+
+            waiting_shown = False
+            if target_thread_id != last_thread_id:
+                config = _get_config()
+                thread, _status_summary, lookup_error = _try_load_thread_snapshot(target_thread_id, config)
+                console.print("B-TWIN HUD stream")
+                if lookup_error is not None:
+                    console.print(f"thread={target_thread_id}")
+                    console.print(lookup_error)
+                    console.print("hint: current binding points to a thread this runtime surface cannot resolve")
+                    last_thread_id = target_thread_id
+                    last_event_count = 0
+                    time.sleep(interval)
+                    continue
+                console.print(f"thread={target_thread_id} protocol={thread.get('protocol')} phase={thread.get('current_phase')}")
+                last_thread_id = target_thread_id
+                last_event_count = 0
+
+            events = _workflow_event_log(target_thread_id).list_events()
+            for event in events[last_event_count:]:
+                for line in _format_workflow_event_line(event):
+                    console.print(line)
+            last_event_count = len(events)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return
 
 
 def _thread_enter_command(thread_id: str, actor: str = "user") -> str:
@@ -1507,6 +2057,12 @@ def _write_codex_project_config(config_path: Path, project_name: str) -> None:
             r'\[mcp_servers\.btwin\]\n(?:[^\[]*\n)*',
             "",
             raw,
+        )
+        # Older local init flows could leave invalid root-level btwin args lines.
+        raw = re.sub(
+            r'(?m)^args = \["mcp-proxy", "--project", "[^"]+"\]\n?',
+            "",
+            raw,
         ).rstrip()
 
     lines: list[str] = []
@@ -1519,6 +2075,29 @@ def _write_codex_project_config(config_path: Path, project_name: str) -> None:
     lines.append("")
 
     config_path.write_text("\n".join(lines))
+
+
+def _write_codex_project_hooks(hooks_path: Path) -> None:
+    """Write project-scoped Codex hook registrations for btwin."""
+    hooks_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_command = f"{shlex.quote(sys.executable)} -m btwin_cli.main workflow hook"
+    payload = {
+        "hooks": {
+            "UserPromptSubmit": [
+                {
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": hook_command, "timeout": 10}],
+                }
+            ],
+            "Stop": [
+                {
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": hook_command, "timeout": 10}],
+                }
+            ],
+        }
+    }
+    hooks_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 @agent_app.command("list")
@@ -1925,7 +2504,11 @@ def live_attach(
     _require_attached_live(config)
     payload = _attached_api_call_or_exit(
         f"/api/threads/{thread_id}/spawn-agent",
-        {"agentName": agent_name, "bypassPermissions": full_auto},
+        {
+            "agentName": agent_name,
+            "bypassPermissions": full_auto,
+            "projectRoot": str(_project_root()),
+        },
     )
     if as_json:
         _emit_payload(payload, as_json=True)
@@ -1968,7 +2551,11 @@ def live_enter(
     for agent_name in attach_agents:
         _attached_api_call_or_exit(
             f"/api/threads/{thread_id}/spawn-agent",
-            {"agentName": agent_name, "bypassPermissions": full_auto},
+            {
+                "agentName": agent_name,
+                "bypassPermissions": full_auto,
+                "projectRoot": str(_project_root()),
+            },
         )
 
     snapshot = _load_live_enter_snapshot(thread_id, actor, config)
@@ -2178,6 +2765,28 @@ def thread_show(
     _emit_payload(payload, as_json=as_json)
 
 
+@thread_app.command("watch")
+def thread_watch(
+    thread_id: str = typer.Argument(..., help="Thread id"),
+    limit: int = typer.Option(10, "--limit", min=1, help="Number of recent workflow events to show"),
+    follow: bool = typer.Option(False, "--follow", help="Poll and redraw the thread HUD"),
+    interval: float = typer.Option(1.0, "--interval", min=0.2, help="Poll interval in seconds"),
+):
+    """Show a compact workflow HUD for one thread."""
+
+    def render_once() -> str:
+        config = _get_config()
+        thread, status_summary = _load_thread_snapshot(thread_id, config)
+        events = _workflow_event_log(thread_id).list_events(limit=limit)
+        return _render_thread_watch(thread, status_summary, events)
+
+    if not follow:
+        console.print(render_once())
+        return
+
+    _run_live_view(render_once, interval)
+
+
 @thread_app.command("send-message")
 def thread_send_message(
     thread_id: str = typer.Option(..., "--thread", help="Thread id"),
@@ -2304,7 +2913,112 @@ def contribution_submit(
     if contribution is None:
         console.print(f"[red]Thread not found or closed:[/red] {thread_id}")
         raise typer.Exit(4)
+    _append_workflow_event(
+        thread_id,
+        event_type="contribution_recorded",
+        source="btwin.contribution.submit",
+        agent=agent_name,
+        phase=phase,
+        contribution_id=contribution.get("contribution_id"),
+        summary=tldr,
+    )
     _emit_payload(contribution, as_json=as_json)
+
+
+@workflow_app.command("hook")
+def workflow_hook(
+    event: str | None = typer.Option(None, "--event", help="Codex hook event name"),
+    thread_id: str | None = typer.Option(None, "--thread", help="Thread id"),
+    agent_name: str | None = typer.Option(None, "--agent", help="Current actor/agent name"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Evaluate the minimal workflow constraint contract for one hook event."""
+    current_config = _get_config()
+
+    codex_payload = None
+    if event is None and thread_id is None:
+        codex_payload = _read_codex_hook_payload()
+        if codex_payload is None:
+            return
+        event = codex_payload.hook_event_name
+        if event not in {"SessionStart", "UserPromptSubmit", "Stop"}:
+            return
+        binding_state = _get_runtime_binding_store().read_state()
+        if binding_state.binding is None:
+            return
+        thread_id = binding_state.binding.thread_id
+        if agent_name is None:
+            agent_name = binding_state.binding.agent_name
+
+    if event not in {"SessionStart", "UserPromptSubmit", "Stop"}:
+        console.print(f"[red]Unsupported workflow hook event:[/red] {event}")
+        raise typer.Exit(2)
+
+    resolved_thread_id, _thread_source = _resolve_runtime_thread_id(thread_id, current_config)
+    if agent_name is None:
+        binding_state = _get_runtime_binding_store().read_state()
+        if binding_state.binding is not None and binding_state.binding.thread_id == resolved_thread_id:
+            agent_name = binding_state.binding.agent_name
+
+    if codex_payload is not None:
+        _append_workflow_event(
+            resolved_thread_id,
+            event_type="hook_received",
+            source="codex.hook",
+            agent=agent_name,
+            phase=None,
+            session_id=codex_payload.session_id,
+            turn_id=codex_payload.turn_id,
+            hook_event_name=event,
+            summary=f"{event} received.",
+        )
+
+    thread, protocol, _phase, _phase_participants, contributions = _load_protocol_flow_context(
+        resolved_thread_id,
+        current_config,
+    )
+    result = evaluate_workflow_hook(
+        event=event,
+        thread=thread,
+        protocol=protocol,
+        actor=agent_name,
+        contributions=contributions,
+    )
+    if codex_payload is not None:
+        summary = f"{event} allowed."
+        if result.decision == "block":
+            summary = result.overlay or "Hook blocked by workflow constraints."
+        elif result.decision == "noop":
+            summary = result.overlay or f"{event} evaluated."
+        _append_workflow_event(
+            resolved_thread_id,
+            event_type="hook_decision",
+            source="btwin.workflow.hook",
+            agent=agent_name,
+            phase=thread.get("current_phase"),
+            session_id=codex_payload.session_id,
+            turn_id=codex_payload.turn_id,
+            hook_event_name=event,
+            decision=result.decision,
+            reason=result.reason,
+            summary=summary,
+        )
+    if codex_payload is not None and not as_json:
+        raw_response = build_codex_hook_response(codex_payload, result)
+        if raw_response is not None:
+            _emit_raw_json(raw_response)
+        return
+
+    payload = {
+        "thread_id": resolved_thread_id,
+        "protocol": protocol.name,
+        "current_phase": thread.get("current_phase"),
+        "agent": agent_name,
+        **result.model_dump(),
+    }
+    _emit_payload(payload, as_json=as_json)
+    if result.decision == "block":
+        raise typer.Exit(2)
 
 
 @service_app.command("install")
@@ -2408,7 +3122,8 @@ def init(
             project_name = _detect_project_name()
 
         codex_config_path = Path.cwd() / ".codex" / "config.toml"
-        existing_paths = [path for path in (codex_config_path,) if path.exists()]
+        codex_hooks_path = Path.cwd() / ".codex" / "hooks.json"
+        existing_paths = [path for path in (codex_config_path, codex_hooks_path) if path.exists()]
 
         if existing_paths and not force:
             existing_list = "\n".join(f"- {path.name if path.parent == Path.cwd() else path.relative_to(Path.cwd())}" for path in existing_paths)
@@ -2420,8 +3135,10 @@ def init(
             raise typer.Exit(1)
 
         _write_codex_project_config(codex_config_path, project_name)
+        _write_codex_project_hooks(codex_hooks_path)
         console.print(f"[green]Created local {provider_label} MCP config[/green] (project: {project_name})")
         console.print("[dim]- Codex: .codex/config.toml[/dim]")
+        console.print("[dim]- Hooks: .codex/hooks.json[/dim]")
     else:
         console.print(f"[bold]Registering B-TWIN MCP for {provider_label}...[/bold]\n")
         _register_codex_global(force=force)
@@ -3017,6 +3734,95 @@ def runtime_clear(
         "previous_binding_error": previous.binding_error,
     }
     _emit_payload(payload, as_json=as_json)
+
+
+@app.command("open")
+def open_btwin(
+    thread_id: str | None = typer.Option(None, "--thread", help="Optional thread id to focus inside the HUD"),
+    no_hud: bool = typer.Option(False, "--no-hud", help="Launch Codex without the btwin HUD pane"),
+):
+    """Launch a tmux workspace with foreground Codex and a thread HUD pane."""
+    tmux_path = shutil.which("tmux")
+    current_btwin_path = _current_btwin_command_path()
+    btwin_path = str(current_btwin_path) if current_btwin_path is not None else shutil.which("btwin")
+    codex_path = shutil.which("codex")
+    cwd = str(_project_root())
+    hud_parts = [shlex.quote(btwin_path or "btwin"), "hud", "--stream"]
+    if thread_id:
+        hud_parts.extend(["--thread", shlex.quote(thread_id)])
+    watch_command = _inherit_shell_env(_tmux_command(" ".join(hud_parts)))
+    codex_command = _inherit_shell_env(_tmux_command(_interactive_shell_exec("codex")))
+
+    if not tmux_path:
+        console.print("[yellow]tmux is not installed.[/yellow]")
+        if no_hud:
+            console.print("Run this command in your terminal:")
+            console.print(f"  {codex_command}")
+            return
+        console.print("Run these commands in two terminals:")
+        console.print(f"  {codex_command}")
+        console.print(f"  {watch_command}")
+        return
+
+    layout_name = _tmux_layout_name(thread_id)
+    if os.environ.get("TMUX"):
+        target = f":{layout_name}"
+        subprocess.run(["tmux", "new-window", "-n", layout_name, "-c", cwd, codex_command], check=True)
+        if not no_hud:
+            subprocess.run(["tmux", "split-window", "-h", "-t", target, "-c", cwd, watch_command], check=True)
+            subprocess.run(["tmux", "select-layout", "-t", target, "even-horizontal"], check=True)
+        subprocess.run(["tmux", "select-window", "-t", target], check=True)
+        return
+
+    target = f"{layout_name}:0"
+    existing = subprocess.run(["tmux", "has-session", "-t", layout_name], check=False)
+    if existing.returncode == 0:
+        attached = subprocess.run(["tmux", "attach-session", "-t", layout_name], check=False)
+        if attached.returncode != 0:
+            console.print(f"[yellow]tmux session already exists but could not attach automatically.[/yellow] {layout_name}")
+            console.print(f"Attach manually: tmux attach-session -t {layout_name}")
+        return
+    subprocess.run(["tmux", "new-session", "-d", "-s", layout_name, "-c", cwd, codex_command], check=True)
+    if not no_hud:
+        subprocess.run(["tmux", "split-window", "-h", "-t", target, "-c", cwd, watch_command], check=True)
+        subprocess.run(["tmux", "select-layout", "-t", target, "even-horizontal"], check=True)
+    attached = subprocess.run(["tmux", "attach-session", "-t", layout_name], check=False)
+    if attached.returncode != 0:
+        console.print(f"[yellow]tmux session created but could not attach automatically.[/yellow] {layout_name}")
+        console.print(f"Attach manually: tmux attach-session -t {layout_name}")
+
+
+@app.command("hud")
+def hud(
+    thread_id: str | None = typer.Option(None, "--thread", help="Optional thread id to focus"),
+    threads: bool = typer.Option(False, "--threads", help="Choose an active thread from a simple HUD menu"),
+    limit: int = typer.Option(10, "--limit", min=1, help="Number of recent workflow events to show"),
+    follow: bool = typer.Option(False, "--follow", help="Poll and redraw the HUD"),
+    stream: bool = typer.Option(False, "--stream", help="Show append-only workflow events in real time"),
+    interval: float = typer.Option(1.0, "--interval", min=0.2, help="Poll interval in seconds"),
+):
+    """Show a compact btwin dashboard and optional thread-aware HUD."""
+    if _hud_is_interactive() and thread_id is None and not follow and not stream and not threads:
+        _run_hud_navigator(limit, interval)
+        return
+
+    config = _get_config()
+    selected_thread_id = thread_id
+    if threads:
+        selected_thread_id = _prompt_hud_thread_selection(config)
+
+    def render_once() -> str:
+        return _render_hud(selected_thread_id, limit)
+
+    if stream:
+        _run_hud_stream(selected_thread_id, interval)
+        return
+
+    if not follow:
+        console.print(render_once())
+        return
+
+    _run_live_view(render_once, interval)
 
 
 _PLATFORMS = {

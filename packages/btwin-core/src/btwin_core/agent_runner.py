@@ -39,6 +39,7 @@ INVOKE_TIMEOUT = 300  # 5 minutes
 PROMPT_MAX_BYTES = 24_000
 LIVE_TRANSPORT_IDLE_TIMEOUT = 6.0
 LIVE_TRANSPORT_TURN_TIMEOUT = 30.0
+SUBPROCESS_STREAM_LIMIT = 1024 * 1024
 
 
 def _now_iso() -> str:
@@ -137,9 +138,9 @@ class AgentRunner:
             self._provider_cache[provider_name] = provider
         return provider
 
-    def _workspace_root(self) -> Path:
+    def _workspace_root(self, workspace_root: Path | None = None) -> Path:
         """Return the active workspace root for subprocess working directories."""
-        return resolve_workspace_root()
+        return resolve_workspace_root(start=workspace_root)
 
     def _resolve_runtime_config(self, config: BTwinConfig | None) -> BTwinConfig:
         if config is not None:
@@ -251,6 +252,7 @@ class AgentRunner:
         agent_name: str,
         *,
         launch_env: dict[str, str] | None = None,
+        workspace_root: Path | None = None,
         typing_state: TurnTypingState | None = None,
         defer_typing_done: bool = False,
     ) -> InvocationResult:
@@ -263,8 +265,9 @@ class AgentRunner:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=str(self._workspace_root()),
+                cwd=str(self._workspace_root(workspace_root)),
                 env=env,
+                limit=SUBPROCESS_STREAM_LIMIT,
             )
         except FileNotFoundError:
             self._emit_session_state(thread_id, agent_name, "failed", reason="cli_missing")
@@ -518,6 +521,7 @@ class AgentRunner:
                 thread_id,
                 agent_name,
                 launch_env=launch.env,
+                workspace_root=runtime_session.workspace_root,
                 typing_state=typing_state,
                 defer_typing_done=True,
             )
@@ -570,6 +574,7 @@ class AgentRunner:
                     thread_id,
                     agent_name,
                     launch_env=launch.env,
+                    workspace_root=runtime_session.workspace_root,
                     typing_state=typing_state,
                     defer_typing_done=True,
                 )
@@ -639,6 +644,7 @@ class AgentRunner:
         agent_name: str,
         *,
         bypass_permissions: bool | None = None,
+        workspace_root: Path | None = None,
     ) -> bool:
         """Register agent immediately, invoke in background."""
         key = (thread_id, agent_name)
@@ -648,11 +654,13 @@ class AgentRunner:
             return True
 
         # Verify agent exists and create session
-        session = self._get_or_create_session(thread_id, agent_name)
+        session = self._get_or_create_session(thread_id, agent_name, workspace_root=workspace_root)
         if session is None:
             return False
         if bypass_permissions is not None:
             session.bypass_permissions = bypass_permissions
+        if workspace_root is not None:
+            session.workspace_root = workspace_root
 
         # Register BEFORE invoke — messages will be routed to this agent
         self._managed_sessions.add(key)
@@ -1315,9 +1323,17 @@ class AgentRunner:
             self._populate_runtime_session_metadata(session, metadata)
         return launch
 
-    def _get_or_create_session(self, thread_id: str, agent_name: str) -> AgentSession | None:
+    def _get_or_create_session(
+        self,
+        thread_id: str,
+        agent_name: str,
+        *,
+        workspace_root: Path | None = None,
+    ) -> AgentSession | None:
         key = (thread_id, agent_name)
         if key in self._sessions:
+            if workspace_root is not None:
+                self._sessions[key].workspace_root = workspace_root
             return self._sessions[key]
 
         agent = self._agents.get_agent(agent_name)
@@ -1335,6 +1351,7 @@ class AgentRunner:
             provider=provider,
             transport_mode=transport.mode,
             bypass_permissions=bool(agent.get("bypass_permissions", False)),
+            workspace_root=workspace_root,
         )
         session.fallback_mode = transport.fallback_mode
         self._resolve_session_metadata(session)
@@ -1388,6 +1405,17 @@ class AgentRunner:
 
     def _resolve_provider(self, agent: dict) -> str | None:
         model_id = agent.get("model", "")
+        explicit_agent_provider = agent.get("provider")
+        if explicit_agent_provider:
+            profile = get_provider_runtime_profile(str(explicit_agent_provider))
+            canonical_name = (
+                profile.canonical_name
+                if profile is not None
+                else str(explicit_agent_provider)
+            )
+            if get_provider(canonical_name) is not None:
+                return canonical_name
+
         cli_config = agent.get("cli_config") or {}
         explicit_provider = cli_config.get("provider")
         if explicit_provider:

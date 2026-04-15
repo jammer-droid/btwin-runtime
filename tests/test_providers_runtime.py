@@ -1,6 +1,13 @@
+from pathlib import Path
+
 from btwin_cli.api_terminals import _load_providers
 from btwin_core.agent_runner import AgentRunner
+from btwin_core.agent_store import AgentStore
+from btwin_core.config import BTwinConfig
+from btwin_core.event_bus import EventBus
+from btwin_core.protocol_store import ProtocolStore
 from btwin_core.providers import ClaudeCodeProvider, CodexProvider
+from btwin_core.thread_store import ThreadStore
 
 
 def test_terminal_provider_loader_returns_unconfigured_payload_when_missing(tmp_path):
@@ -73,3 +80,54 @@ def test_codex_provider_normalizes_recognized_stream_events_and_preserves_unknow
     assert unknown is not None
     assert unknown.event_type == "hook"
     assert unknown.raw["type"] == "hook"
+
+
+def test_codex_provider_build_command_enables_hooks_for_new_sessions() -> None:
+    provider = CodexProvider()
+
+    cmd = provider.build_command(session_id=None, bypass_permissions=False)
+
+    assert cmd[:3] == ["codex", "exec", "--enable"]
+    assert "codex_hooks" in cmd
+    assert "--json" in cmd
+    assert "--skip-git-repo-check" in cmd
+
+
+def test_codex_provider_build_command_enables_hooks_for_resume_sessions() -> None:
+    provider = CodexProvider()
+
+    cmd = provider.build_command(session_id="thread-123", bypass_permissions=True)
+
+    assert cmd[:5] == ["codex", "exec", "resume", "thread-123", "--enable"]
+    assert "codex_hooks" in cmd
+    assert "--json" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+
+
+def test_agent_runner_prefers_explicit_agent_provider_over_model_lookup(tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    providers_path = data_dir / "providers.json"
+    providers_path.write_text('{"providers":[]}', encoding="utf-8")
+
+    agent_store = AgentStore(data_dir)
+    agent_store.register(
+        "alice",
+        model="gpt-5",
+        provider="codex",
+        role="implementer",
+    )
+
+    runner = AgentRunner(
+        thread_store=ThreadStore(data_dir / "threads"),
+        protocol_store=ProtocolStore(data_dir / "protocols"),
+        agent_store=agent_store,
+        event_bus=EventBus(),
+        providers_path=providers_path,
+        config=BTwinConfig(data_dir=data_dir),
+    )
+
+    agent = agent_store.get_agent("alice")
+
+    assert agent is not None
+    assert runner._resolve_provider(agent) == "codex"
