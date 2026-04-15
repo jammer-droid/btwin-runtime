@@ -44,7 +44,7 @@ from btwin_core.protocol_flow import describe_next
 from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolStore
 from btwin_core.protocol_validator import ProtocolValidator
 from btwin_core.sources import SourceRegistry
-from btwin_core.runtime_binding_store import RuntimeBindingState, RuntimeBindingStore
+from btwin_core.runtime_binding_store import RuntimeBinding, RuntimeBindingState, RuntimeBindingStore
 from btwin_core.runtime_logging import RuntimeEventLogger
 from btwin_core.thread_chat import parse_thread_chat_input
 from btwin_core.thread_store import ThreadStore
@@ -1060,6 +1060,25 @@ def _require_attached_live(config: BTwinConfig) -> None:
 
 def _get_runtime_binding_store() -> RuntimeBindingStore:
     return RuntimeBindingStore(_project_root() / ".btwin")
+
+
+def _refresh_runtime_binding_on_session_start(thread_id: str, agent_name: str | None) -> RuntimeBinding | None:
+    store = _get_runtime_binding_store()
+    state = store.read_state()
+    binding = state.binding
+    if binding is None or binding.thread_id != thread_id:
+        return None
+    if agent_name is not None and binding.agent_name != agent_name:
+        return None
+    try:
+        return store.observe_session_start(binding)
+    except Exception:
+        logger.warning(
+            "Failed to refresh runtime binding on SessionStart for thread %s",
+            thread_id,
+            exc_info=True,
+        )
+        return None
 
 
 def _resolve_runtime_thread(thread_id: str, config: BTwinConfig | None = None) -> dict | None:
@@ -2292,20 +2311,16 @@ def _write_codex_project_hooks(hooks_path: Path) -> None:
     """Write project-scoped Codex hook registrations for btwin."""
     hooks_path.parent.mkdir(parents=True, exist_ok=True)
     hook_command = f"{shlex.quote(sys.executable)} -m btwin_cli.main workflow hook"
+    hook_names = ("SessionStart", "UserPromptSubmit", "Stop")
     payload = {
         "hooks": {
-            "UserPromptSubmit": [
+            hook_name: [
                 {
                     "matcher": "*",
                     "hooks": [{"type": "command", "command": hook_command, "timeout": 10}],
                 }
-            ],
-            "Stop": [
-                {
-                    "matcher": "*",
-                    "hooks": [{"type": "command", "command": hook_command, "timeout": 10}],
-                }
-            ],
+            ]
+            for hook_name in hook_names
         }
     }
     hooks_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -3212,6 +3227,9 @@ def workflow_hook(
         binding_state = _get_runtime_binding_store().read_state()
         if binding_state.binding is not None and binding_state.binding.thread_id == resolved_thread_id:
             agent_name = binding_state.binding.agent_name
+
+    if event == "SessionStart":
+        _refresh_runtime_binding_on_session_start(resolved_thread_id, agent_name)
 
     if codex_payload is not None:
         _append_workflow_event(

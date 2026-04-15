@@ -29,6 +29,7 @@ def test_write_codex_project_hooks_creates_btwin_hook_commands(tmp_path):
     main._write_codex_project_hooks(hooks_path)
 
     written = hooks_path.read_text(encoding="utf-8")
+    assert '"SessionStart"' in written
     assert '"UserPromptSubmit"' in written
     assert '"Stop"' in written
     assert "workflow hook" in written

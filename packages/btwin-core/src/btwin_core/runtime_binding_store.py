@@ -8,8 +8,9 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,19 @@ class RuntimeBinding(BaseModel):
     thread_id: str
     agent_name: str
     bound_at: str
+    status: Literal["active", "closed"] = "active"
+    opened_at: str | None = None
+    last_seen_at: str | None = None
+    closed_at: str | None = None
+    closed_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _normalize_lifecycle_fields(self) -> "RuntimeBinding":
+        if self.opened_at is None:
+            self.opened_at = self.bound_at
+        if self.last_seen_at is None:
+            self.last_seen_at = self.opened_at or self.bound_at
+        return self
 
 
 class RuntimeBindingState(BaseModel):
@@ -85,8 +99,30 @@ class RuntimeBindingStore:
         return binding
 
     def bind(self, thread_id: str, agent_name: str) -> RuntimeBinding:
-        binding = RuntimeBinding(thread_id=thread_id, agent_name=agent_name, bound_at=_now_iso())
+        now = _now_iso()
+        binding = RuntimeBinding(
+            thread_id=thread_id,
+            agent_name=agent_name,
+            bound_at=now,
+            status="active",
+            opened_at=now,
+            last_seen_at=now,
+            closed_at=None,
+            closed_reason=None,
+        )
         return self.write(binding)
+
+    def observe_session_start(self, binding: RuntimeBinding) -> RuntimeBinding:
+        observed_at = _now_iso()
+        refreshed = binding.model_copy(
+            update={
+                "status": "active",
+                "last_seen_at": observed_at,
+                "closed_at": None,
+                "closed_reason": None,
+            }
+        )
+        return self.write(refreshed)
 
     def clear(self) -> RuntimeBindingState:
         current = self.read_state()

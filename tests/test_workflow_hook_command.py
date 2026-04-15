@@ -8,6 +8,7 @@ from btwin_cli.main import app
 from btwin_core.config import BTwinConfig, RuntimeConfig
 from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolSection, ProtocolStore
 from btwin_core.runtime_binding_store import RuntimeBindingStore
+import btwin_core.runtime_binding_store as runtime_binding_store
 from btwin_core.thread_store import ThreadStore
 from btwin_core.workflow_event_log import WorkflowEventLog
 
@@ -165,6 +166,77 @@ def test_workflow_hook_reads_stdin_user_prompt_submit_and_emits_empty_success(tm
 
     assert result.exit_code == 0, result.output
     assert result.output.strip() == ""
+
+
+def test_workflow_hook_reads_stdin_session_start_refreshes_binding_metadata(tmp_path, monkeypatch):
+    project_root, data_dir, _thread_store, thread = _seed_context(tmp_path)
+    timestamps = iter([
+        "2026-04-15T00:00:00+00:00",
+        "2026-04-15T00:05:00+00:00",
+    ])
+    monkeypatch.setattr(runtime_binding_store, "_now_iso", lambda: next(timestamps))
+    RuntimeBindingStore(project_root / ".btwin").bind(thread["thread_id"], "alice")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    payload = {
+        "session_id": "codex-session-1",
+        "transcript_path": None,
+        "cwd": str(project_root),
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.4",
+        "turn_id": "turn-1",
+    }
+    result = runner.invoke(app, ["workflow", "hook"], input=json.dumps(payload))
+
+    assert result.exit_code == 0, result.output
+    output = _parse_json_output(result.output)
+    assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "Resume thread" in output["hookSpecificOutput"]["additionalContext"]
+
+    binding_payload = json.loads((project_root / ".btwin" / "runtime" / "binding.json").read_text(encoding="utf-8"))
+    assert binding_payload["thread_id"] == thread["thread_id"]
+    assert binding_payload["agent_name"] == "alice"
+    assert binding_payload["status"] == "active"
+    assert binding_payload["bound_at"] == "2026-04-15T00:00:00+00:00"
+    assert binding_payload["opened_at"] == "2026-04-15T00:00:00+00:00"
+    assert binding_payload["last_seen_at"] == "2026-04-15T00:05:00+00:00"
+    assert binding_payload["closed_at"] is None
+    assert binding_payload["closed_reason"] is None
+
+
+def test_workflow_hook_reads_stdin_session_start_ignores_binding_refresh_write_failure(tmp_path, monkeypatch):
+    project_root, data_dir, _thread_store, thread = _seed_context(tmp_path)
+    RuntimeBindingStore(project_root / ".btwin").bind(thread["thread_id"], "alice")
+
+    real_store = RuntimeBindingStore(project_root / ".btwin")
+
+    class FailingRefreshStore:
+        def read_state(self):
+            return real_store.read_state()
+
+        def observe_session_start(self, binding):
+            raise OSError("binding file locked")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_runtime_binding_store", lambda: FailingRefreshStore())
+
+    payload = {
+        "session_id": "codex-session-1",
+        "transcript_path": None,
+        "cwd": str(project_root),
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.4",
+        "turn_id": "turn-1",
+    }
+    result = runner.invoke(app, ["workflow", "hook"], input=json.dumps(payload))
+
+    assert result.exit_code == 0, result.output
+    output = _parse_json_output(result.output)
+    assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "Resume thread" in output["hookSpecificOutput"]["additionalContext"]
 
 
 def test_workflow_hook_reads_stdin_stop_and_emits_block_reason(tmp_path, monkeypatch):

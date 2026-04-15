@@ -9,6 +9,7 @@ from btwin_core.agent_store import AgentStore
 from btwin_core.config import BTwinConfig, RuntimeConfig
 from btwin_core.runtime_binding_store import RuntimeBindingStore
 from btwin_core.thread_store import ThreadStore
+import btwin_core.runtime_binding_store as runtime_binding_store
 
 
 runner = CliRunner()
@@ -75,6 +76,11 @@ def test_runtime_bind_persists_binding_and_current(tmp_path, monkeypatch):
     assert bind_payload["binding"]["thread_id"] == thread["thread_id"]
     assert bind_payload["binding"]["agent_name"] == "alice"
     assert bind_payload["binding"]["bound_at"]
+    assert bind_payload["binding"]["status"] == "active"
+    assert bind_payload["binding"]["opened_at"] == bind_payload["binding"]["bound_at"]
+    assert bind_payload["binding"]["last_seen_at"] == bind_payload["binding"]["bound_at"]
+    assert bind_payload["binding"]["closed_at"] is None
+    assert bind_payload["binding"]["closed_reason"] is None
 
     binding_file = project_root / ".btwin" / "runtime" / "binding.json"
     assert binding_file.exists()
