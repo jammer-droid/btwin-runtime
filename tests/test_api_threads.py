@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from btwin_cli.api_threads import create_threads_router
 from btwin_core.event_bus import EventBus
-from btwin_core.protocol_store import ProtocolStore
+from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolSection, ProtocolStore
 from btwin_core.thread_store import ThreadStore
 
 
@@ -148,6 +148,106 @@ def test_attached_api_allows_direct_message_to_thread_participant_when_target_is
     payload = response.json()
     assert payload["delivery_mode"] == "direct"
     assert payload["target_agents"] == ["alice"]
+
+
+def test_attached_api_rejects_direct_message_when_current_phase_disallows_chat(tmp_path):
+    thread_store = ThreadStore(tmp_path / "threads")
+    protocol_store = ProtocolStore(tmp_path / "protocols")
+    event_bus = EventBus()
+    protocol_store.save_protocol(
+        Protocol(
+            name="decision-only",
+            description="Decision-only phase",
+            phases=[
+                ProtocolPhase(
+                    name="decision",
+                    actions=["decide"],
+                    decided_by="user",
+                    template=[ProtocolSection(section="agreed_points", required=True)],
+                )
+            ],
+        )
+    )
+    thread = thread_store.create_thread(
+        topic="Attached API direct delivery",
+        protocol="decision-only",
+        participants=["user", "alice"],
+        initial_phase="decision",
+    )
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(create_threads_router(thread_store, protocol_store, event_bus))
+    client = TestClient(app)
+
+    response = client.post(
+        f"/api/threads/{thread['thread_id']}/messages",
+        json={
+            "fromAgent": "user",
+            "content": "alice only",
+            "tldr": "direct ask",
+            "deliveryMode": "direct",
+            "targetAgents": ["alice"],
+        },
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["error"] == "direct_message_not_allowed_in_phase"
+    assert "decision" in detail["hint"]
+
+
+def test_attached_api_rejects_contribution_submit_when_phase_mismatches_current_phase(tmp_path):
+    thread_store = ThreadStore(tmp_path / "threads")
+    protocol_store = ProtocolStore(tmp_path / "protocols")
+    event_bus = EventBus()
+    protocol_store.save_protocol(
+        Protocol(
+            name="workflow-check",
+            description="Contribution guard",
+            phases=[
+                ProtocolPhase(
+                    name="context",
+                    actions=["contribute"],
+                    template=[ProtocolSection(section="background", required=True)],
+                ),
+                ProtocolPhase(
+                    name="decision",
+                    actions=["decide"],
+                    decided_by="user",
+                    template=[ProtocolSection(section="agreed_points", required=True)],
+                ),
+            ],
+        )
+    )
+    thread = thread_store.create_thread(
+        topic="Attached API contribution guard",
+        protocol="workflow-check",
+        participants=["user", "alice"],
+        initial_phase="context",
+    )
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(create_threads_router(thread_store, protocol_store, event_bus))
+    client = TestClient(app)
+
+    response = client.post(
+        f"/api/threads/{thread['thread_id']}/contributions",
+        json={
+            "agentName": "alice",
+            "phase": "decision",
+            "content": "## agreed_points\nShip it.\n",
+            "tldr": "decision made",
+        },
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["error"] == "phase_mismatch"
+    assert "context" in detail["hint"]
 
 
 def test_spawn_agent_accepts_bypass_permissions_flag(tmp_path):

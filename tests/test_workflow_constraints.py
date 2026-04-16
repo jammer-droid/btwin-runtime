@@ -66,3 +66,35 @@ def test_stop_allows_when_current_actor_has_required_phase_contribution():
     assert result.decision == "allow"
     assert result.reason is None
     assert result.required_result_recorded is True
+
+
+def test_stop_allows_when_actor_is_not_required_for_user_decision_phase():
+    protocol = Protocol(
+        name="decision-check",
+        description="Protocol with user-only decision",
+        phases=[
+            ProtocolPhase(
+                name="decision",
+                actions=["decide"],
+                decided_by="user",
+                template=[ProtocolSection(section="agreed_points", required=True)],
+            )
+        ],
+    )
+    thread = {
+        "thread_id": "thread-123",
+        "current_phase": "decision",
+        "phase_participants": ["alice", "bob"],
+    }
+
+    result = evaluate_workflow_hook(
+        event="Stop",
+        thread=thread,
+        protocol=protocol,
+        actor="alice",
+        contributions=[],
+    )
+
+    assert result.event == "Stop"
+    assert result.decision == "allow"
+    assert result.required_result_recorded is False

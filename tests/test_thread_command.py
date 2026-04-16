@@ -316,6 +316,65 @@ def test_thread_send_message_attached_404_preserves_not_found_exit_code(monkeypa
     assert "Thread 'thread-1' not found" in result.output
 
 
+def test_thread_close_standalone_rejects_when_protocol_requires_next_transition(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+
+    from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolSection, ProtocolStore
+    from btwin_core.thread_store import ThreadStore
+
+    protocol_store = ProtocolStore(project_root / ".btwin" / "protocols")
+    protocol_store.save_protocol(
+        Protocol(
+            name="review-flow",
+            description="Requires next transition before close",
+            phases=[
+                ProtocolPhase(
+                    name="context",
+                    actions=["contribute"],
+                    template=[ProtocolSection(section="background", required=True)],
+                ),
+                ProtocolPhase(name="discussion", actions=["discuss"]),
+            ],
+        )
+    )
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    thread = thread_store.create_thread(
+        topic="Standalone close guard",
+        protocol="review-flow",
+        participants=["alice"],
+        initial_phase="context",
+    )
+    thread_store.submit_contribution(
+        thread["thread_id"],
+        "alice",
+        "context",
+        content="## background\nDone.\n",
+        tldr="ready",
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    result = runner.invoke(
+        app,
+        [
+            "thread",
+            "close",
+            "--thread",
+            thread["thread_id"],
+            "--summary",
+            "done",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["error"] == "thread_not_closable_from_phase"
+    assert "protocol apply-next" in payload["hint"]
+
+
 def test_thread_inbox_attached_uses_shared_api(monkeypatch):
     calls: list[tuple[str, dict | None]] = []
 
@@ -458,6 +517,25 @@ def test_thread_lifecycle_standalone_creates_lists_and_closes_with_result_entry(
     monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
     monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
 
+    from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolSection, ProtocolStore
+
+    ProtocolStore(tmp_path / ".btwin" / "protocols").save_protocol(
+        Protocol(
+            name="close-next",
+            description="Single closeable phase",
+            phases=[
+                ProtocolPhase(
+                    name="summary",
+                    actions=["contribute"],
+                    template=[
+                        ProtocolSection(section="completed", required=True),
+                        ProtocolSection(section="remaining", required=True),
+                    ],
+                )
+            ],
+        )
+    )
+
     create_result = runner.invoke(
         app,
         [
@@ -466,7 +544,7 @@ def test_thread_lifecycle_standalone_creates_lists_and_closes_with_result_entry(
             "--topic",
             "Stand-alone orchestration",
             "--protocol",
-            "debate",
+            "close-next",
             "--participant",
             "alice",
             "--json",
@@ -485,6 +563,27 @@ def test_thread_lifecycle_standalone_creates_lists_and_closes_with_result_entry(
     assert list_active_result.exit_code == 0, list_active_result.output
     active_payload = _parse_json_output(list_active_result.output)
     assert [item["thread_id"] for item in active_payload] == [thread_id]
+
+    contribution_result = runner.invoke(
+        app,
+        [
+            "contribution",
+            "submit",
+            "--thread",
+            thread_id,
+            "--agent",
+            "alice",
+            "--phase",
+            "summary",
+            "--content",
+            "## completed\nDone.\n\n## remaining\nNothing.\n",
+            "--tldr",
+            "ready to close",
+            "--json",
+        ],
+    )
+
+    assert contribution_result.exit_code == 0, contribution_result.output
 
     close_result = runner.invoke(
         app,
@@ -533,11 +632,28 @@ def test_thread_close_standalone_omits_result_id_when_link_update_fails(tmp_path
     monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
 
     import btwin_core.btwin as btwin_module
+    from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolSection, ProtocolStore
 
     monkeypatch.setattr(
         btwin_module.BTwin,
         "update_entry",
         lambda self, **kwargs: {"ok": False, "error": "record_not_found", "record_id": kwargs["record_id"]},
+    )
+    ProtocolStore(tmp_path / ".btwin" / "protocols").save_protocol(
+        Protocol(
+            name="close-next",
+            description="Single closeable phase",
+            phases=[
+                ProtocolPhase(
+                    name="summary",
+                    actions=["contribute"],
+                    template=[
+                        ProtocolSection(section="completed", required=True),
+                        ProtocolSection(section="remaining", required=True),
+                    ],
+                )
+            ],
+        )
     )
 
     create_result = runner.invoke(
@@ -548,7 +664,7 @@ def test_thread_close_standalone_omits_result_id_when_link_update_fails(tmp_path
             "--topic",
             "Fallback check",
             "--protocol",
-            "debate",
+            "close-next",
             "--participant",
             "alice",
             "--json",
@@ -557,6 +673,27 @@ def test_thread_close_standalone_omits_result_id_when_link_update_fails(tmp_path
 
     assert create_result.exit_code == 0, create_result.output
     thread_id = _parse_json_output(create_result.output)["thread_id"]
+
+    contribution_result = runner.invoke(
+        app,
+        [
+            "contribution",
+            "submit",
+            "--thread",
+            thread_id,
+            "--agent",
+            "alice",
+            "--phase",
+            "summary",
+            "--content",
+            "## completed\nDone.\n\n## remaining\nNothing.\n",
+            "--tldr",
+            "ready to close",
+            "--json",
+        ],
+    )
+
+    assert contribution_result.exit_code == 0, contribution_result.output
 
     close_result = runner.invoke(
         app,

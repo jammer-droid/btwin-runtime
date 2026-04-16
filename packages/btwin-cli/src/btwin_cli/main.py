@@ -56,7 +56,15 @@ from btwin_core.thread_store import ThreadStore
 from btwin_core.workflow_event_log import WorkflowEventLog
 from btwin_core.storage import Storage
 from btwin_core.workflow_engine import WorkflowEngine
-from btwin_core.workflow_constraints import CodexHookPayload, build_codex_hook_response, evaluate_workflow_hook
+from btwin_core.workflow_constraints import (
+    CodexHookPayload,
+    build_codex_hook_response,
+    build_protocol_plan_hint,
+    evaluate_workflow_hook,
+    validate_contribution_submission,
+    validate_direct_message_targets,
+    validate_thread_close,
+)
 from btwin_cli.provider_init import (
     available_provider_names,
     build_provider_config,
@@ -3027,16 +3035,25 @@ def protocol_apply_next(
 
     if plan.error:
         base_payload["error"] = plan.error
+        hint = build_protocol_plan_hint(resolved_thread_id, plan)
+        if hint:
+            base_payload["hint"] = hint
         _emit_payload(base_payload, as_json=as_json)
         raise typer.Exit(2)
 
     if not plan.passed:
         base_payload["manual_outcome_required"] = False
+        hint = build_protocol_plan_hint(resolved_thread_id, plan)
+        if hint:
+            base_payload["hint"] = hint
         _emit_payload(base_payload, as_json=as_json)
         raise typer.Exit(0)
 
     if plan.suggested_action == "record_outcome":
         base_payload["manual_outcome_required"] = True
+        hint = build_protocol_plan_hint(resolved_thread_id, plan)
+        if hint:
+            base_payload["hint"] = hint
         _emit_payload(base_payload, as_json=as_json)
         raise typer.Exit(0)
 
@@ -3465,6 +3482,11 @@ def thread_close(
         closed = _attached_api_call_or_exit(f"/api/threads/{thread_id}/close", payload)
     else:
         store = _get_thread_store()
+        thread, protocol, _phase, _phase_participants, contributions = _load_protocol_flow_context(thread_id, config)
+        violation = validate_thread_close(thread=thread, protocol=protocol, contributions=contributions)
+        if violation is not None:
+            _emit_payload({"thread_id": thread_id, **violation.model_dump()}, as_json=as_json)
+            raise typer.Exit(2)
         closed = store.close_thread(thread_id, summary=summary, decision=decision)
         if closed is None:
             console.print(f"[red]Thread not found:[/red] {thread_id}")
@@ -3554,6 +3576,17 @@ def thread_send_message(
         }
         message = _attached_api_call_or_exit(f"/api/threads/{thread_id}/messages", payload)
     else:
+        thread, protocol, _phase, _phase_participants, _contributions = _load_protocol_flow_context(thread_id, config)
+        if delivery_mode == "direct":
+            violation = validate_direct_message_targets(
+                thread=thread,
+                protocol=protocol,
+                from_agent=from_agent,
+                target_agents=target_agents,
+            )
+            if violation is not None:
+                _emit_payload({"thread_id": thread_id, **violation.model_dump()}, as_json=as_json)
+                raise typer.Exit(2)
         message = _get_thread_store().send_message(
             thread_id=thread_id,
             from_agent=from_agent,
@@ -3657,6 +3690,19 @@ def contribution_submit(
             },
         )
     else:
+        thread, protocol, _phase, _phase_participants, _contributions = _load_protocol_flow_context(
+            thread_id,
+            current_config,
+        )
+        violation = validate_contribution_submission(
+            thread=thread,
+            protocol=protocol,
+            actor=agent_name,
+            phase_name=phase,
+        )
+        if violation is not None:
+            _emit_payload({"thread_id": thread_id, **violation.model_dump()}, as_json=as_json)
+            raise typer.Exit(2)
         contribution = _get_thread_store().submit_contribution(
             thread_id=thread_id,
             agent_name=agent_name,

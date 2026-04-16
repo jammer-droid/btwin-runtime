@@ -300,6 +300,33 @@ def test_protocol_apply_next_reports_manual_outcome_required(tmp_path, monkeypat
     assert payload["suggested_action"] == "record_outcome"
 
 
+def test_protocol_apply_next_reports_human_hint_when_contribution_is_missing(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    _thread_store, thread = _seed_agentless_thread(project_root, "context-next", participants=["alice"])
+    _save_protocol(project_root, _context_protocol())
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    result = runner.invoke(
+        app,
+        [
+            "protocol",
+            "apply-next",
+            "--thread",
+            thread["thread_id"],
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["applied"] is False
+    assert payload["suggested_action"] == "submit_contribution"
+    assert "btwin contribution submit" in payload["hint"]
+
+
 def test_protocol_apply_next_reports_summary_required_when_close_needs_summary(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"

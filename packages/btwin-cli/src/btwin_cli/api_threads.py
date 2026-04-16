@@ -16,6 +16,11 @@ from btwin_core.protocol_store import ProtocolStore
 from btwin_core.protocol_validator import ProtocolValidator
 from btwin_core.thread_store import ThreadStore
 from btwin_core.thread_summarizer import ThreadSummarizer
+from btwin_core.workflow_constraints import (
+    validate_contribution_submission,
+    validate_direct_message_targets,
+    validate_thread_close,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +313,20 @@ def create_threads_router(
 
     @router.post("/api/threads/{thread_id}/close")
     async def close_thread(thread_id: str, req: ThreadCloseRequest):
+        thread = thread_store.get_thread(thread_id)
+        if thread is None:
+            raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")
+        proto = protocol_store.get_protocol(thread.get("protocol", ""))
+        if proto is not None:
+            current_phase = thread.get("current_phase")
+            contributions = (
+                thread_store.list_contributions(thread_id, phase=current_phase)
+                if isinstance(current_phase, str) and current_phase
+                else []
+            )
+            violation = validate_thread_close(thread=thread, protocol=proto, contributions=contributions)
+            if violation is not None:
+                raise HTTPException(status_code=409, detail=violation.model_dump())
         closed = thread_store.close_thread(thread_id, summary=req.summary, decision=req.decision)
         if closed is None:
             raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")
@@ -383,6 +402,16 @@ def create_threads_router(
                     status_code=422,
                     detail=f"unknown target agents: {', '.join(unknown_targets)}",
                 )
+            proto = protocol_store.get_protocol(thread.get("protocol", ""))
+            if proto is not None:
+                violation = validate_direct_message_targets(
+                    thread=thread,
+                    protocol=proto,
+                    from_agent=req.from_agent,
+                    target_agents=req.target_agents,
+                )
+                if violation is not None:
+                    raise HTTPException(status_code=409, detail=violation.model_dump())
 
         msg = thread_store.send_message(
             thread_id=thread_id,
@@ -434,6 +463,19 @@ def create_threads_router(
 
     @router.post("/api/threads/{thread_id}/contributions")
     async def submit_contribution(thread_id: str, req: ContributionSubmitRequest):
+        thread = thread_store.get_thread(thread_id)
+        if thread is None:
+            raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")
+        proto = protocol_store.get_protocol(thread.get("protocol", ""))
+        if proto is not None:
+            violation = validate_contribution_submission(
+                thread=thread,
+                protocol=proto,
+                actor=req.agent_name,
+                phase_name=req.phase,
+            )
+            if violation is not None:
+                raise HTTPException(status_code=409, detail=violation.model_dump())
         contrib = thread_store.submit_contribution(
             thread_id=thread_id,
             agent_name=req.agent_name,
