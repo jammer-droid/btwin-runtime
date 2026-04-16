@@ -89,17 +89,41 @@ the background and let Codex connect through `btwin mcp-proxy`.
 
 ### First-Time Setup From a Fresh Clone
 
-If you cloned this repository and want a normal global B-TWIN install for daily
-Codex use, follow this exact order:
+If you cloned this repository and want the shortest normal setup path for daily
+Codex use on macOS, run:
 
-1. clone the repository and install the repo-local environment with `uv sync`
-2. install `btwin` globally with `uv tool install -e .`
-3. run `btwin init` once to register the Codex MCP entry and bundled assets
-4. run `btwin service install` so `serve-api` stays available in the background
-5. restart Codex so it reconnects with the new MCP config
+```bash
+git clone https://github.com/jammer-droid/btwin.git
+cd btwin
+./scripts/install_btwin_macos.sh
+```
+
+This one-shot installer wraps the normal first-time setup steps:
+
+1. `uv sync`
+2. `uv tool install -e .`
+3. `btwin init`
+4. `btwin service install`
 
 After that, opening Codex in other repositories should reuse the same global
 `btwin` install. You do not need to rerun `btwin init` for every repository.
+
+Requirements before running the script:
+
+- macOS
+- `uv`
+- `codex`
+
+If you want to preview what the installer will do:
+
+```bash
+./scripts/install_btwin_macos.sh --dry-run
+```
+
+### Manual First-Time Setup
+
+If you want the same setup steps individually for debugging or manual recovery,
+use the detailed path below.
 
 Install and verify the repo-local environment:
 
