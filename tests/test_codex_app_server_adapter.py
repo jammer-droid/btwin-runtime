@@ -63,18 +63,37 @@ def test_codex_app_server_launch_command_enables_hooks() -> None:
     assert "app-server" in command
 
 
+def test_codex_app_server_launch_command_includes_config_overrides() -> None:
+    adapter = CodexAppServerPersistentAdapter()
+
+    command = adapter._build_launch_command(
+        SessionConfig(
+            options={
+                "config_overrides": {
+                    "developer_instructions": "You are the managed helper.\nStay brief.",
+                }
+            }
+        )
+    )
+
+    config_index = command.index("-c")
+    assert command[config_index + 1] == 'developer_instructions="You are the managed helper.\\nStay brief."'
+
+
 def test_live_transport_session_config_carries_cwd() -> None:
     launch_context = TransportLaunchContext(
         provider_name="codex",
         transport_mode="live_process_transport",
         env={"FOO": "bar"},
         cwd="/tmp/project-root",
+        config_overrides={"developer_instructions": "Stay brief."},
     )
 
     config = launch_context.build_session_config()
 
     assert config.options["env"] == {"FOO": "bar"}
     assert config.options["cwd"] == "/tmp/project-root"
+    assert config.options["config_overrides"] == {"developer_instructions": "Stay brief."}
 
 
 @pytest.mark.asyncio

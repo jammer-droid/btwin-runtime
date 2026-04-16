@@ -26,6 +26,25 @@ def test_init_global_creates_providers_config_and_codex_registration(tmp_path, m
     codex_config = tmp_path / ".codex" / "config.toml"
     assert codex_config.exists()
     assert 'args = ["mcp-proxy"]' in codex_config.read_text(encoding="utf-8")
+    assert (tmp_path / ".agents" / "skills" / "bt-handoff").exists()
+    assert (tmp_path / ".btwin" / "guidelines.md").exists()
+    assert (tmp_path / ".btwin" / "protocols" / "debate.yaml").exists()
+
+
+def test_init_global_preserves_provider_config_while_syncing_global_assets(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("btwin_cli.provider_init.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(main, "_get_active_data_dir", lambda: tmp_path / ".btwin")
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    providers_path = tmp_path / ".btwin" / "providers.json"
+    payload = json.loads(providers_path.read_text(encoding="utf-8"))
+    assert payload["providers"][0]["cli"] == "codex"
+    assert payload["providers"][0]["id"] == "openai"
+    assert payload["providers"][0]["default_model"] == "gpt-5.4"
 
 
 def test_init_local_creates_provider_config_and_project_codex_registration(tmp_path, monkeypatch):

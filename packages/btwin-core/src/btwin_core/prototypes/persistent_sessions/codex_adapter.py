@@ -5,6 +5,7 @@ import json
 from contextlib import suppress
 from typing import Any
 
+from btwin_core.codex_cli_config import build_codex_config_args
 from btwin_core.prototypes.persistent_sessions.base import PersistentSessionAdapter
 from btwin_core.prototypes.persistent_sessions.types import (
     build_runtime_debug_session_metadata,
@@ -37,6 +38,7 @@ class CodexPersistentAdapter(PersistentSessionAdapter):
         self._closed = False
         self._session_id: str | None = None
         self._extra_args: list[str] = []
+        self._config_overrides: dict[str, Any] = {}
         self._last_command: list[str] = []
         self._stderr_lines: list[str] = []
         self._pending_events: list[SessionEvent] = []
@@ -73,6 +75,7 @@ class CodexPersistentAdapter(PersistentSessionAdapter):
         self._pending_events = []
         self._session_id = self._resolve_resume_session_id(config)
         self._extra_args = self._resolve_extra_args(config)
+        self._config_overrides = self._resolve_config_overrides(config)
         self._last_command = []
         self._last_failure = None
         self._active_pid = None
@@ -524,9 +527,16 @@ class CodexPersistentAdapter(PersistentSessionAdapter):
             command = [self._command, "exec", "resume", session_id, "--json"]
         else:
             command = [self._command, "exec", "--json"]
+        command.extend(build_codex_config_args(self._config_overrides))
         command.append("--skip-git-repo-check")
         command.extend(self._extra_args)
         return command
+
+    def _resolve_config_overrides(self, config: SessionConfig) -> dict[str, Any]:
+        overrides = config.options.get("config_overrides")
+        if isinstance(overrides, dict):
+            return dict(overrides)
+        return {}
 
     async def _collect_stream_lines(self, stream: Any) -> list[str]:
         if stream is None:

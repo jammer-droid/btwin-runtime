@@ -125,11 +125,27 @@ btwin service install
 btwin service status
 ```
 
-Install the bundled skills and then restart Codex so it reconnects with the new MCP config:
+`btwin init` is now the preferred first-time global setup path. It registers the
+Codex MCP entry and installs the bundled B-TWIN assets needed for the Codex-facing
+workflow. `btwin install-skills --platform codex` remains available as a compatibility
+refresh path when you only want to relink bundled skills.
 
-```bash
-btwin install-skills --platform codex
-```
+For B-TWIN-managed helper sessions, the expected working model is:
+
+- the helper `cwd` stays inside the target git repository
+- Codex trusts that project, so project-scoped `.codex/` layers are active
+- existing project `AGENTS.md` and `.codex/hooks.json` remain untouched
+- B-TWIN adds deeper helper-scoped layers on top instead of rewriting user files
+
+If a helper session is launched outside the target repo, or inside a project that
+Codex does not trust, project-scoped `AGENTS.md` / `.codex/` behavior is not
+guaranteed.
+
+If the repository already defines hooks, they can affect helper behavior because
+Codex loads matching hooks from multiple active layers. B-TWIN hook integrations
+should be treated as additive; do not assume a deterministic hook ordering.
+
+After setup, restart Codex so it reconnects with the new MCP config:
 
 After that, the normal daily workflow is:
 
@@ -284,8 +300,10 @@ command: btwin
 args: ["mcp-proxy"]
 ```
 
-For Codex, `btwin init` writes the equivalent MCP entry automatically, and
-`btwin install-skills --platform codex` installs the bundled skills.
+For Codex, `btwin init` is the canonical global setup path: it writes the
+equivalent MCP entry, syncs bundled B-TWIN assets, and installs the bundled
+skills. `btwin install-skills --platform codex` remains available as a
+compatibility refresh command.
 
 The bundled skills are short task-oriented guides installed into the client
 environment. They are not part of `btwin-core`; they ship with `btwin-cli` and

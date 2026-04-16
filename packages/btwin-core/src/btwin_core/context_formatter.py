@@ -12,6 +12,54 @@ def _participant_name(p: dict | str) -> str:
 
 class ContextFormatter:
     @staticmethod
+    def format_launch_developer_instructions(
+        thread: dict,
+        agent_name: str | None = None,
+    ) -> str:
+        """Render stable launch-time instructions for Codex managed helper sessions."""
+        parts = []
+
+        if agent_name:
+            parts.append("## Your Identity")
+            parts.append(f'You are "{agent_name}".')
+            parts.append("")
+
+        parts.extend([
+            "## Managed Session Contract",
+            "This is a B-TWIN managed helper session.",
+            "The thread already exists and should not be recreated.",
+            "Stay aligned with the thread snapshot and current ask provided at turn time.",
+            "Do not ask who should create the thread or whether you should join it again.",
+        ])
+
+        if thread.get("topic"):
+            parts.extend([
+                "",
+                f"## Thread Title: {thread['topic']}",
+            ])
+        if thread.get("thread_id"):
+            parts.append(f"Thread ID: {thread['thread_id']}")
+        if thread.get("protocol"):
+            parts.append(f"Protocol: {thread['protocol']}")
+
+        if agent_name and thread.get("thread_id"):
+            parts.extend([
+                "",
+                "## btwin Contract",
+                "Regular messages are persisted automatically by B-TWIN.",
+                "When a structured protocol contribution is required, prefer the CLI contribution path:",
+                f"`btwin contribution submit --thread {thread['thread_id']} --agent {agent_name} --phase <current-phase-from-turn-context>`",
+            ])
+
+        parts.extend([
+            "",
+            "## Response Language",
+            "Respond in the same language as the most recent human message from the current turn context.",
+        ])
+
+        return "\n".join(parts)
+
+    @staticmethod
     def _message_visible_to_agent(msg: dict, agent_name: str | None) -> bool:
         """Return whether a stored message should appear in an agent snapshot."""
         delivery_mode = str(msg.get("delivery_mode", "auto") or "auto")

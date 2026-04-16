@@ -6,3 +6,5 @@ __pycache__/
 HANDOFF.md
 .btwin/
 .btwin-test-env/
+.btwin-attached-test/
+.test-artifacts/

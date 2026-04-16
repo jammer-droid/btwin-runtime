@@ -7,6 +7,7 @@ from collections import deque
 from contextlib import suppress
 from typing import Any
 
+from btwin_core.codex_cli_config import build_codex_config_args
 from btwin_core.prototypes.persistent_sessions.base import PersistentSessionAdapter
 from btwin_core.prototypes.persistent_sessions.types import (
     build_runtime_debug_session_metadata,
@@ -497,6 +498,7 @@ class CodexAppServerPersistentAdapter(PersistentSessionAdapter):
             "--listen",
             "stdio://",
         ]
+        command.extend(build_codex_config_args(self._config_overrides(config)))
         extra_args = config.options.get("args")
         if isinstance(extra_args, (list, tuple)):
             command.extend(str(arg) for arg in extra_args)
@@ -526,6 +528,12 @@ class CodexAppServerPersistentAdapter(PersistentSessionAdapter):
             return None
         text = str(candidate).strip()
         return text or None
+
+    def _config_overrides(self, config: SessionConfig) -> dict[str, Any]:
+        overrides = config.options.get("config_overrides")
+        if isinstance(overrides, dict):
+            return dict(overrides)
+        return {}
 
     def _next_request_id_value(self) -> _RequestId:
         request_id = self._next_request_id

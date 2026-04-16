@@ -334,6 +334,49 @@ async def test_live_transport_accepts_codex_final_message_that_arrives_after_tur
     ]
 
 
+def test_build_transport_launch_context_includes_managed_codex_developer_instructions(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    threads_dir = data_dir / "threads"
+    threads_dir.mkdir(parents=True)
+
+    runner = AgentRunner(
+        ThreadStore(threads_dir),
+        ProtocolStore(data_dir / "protocols"),
+        AgentStore(data_dir),
+        EventBus(),
+        config=BTwinConfig(data_dir=data_dir),
+    )
+    thread = runner._threads.create_thread(
+        topic="Managed launch profile",
+        protocol="debate",
+        participants=["alice", "user"],
+        initial_phase="context",
+    )
+    session = RuntimeSession(
+        thread_id=thread["thread_id"],
+        agent_name="alice",
+        provider="codex",
+        transport_mode="live_process_transport",
+        workspace_root=tmp_path,
+    )
+    launch = LaunchResolution(
+        provider=CodexProvider(),
+        auth=ResolvedLaunchAuth(provider_name="codex", mode="cli_environment"),
+        env={},
+        metadata={},
+    )
+
+    launch_context = runner._build_transport_launch_context(session, launch)
+
+    assert launch_context.config_overrides
+    developer_instructions = launch_context.config_overrides["developer_instructions"]
+    assert 'You are "alice".' in developer_instructions
+    assert f"Thread ID: {thread['thread_id']}" in developer_instructions
+    assert "Current ask:" not in developer_instructions
+
+
 def test_save_agent_message_does_not_publish_message_sent_for_non_state_affecting_output(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     threads_dir = data_dir / "threads"

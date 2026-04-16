@@ -19,6 +19,7 @@ def sync_global_docs(
     data_dir: Path,
     *,
     bundled_dir: Path | None = None,
+    exclude_names: set[str] | None = None,
 ) -> int:
     """Copy bundled .md and .json docs to data_dir if content has changed."""
     src = bundled_dir or resolve_bundled_global_docs_dir()
@@ -28,8 +29,11 @@ def sync_global_docs(
 
     data_dir.mkdir(parents=True, exist_ok=True)
     updated = 0
+    excluded = exclude_names or set()
     for src_file in sorted(src.iterdir()):
         if not (src_file.name.endswith(".md") or src_file.name.endswith(".json")):
+            continue
+        if src_file.name in excluded:
             continue
         dest_file = data_dir / src_file.name
         src_text = src_file.read_text(encoding="utf-8")

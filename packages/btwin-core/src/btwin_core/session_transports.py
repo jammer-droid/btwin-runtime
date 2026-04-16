@@ -24,6 +24,7 @@ class TransportLaunchContext:
     gateway_metadata: dict[str, str] = field(default_factory=dict)
     env: dict[str, str] = field(default_factory=dict)
     cwd: str | None = None
+    config_overrides: dict[str, object] = field(default_factory=dict)
 
     def build_session_config(self, *, resume_session_id: str | None = None) -> SessionConfig:
         metadata = dict(self.gateway_metadata)
@@ -38,6 +39,8 @@ class TransportLaunchContext:
             options["env"] = dict(self.env)
         if self.cwd:
             options["cwd"] = self.cwd
+        if self.config_overrides:
+            options["config_overrides"] = dict(self.config_overrides)
         return SessionConfig(
             options=options,
             metadata=metadata,

@@ -44,7 +44,7 @@ Common commands include:
 - `btwin serve-api`
 - `btwin mcp-proxy`
 - `btwin service install`
-- `btwin install-skills --platform codex`
+- `btwin install-skills --platform codex` (compatibility refresh path)
 
 ### HTTP API
 
@@ -67,6 +67,8 @@ Today `btwin-cli` supports exactly one provider bootstrap path: Codex.
 - `btwin init` validates that the `codex` CLI exists
 - it creates `~/.btwin/providers.json`
 - it writes the MCP client entry for `btwin mcp-proxy`
+- it syncs bundled global B-TWIN assets into the active data dir
+- it installs bundled Codex-facing B-TWIN skills into the global client path
 
 Additional providers may be added later, but the current packaged workflow is
 intentionally Codex-first.
@@ -94,14 +96,18 @@ Examples include:
 - `bt:status`
 - `bt:update`
 
-Install them with:
+The preferred first-time global setup path is:
 
 ```bash
-btwin install-skills --platform codex
+btwin init
 ```
 
+`btwin install-skills --platform codex` remains available as a compatibility
+refresh path when you only want to relink bundled skills.
+
 After pulling repo changes, refresh the installed `btwin` executable first if the
-update touched CLI/runtime packaging, then re-run `btwin install-skills`.
+update touched CLI/runtime packaging, then re-run `btwin init` or the compatibility
+skill-install command as appropriate.
 
 The package also bundles runtime docs and global protocol assets so the CLI can
 sync them into the active B-TWIN data directory when needed.

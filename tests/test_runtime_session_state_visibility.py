@@ -517,7 +517,7 @@ async def test_direct_message_resumes_inactive_thread_participant_from_thread_st
 
     async def fake_invoke(thread_id: str, agent_name: str, prompt: str):  # noqa: ANN202
         invoke_calls.append((thread_id, agent_name, prompt))
-        return type("Result", (), {"ok": True, "response_text": "resumed reply"})()
+        return type("Result", (), {"ok": True, "response_text": "resumed reply", "outputs": ()})()
 
     monkeypatch.setattr(runner, "invoke", fake_invoke)
     monkeypatch.setattr(runner, "_should_use_live_transport", lambda session: True)

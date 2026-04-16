@@ -12,6 +12,7 @@ from pathlib import Path
 
 from btwin_core.agent_store import AgentStore
 from btwin_core.auth_adapters import ResolvedLaunchAuth, build_auth_adapter
+from btwin_core.codex_cli_config import build_codex_config_args
 from btwin_core.config import BTwinConfig, load_config
 from btwin_core.context_formatter import ContextFormatter
 from btwin_core.event_bus import EventBus, SSEEvent
@@ -537,6 +538,12 @@ class AgentRunner:
                 session_id=runtime_session.provider_session_id if used_resume else None,
                 bypass_permissions=runtime_session.bypass_permissions,
             )
+            cmd = self._apply_codex_launch_config_overrides(
+                provider_name=launch.provider.name,
+                command=cmd,
+                thread_id=thread_id,
+                agent_name=agent_name,
+            )
 
             result = await self._run_subprocess(
                 cmd,
@@ -593,6 +600,12 @@ class AgentRunner:
                 fresh_cmd = launch.provider.build_command(
                     session_id=None,
                     bypass_permissions=runtime_session.bypass_permissions,
+                )
+                fresh_cmd = self._apply_codex_launch_config_overrides(
+                    provider_name=launch.provider.name,
+                    command=fresh_cmd,
+                    thread_id=thread_id,
+                    agent_name=agent_name,
                 )
                 result = await self._run_subprocess(
                     fresh_cmd,
@@ -1734,6 +1747,11 @@ class AgentRunner:
             gateway_metadata=gateway_metadata,
             env=dict(launch.env),
             cwd=str(self._workspace_root(session.workspace_root)) if session.workspace_root is not None else None,
+            config_overrides=self._build_codex_launch_config_overrides(
+                thread_id=session.thread_id,
+                agent_name=session.agent_name,
+                provider_name=launch.provider.name,
+            ),
         )
 
     def _session_transport_mode_for_invoke(self, session: AgentSession) -> str:
@@ -2108,6 +2126,44 @@ class AgentRunner:
             contributions=contributions,
             agent_name=agent_name,
         )
+
+    def _build_codex_launch_config_overrides(
+        self,
+        *,
+        thread_id: str,
+        agent_name: str,
+        provider_name: str,
+    ) -> dict[str, object]:
+        if provider_name != "codex":
+            return {}
+
+        thread = self._threads.get_thread(thread_id)
+        if thread is None:
+            return {}
+
+        return {
+            "developer_instructions": ContextFormatter.format_launch_developer_instructions(
+                thread=thread,
+                agent_name=agent_name,
+            )
+        }
+
+    def _apply_codex_launch_config_overrides(
+        self,
+        *,
+        provider_name: str,
+        command: list[str],
+        thread_id: str,
+        agent_name: str,
+    ) -> list[str]:
+        overrides = self._build_codex_launch_config_overrides(
+            thread_id=thread_id,
+            agent_name=agent_name,
+            provider_name=provider_name,
+        )
+        if not overrides:
+            return command
+        return [*command, *build_codex_config_args(overrides)]
 
     def _apply_prompt_budget(self, thread_id: str, agent_name: str, prompt: str) -> str:
         if len(prompt.encode("utf-8")) <= PROMPT_MAX_BYTES:

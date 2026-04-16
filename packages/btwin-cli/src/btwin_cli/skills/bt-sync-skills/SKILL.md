@@ -20,7 +20,14 @@ If the user means project/data synchronization rather than skill refresh, do not
 
 ## What This Does
 
-At minimum, re-run:
+For first-time global setup or when the overall Codex-facing install may be stale,
+prefer:
+
+```bash
+btwin init
+```
+
+For a narrower bundled-skill relink only, re-run:
 
 ```bash
 btwin install-skills --platform <platform>
@@ -32,10 +39,8 @@ or, for a project-local install:
 btwin install-skills --local --platform <platform>
 ```
 
-Because `btwin install-skills` installs the bundled public `bt-*` skills from the repo, running it again works as both:
-
-- first-time install
-- update/refresh after new skills are added
+Because `btwin install-skills` installs the bundled public `bt-*` skills from the repo,
+running it again works as a compatibility refresh path after new skills are added.
 
 When the repo pull also changed the packaged CLI/runtime code, this skill should additionally refresh the installed `btwin` executable before syncing skills.
 
@@ -68,8 +73,9 @@ If the skills were installed locally for the current project, add `--local`.
 3. If the repo was just updated, inspect whether the pulled changes touched runtime/CLI packaging or only skills/docs
 4. If runtime/CLI packaging changed and the user relies on an installed `btwin` binary, refresh the binary first
 5. If the user runs `serve-api` via launchd on macOS and the executable changed, re-run `btwin service install`
-6. Run the matching `btwin install-skills` command
-7. Tell the user to restart or refresh the client session if the platform caches skill lists or the MCP proxy may be stale
+6. Prefer `btwin init` for global refresh unless the user clearly wants the narrower compatibility relink path
+7. If using the narrower path, run the matching `btwin install-skills` command
+8. Tell the user to restart or refresh the client session if the platform caches skill lists or the MCP proxy may be stale
 
 ## Post-Pull Decision Rule
 
@@ -101,7 +107,15 @@ If the user runs the macOS background service from the installed executable, fol
 btwin service install
 ```
 
-Then sync the bundled skills:
+Then refresh the setup:
+
+Preferred:
+
+```bash
+btwin init
+```
+
+Compatibility relink only:
 
 ```bash
 btwin install-skills --platform <platform>
@@ -109,7 +123,9 @@ btwin install-skills --platform <platform>
 
 ## Notes
 
-- This updates bundled **B-TWIN** skills and, when needed, the installed `btwin` executable used by those skills.
+- `btwin init` is the preferred global setup/refresh path.
+- `btwin install-skills` remains a narrower compatibility relink command.
+- This workflow updates bundled **B-TWIN** skills and, when needed, the installed `btwin` executable used by those skills.
 - The install command is idempotent enough for normal refresh usage because it rewrites the installed skill links/targets.
 - If the user is unsure whether their current install is global or local, prefer checking both the repo-local platform path and the home-directory platform path before reinstalling.
 - Restart or reconnect the client after refresh if it may still be holding a stale MCP proxy or stale skill list.

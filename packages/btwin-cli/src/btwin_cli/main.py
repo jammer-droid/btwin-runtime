@@ -3946,12 +3946,21 @@ def init(
     else:
         console.print(f"[bold]Registering B-TWIN MCP for {provider_label}...[/bold]\n")
         _register_codex_global(force=force)
+        assets_updated = _sync_init_global_assets(active_data_dir)
+        installed_skill_targets = _install_platform_skills(provider_name, local=False)
+        if assets_updated:
+            console.print(f"[green]Synced bundled B-TWIN assets[/green] ({assets_updated} files)")
+        else:
+            console.print("[dim]Bundled B-TWIN assets already up to date[/dim]")
+        for target in installed_skill_targets:
+            count = len(_collect_skill_dirs(_get_skills_dir()))
+            console.print(f"[green]{count} skills installed to {target}[/green]")
 
     console.print(
         "\n[bold]Next steps:[/bold]\n"
         "  1. btwin serve-api\n"
         "  2. Restart your MCP client session\n"
-        "  3. btwin install-skills --platform codex\n"
+        "  3. Use `btwin install-skills --platform codex` only as a compatibility refresh path\n"
     )
 
 
@@ -4003,9 +4012,9 @@ def setup():
     console.print(f"[green]Config saved to {config_path}[/green]\n")
     console.print(
         "Next steps:\n"
-        "  1. [bold]btwin init[/bold]                       — Create provider config and register btwin mcp-proxy\n"
+        "  1. [bold]btwin init[/bold]                       — Run the canonical global Codex-facing setup flow\n"
         "  2. [bold]btwin serve-api[/bold]                  — Start the HTTP API on http://127.0.0.1:8787\n"
-        "  3. [bold]btwin install-skills --platform codex[/bold] — Install B-TWIN Skills for your client\n"
+        "  3. [bold]btwin install-skills --platform codex[/bold] — Compatibility refresh path for bundled skills only\n"
         "  4. [bold]btwin search[/bold] <query>             — Search past entries\n"
         "  5. [bold]btwin serve[/bold]                      — Start the stdio MCP entrypoint via the shared HTTP proxy path\n"
     )
@@ -4695,6 +4704,7 @@ _PLATFORMS = {
 _INIT_PROVIDERS = set(available_provider_names())
 
 _EXCLUDED_BUNDLED_SKILLS = {"bt-sync"}
+_EXCLUDED_SETUP_DOCS = {"providers.json"}
 
 
 def _get_skills_dir() -> Path:
@@ -4775,16 +4785,40 @@ def _install_skill_dirs_to(target_dir: Path, skill_dirs: list[Path]) -> int:
     return count
 
 
+def _install_platform_skills(platform_key: str, *, local: bool) -> list[Path]:
+    skills_dir = _get_skills_dir()
+    skill_dirs = _collect_skill_dirs(skills_dir)
+    if not skill_dirs:
+        return []
+
+    _, rel_paths, skill_dir_paths = _PLATFORMS[platform_key]
+    installed_targets: list[Path] = []
+    for rel_path in rel_paths:
+        target = (Path.cwd() if local else Path.home()) / rel_path
+        _install_skills_to(target, skill_dirs)
+        installed_targets.append(target)
+    for rel_path in skill_dir_paths:
+        target = (Path.cwd() if local else Path.home()) / rel_path
+        _install_skill_dirs_to(target, skill_dirs)
+        installed_targets.append(target)
+    return installed_targets
+
+
+def _sync_init_global_assets(data_dir: Path) -> int:
+    from btwin_cli.doc_sync import sync_global_dirs, sync_global_docs
+
+    updated = sync_global_docs(data_dir, exclude_names=_EXCLUDED_SETUP_DOCS)
+    updated += sync_global_dirs(data_dir)
+    return updated
+
+
 @app.command("install-skills")
 def install_skills(
     local: bool = typer.Option(False, "--local", help="Install to current project instead of global"),
     platform: str = typer.Option("", "--platform", help="Platform name (claude/codex/gemini) for non-interactive mode"),
 ):
     """Install B-TWIN orchestration skills to client-specific skill locations."""
-    skills_dir = _get_skills_dir()
-    skill_dirs = _collect_skill_dirs(skills_dir)
-
-    if not skill_dirs:
+    if not _collect_skill_dirs(_get_skills_dir()):
         console.print("[red]No skills found to install.[/red]")
         raise typer.Exit(1)
 
@@ -4826,21 +4860,15 @@ def install_skills(
 
     # Install to each selected platform
     for key in selected:
-        label, rel_paths, skill_dir_paths = _PLATFORMS[key]
-        for rel_path in rel_paths:
-            if local:
-                target = Path.cwd() / rel_path
-            else:
-                target = Path.home() / rel_path
-            count = _install_skills_to(target, skill_dirs)
+        label, _, _ = _PLATFORMS[key]
+        targets = _install_platform_skills(key, local=local)
+        for target in targets:
+            count = len(_collect_skill_dirs(_get_skills_dir()))
             console.print(f"[green]{count} skills installed to {target}[/green]")
-        for rel_path in skill_dir_paths:
-            if local:
-                target = Path.cwd() / rel_path
-            else:
-                target = Path.home() / rel_path
-            count = _install_skill_dirs_to(target, skill_dirs)
-            console.print(f"[green]{count} skills installed to {target}[/green]")
+        if not local:
+            console.print(
+                f"[dim]{label}: `btwin init` is the preferred first-time global setup path.[/dim]"
+            )
 
 
 @app.command("migrate-collab")
