@@ -93,13 +93,12 @@ def provider_smoke_env(tmp_path: Path) -> dict[str, str]:
     script_path = repo_root / "scripts" / "bootstrap_isolated_attached_env.sh"
     root_dir = tmp_path / "provider-smoke-env"
     project_root = tmp_path / "project"
-    home_dir = tmp_path / "home"
     project_root.mkdir(parents=True, exist_ok=True)
-    home_dir.mkdir(parents=True, exist_ok=True)
     port = str(_find_free_port())
+    provider_auth_home = os.environ.get("BTWIN_PROVIDER_AUTH_HOME") or os.environ.get("HOME") or str(tmp_path)
 
     env = os.environ.copy()
-    env["HOME"] = str(home_dir)
+    env["HOME"] = provider_auth_home
 
     start = subprocess.run(
         [
@@ -138,6 +137,7 @@ def provider_smoke_env(tmp_path: Path) -> dict[str, str]:
     env_payload["provider_surface"] = os.environ.get("BTWIN_PROVIDER_SURFACE", "app-server")
     env_payload["provider_continuity"] = os.environ.get("BTWIN_PROVIDER_CONTINUITY", "long-term")
     env_payload["provider_model"] = os.environ.get("BTWIN_PROVIDER_MODEL", "gpt-5.4-mini")
+    env_payload["provider_auth_home"] = provider_auth_home
     serve_stdout = root_dir / "logs" / "provider-smoke-serve-api.stdout.log"
     serve_stderr = root_dir / "logs" / "provider-smoke-serve-api.stderr.log"
     serve_stdout.parent.mkdir(parents=True, exist_ok=True)
@@ -151,7 +151,7 @@ def provider_smoke_env(tmp_path: Path) -> dict[str, str]:
         cwd=repo_root,
         env={
             **os.environ,
-            "HOME": str(home_dir),
+            "HOME": provider_auth_home,
             "BTWIN_CONFIG_PATH": env_payload["BTWIN_CONFIG_PATH"],
             "BTWIN_DATA_DIR": env_payload["BTWIN_DATA_DIR"],
             "BTWIN_API_URL": env_payload["BTWIN_API_URL"],

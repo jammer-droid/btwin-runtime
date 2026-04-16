@@ -80,6 +80,11 @@ def _normalize_runtime_event(
             return []
         return [NormalizedRuntimeEvent(kind="text_delta", content=content, metadata=metadata)]
 
+    if kind == "agent_message_completed":
+        if not content:
+            return []
+        return [NormalizedRuntimeEvent(kind="agent_message_completed", content=content, metadata=metadata)]
+
     if kind in _TURN_COMPLETE_KINDS:
         return [NormalizedRuntimeEvent(kind="turn_complete", content=content, metadata=metadata)]
 

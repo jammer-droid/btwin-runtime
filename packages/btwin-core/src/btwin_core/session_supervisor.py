@@ -64,6 +64,7 @@ class RuntimeSession:
 class SessionDeliveryResult:
     ok: bool
     response_text: str = ""
+    outputs: tuple[object, ...] = ()
     provider_session_id: str | None = None
     fallback_mode: str | None = None
 

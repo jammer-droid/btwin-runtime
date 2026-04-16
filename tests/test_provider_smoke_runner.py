@@ -158,7 +158,7 @@ def _run_scripted_provider_smoke(provider_smoke_env: dict[str, str]) -> dict[str
 
     attached_status = _wait_for(
         runtime_status,
-        timeout_seconds=20.0,
+        timeout_seconds=60.0,
         step=1.0,
     )
     if attached_status is None:
@@ -195,21 +195,27 @@ def _run_scripted_provider_smoke(provider_smoke_env: dict[str, str]) -> dict[str
             if (status := runtime_status()) and status.get("status") in {"received", "done"}
             else None
         ),
-        timeout_seconds=10.0,
+        timeout_seconds=60.0,
         step=1.0,
     )
     assert delivery_state is not None, "Timed out waiting for live provider session to receive the direct prompt"
-    final_status = runtime_status() or attached_status
 
-    all_messages = thread_messages()
-    exact_reply = next(
-        (
-            message
-            for message in all_messages
-            if message.get("from") == "alice" and message.get("_content") == "PROVIDER_SMOKE_OK"
+    exact_reply = _wait_for(
+        lambda: next(
+            (
+                message
+                for message in thread_messages()
+                if message.get("from") == "alice" and message.get("_content") == "PROVIDER_SMOKE_OK"
+            ),
+            None,
         ),
-        None,
+        timeout_seconds=60.0,
+        step=1.0,
     )
+    assert exact_reply is not None, "Timed out waiting for live provider session to persist the exact reply"
+
+    final_status = runtime_status() or attached_status
+    all_messages = thread_messages()
     runtime_events_path = Path(provider_smoke_env["BTWIN_DATA_DIR"]) / "logs" / "runtime-events.jsonl"
     runtime_events = []
     if runtime_events_path.exists():
@@ -274,9 +280,16 @@ def test_provider_smoke_runs_scripted_thread_flow(provider_smoke_env) -> None:
     assert result["provider_session_id"]
     assert result["thread_id"]
     assert result["runtime_events"]
-    assert result["delivery_state"] == "received"
+    assert result["delivery_state"] in {"received", "done"}
     assert any(
         message["from"] == "user" and message["_content"] == "Please reply with exactly: PROVIDER_SMOKE_OK"
+        for message in result["messages"]
+    )
+    assert any(
+        message["from"] == "alice"
+        and message["_content"] == "PROVIDER_SMOKE_OK"
+        and message.get("message_phase") == "final_answer"
+        and message.get("state_affecting") is True
         for message in result["messages"]
     )
     assert any(event["eventType"] == "runtime_session_started" for event in result["runtime_events"])

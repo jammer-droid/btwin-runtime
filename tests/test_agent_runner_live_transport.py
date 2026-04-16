@@ -200,6 +200,178 @@ async def test_live_transport_treats_codex_idle_status_as_turn_complete(
     assert adapter.closed is False
 
 
+@pytest.mark.asyncio
+async def test_live_transport_collects_commentary_and_final_outputs_from_completed_messages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    threads_dir = data_dir / "threads"
+    threads_dir.mkdir(parents=True)
+
+    runner = AgentRunner(
+        ThreadStore(threads_dir),
+        ProtocolStore(data_dir / "protocols"),
+        AgentStore(data_dir),
+        EventBus(),
+        config=BTwinConfig(data_dir=data_dir),
+    )
+
+    adapter = _FakeLiveTransportAdapter(
+        [
+            SessionEvent(kind="turn_started", content="turn-1"),
+            SessionEvent(
+                kind="agent_message_completed",
+                content="Working on it",
+                metadata={"phase": "commentary", "provider": "codex-app-server"},
+            ),
+            SessionEvent(
+                kind="agent_message_completed",
+                content="Done",
+                metadata={"phase": "final_answer", "provider": "codex-app-server"},
+            ),
+            SessionEvent(kind="turn_complete", content="turn-1", metadata={"provider": "codex-app-server"}),
+        ]
+    )
+    monkeypatch.setattr(
+        "btwin_core.agent_runner.build_transport_for_provider",
+        lambda *args, **kwargs: _FakeLiveTransport(adapter),
+    )
+
+    session = RuntimeSession(
+        thread_id="thread-123",
+        agent_name="agent-1",
+        provider="codex",
+        transport_mode="live_process_transport",
+    )
+    launch = LaunchResolution(
+        provider=CodexProvider(),
+        auth=ResolvedLaunchAuth(
+            provider_name="codex",
+            mode="cli_environment",
+        ),
+        env={},
+        metadata={},
+    )
+
+    result = await runner._run_live_transport(
+        session,
+        "prompt text",
+        launch,
+        thread_id="thread-123",
+        agent_name="agent-1",
+    )
+
+    assert result.ok is True
+    assert result.response_text == "Done"
+    assert [(item.content, item.phase, item.state_affecting) for item in result.outputs] == [
+        ("Working on it", "commentary", False),
+        ("Done", "final_answer", True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_live_transport_accepts_codex_final_message_that_arrives_after_turn_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    threads_dir = data_dir / "threads"
+    threads_dir.mkdir(parents=True)
+
+    runner = AgentRunner(
+        ThreadStore(threads_dir),
+        ProtocolStore(data_dir / "protocols"),
+        AgentStore(data_dir),
+        EventBus(),
+        config=BTwinConfig(data_dir=data_dir),
+    )
+
+    adapter = _FakeLiveTransportAdapter(
+        [
+            SessionEvent(kind="turn_started", content="turn-1"),
+            SessionEvent(kind="turn_complete", content="turn-1", metadata={"provider": "codex-app-server"}),
+            SessionEvent(
+                kind="agent_message_completed",
+                content="Done after completion",
+                metadata={"phase": "final_answer", "provider": "codex-app-server"},
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "btwin_core.agent_runner.build_transport_for_provider",
+        lambda *args, **kwargs: _FakeLiveTransport(adapter),
+    )
+
+    session = RuntimeSession(
+        thread_id="thread-123",
+        agent_name="agent-1",
+        provider="codex",
+        transport_mode="live_process_transport",
+    )
+    launch = LaunchResolution(
+        provider=CodexProvider(),
+        auth=ResolvedLaunchAuth(
+            provider_name="codex",
+            mode="cli_environment",
+        ),
+        env={},
+        metadata={},
+    )
+
+    result = await runner._run_live_transport(
+        session,
+        "prompt text",
+        launch,
+        thread_id="thread-123",
+        agent_name="agent-1",
+    )
+
+    assert result.ok is True
+    assert result.response_text == "Done after completion"
+    assert [(item.content, item.phase, item.state_affecting) for item in result.outputs] == [
+        ("Done after completion", "final_answer", True),
+    ]
+
+
+def test_save_agent_message_does_not_publish_message_sent_for_non_state_affecting_output(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    threads_dir = data_dir / "threads"
+    threads_dir.mkdir(parents=True)
+    event_bus = EventBus()
+    queue = event_bus.subscribe()
+
+    thread_store = ThreadStore(threads_dir)
+    thread = thread_store.create_thread(
+        topic="Commentary thread",
+        protocol="demo",
+        participants=["alice", "user"],
+        initial_phase="context",
+    )
+    runner = AgentRunner(
+        thread_store,
+        ProtocolStore(data_dir / "protocols"),
+        AgentStore(data_dir),
+        event_bus,
+        config=BTwinConfig(data_dir=data_dir),
+    )
+
+    runner._save_agent_message(
+        thread["thread_id"],
+        "alice",
+        "Working on it",
+        chain_depth=1,
+        message_phase="commentary",
+        state_affecting=False,
+    )
+
+    messages = thread_store.list_messages(thread["thread_id"])
+    assert len(messages) == 1
+    assert messages[0]["message_phase"] == "commentary"
+    assert messages[0]["state_affecting"] is False
+    assert queue.empty()
+
+
 def test_live_transport_timeout_policy_uses_startup_grace_for_first_turn(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     runner = AgentRunner(

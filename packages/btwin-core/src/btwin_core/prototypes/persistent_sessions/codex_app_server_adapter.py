@@ -352,6 +352,60 @@ class CodexAppServerPersistentAdapter(PersistentSessionAdapter):
                 metadata=metadata,
             )
 
+        if method == "item/completed":
+            item = params.get("item")
+            if isinstance(item, dict) and item.get("type") == "agentMessage":
+                text = item.get("text")
+                phase = item.get("phase")
+                item_id = item.get("id")
+                if isinstance(phase, str) and phase:
+                    metadata["phase"] = phase
+                if isinstance(item_id, str) and item_id:
+                    metadata["item_id"] = item_id
+                return SessionEvent(
+                    kind="agent_message_completed",
+                    content=text if isinstance(text, str) else None,
+                    metadata=metadata,
+                )
+
+        if method == "raw_response_item/completed":
+            item = params.get("item")
+            if isinstance(item, dict):
+                content = item.get("content")
+                output_text = self._extract_output_text(content)
+                phase = item.get("phase")
+                item_id = item.get("id")
+                if isinstance(phase, str) and phase:
+                    metadata["phase"] = phase
+                if isinstance(item_id, str) and item_id:
+                    metadata["item_id"] = item_id
+                return SessionEvent(
+                    kind="agent_message_completed",
+                    content=output_text,
+                    metadata=metadata,
+                )
+
+        if method == "error":
+            error = params.get("error")
+            message = error.get("message") if isinstance(error, dict) else None
+            additional_details = error.get("additionalDetails") if isinstance(error, dict) else None
+            codex_error_info = error.get("codexErrorInfo") if isinstance(error, dict) else None
+            turn_id = params.get("turnId")
+            will_retry = params.get("willRetry")
+            if isinstance(turn_id, str) and turn_id:
+                metadata["turn_id"] = turn_id
+            if isinstance(additional_details, str) and additional_details:
+                metadata["additional_details"] = additional_details
+            if codex_error_info is not None:
+                metadata["codex_error_info"] = codex_error_info
+            if isinstance(will_retry, bool):
+                metadata["will_retry"] = will_retry
+            return SessionEvent(
+                kind="turn_error",
+                content=message if isinstance(message, str) else None,
+                metadata=metadata,
+            )
+
         if method == "turn/completed":
             turn = params.get("turn")
             turn_id = turn.get("id") if isinstance(turn, dict) else None
@@ -362,6 +416,21 @@ class CodexAppServerPersistentAdapter(PersistentSessionAdapter):
             )
 
         return SessionEvent(kind="unsupported", content=method, metadata=metadata)
+
+    def _extract_output_text(self, content: Any) -> str | None:
+        if not isinstance(content, list):
+            return None
+        text_parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "output_text":
+                text = block.get("text")
+                if isinstance(text, str) and text:
+                    text_parts.append(text)
+        if not text_parts:
+            return None
+        return "".join(text_parts)
 
     async def _send_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         process = self._require_process()

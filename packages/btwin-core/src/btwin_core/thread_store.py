@@ -268,6 +268,8 @@ class ThreadStore:
         target_agents: list[str] | None = None,
         routing_source: str = "fallback",
         routing_reason: str = "",
+        message_phase: str | None = None,
+        state_affecting: bool = True,
     ) -> dict | None:
         meta = self._load_meta(thread_id)
         if meta is None:
@@ -291,6 +293,8 @@ class ThreadStore:
             "target_agents": normalized_targets,
             "routing_source": routing_source,
             "routing_reason": routing_reason,
+            "message_phase": message_phase,
+            "state_affecting": state_affecting,
             "created_at": now,
             "acked_by": [],
         }

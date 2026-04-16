@@ -50,12 +50,20 @@ def _now_iso() -> str:
 class InvocationResult:
     ok: bool
     response_text: str = ""
+    outputs: tuple["RuntimeOutput", ...] = ()
     exit_code: int | None = None
     stderr_summary: str = ""
     timed_out: bool = False
     cli_missing: bool = False
     session_resumed: bool = False
     session_id_captured: str | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeOutput:
+    content: str
+    phase: str = "unknown"
+    state_affecting: bool = True
 
 
 @dataclass(frozen=True)
@@ -372,9 +380,14 @@ class AgentRunner:
                     typing_state.done_published = True
                     typing_done_published = True
 
+            outputs: tuple[RuntimeOutput, ...] = ()
+            if final_text.strip():
+                outputs = (RuntimeOutput(content=final_text.strip(), phase="final_answer", state_affecting=True),)
+
             return InvocationResult(
                 ok=(proc.returncode == 0),
                 response_text=final_text,
+                outputs=outputs,
                 exit_code=proc.returncode,
                 stderr_summary=stderr_text[:500],
                 session_resumed=bool("--resume" in cmd or "resume" in cmd),
@@ -441,6 +454,7 @@ class AgentRunner:
                     return SessionDeliveryResult(
                         ok=True,
                         response_text=result.response_text,
+                        outputs=result.outputs,
                         provider_session_id=result.session_id_captured,
                     )
                 if attempted_transport_mode == "live_process_transport":
@@ -514,6 +528,7 @@ class AgentRunner:
                         return SessionDeliveryResult(
                             ok=False,
                             response_text=result.response_text,
+                            outputs=result.outputs,
                         )
 
             used_resume = bool(runtime_session.provider_session_id)
@@ -563,6 +578,7 @@ class AgentRunner:
                 return SessionDeliveryResult(
                     ok=True,
                     response_text=result.response_text,
+                    outputs=result.outputs,
                     provider_session_id=result.session_id_captured,
                 )
 
@@ -619,6 +635,7 @@ class AgentRunner:
                 return SessionDeliveryResult(
                     ok=result.ok,
                     response_text=result.response_text,
+                    outputs=result.outputs,
                     provider_session_id=result.session_id_captured,
                 )
 
@@ -636,6 +653,7 @@ class AgentRunner:
             return SessionDeliveryResult(
                 ok=False,
                 response_text=result.response_text,
+                outputs=result.outputs,
             )
 
         delivery = await self._session_supervisor.deliver_message(
@@ -650,6 +668,7 @@ class AgentRunner:
         session = self._session_supervisor.get_session(thread_id, agent_name)
         final_result.ok = delivery.ok
         final_result.response_text = delivery.response_text
+        final_result.outputs = tuple(delivery.outputs)
         final_result.session_id_captured = session.provider_session_id if session else None
         return final_result
 
@@ -793,12 +812,12 @@ class AgentRunner:
                 self._managed_sessions.discard(key)
                 return
 
-            if result.response_text.strip():
-                self._save_agent_message(
-                    thread_id, agent_name,
-                    result.response_text.strip(),
-                    chain_depth=1,
-                )
+            self._persist_invocation_outputs(
+                thread_id,
+                agent_name,
+                result,
+                chain_depth=1,
+            )
 
             await self._drain_inbox(thread_id, agent_name, chain_depth=1)
         except Exception:
@@ -830,10 +849,11 @@ class AgentRunner:
                 ask=batched,
             )
         result = await self.invoke(thread_id, agent_name, prompt)
-        if result.ok and result.response_text.strip():
-            self._save_agent_message(
-                thread_id, agent_name,
-                result.response_text.strip(),
+        if result.ok:
+            self._persist_invocation_outputs(
+                thread_id,
+                agent_name,
+                result,
                 chain_depth=chain_depth,
             )
 
@@ -956,10 +976,11 @@ class AgentRunner:
                 ask=relay,
             )
             result = await self.invoke(thread_id, agent_name, prompt)
-            if result.ok and result.response_text.strip():
-                self._save_agent_message(
-                    thread_id, agent_name,
-                    result.response_text.strip(),
+            if result.ok:
+                self._persist_invocation_outputs(
+                    thread_id,
+                    agent_name,
+                    result,
                     chain_depth=chain_depth + 1,
                 )
 
@@ -995,11 +1016,11 @@ class AgentRunner:
             if key[0] != thread_id:
                 continue
             result = await self.invoke(thread_id, key[1], text)
-            if result.ok and result.response_text.strip():
-                self._save_agent_message(
+            if result.ok:
+                self._persist_invocation_outputs(
                     thread_id,
                     key[1],
-                    result.response_text.strip(),
+                    result,
                     chain_depth=0,
                 )
 
@@ -1060,7 +1081,78 @@ class AgentRunner:
             result.setdefault(session.agent_name, []).append(payload)
         return result
 
-    def _save_agent_message(self, thread_id: str, agent_name: str, content: str, chain_depth: int) -> None:
+    def _persist_invocation_outputs(
+        self,
+        thread_id: str,
+        agent_name: str,
+        result: InvocationResult,
+        *,
+        chain_depth: int,
+    ) -> None:
+        session = self._session_supervisor.get_session(thread_id, agent_name)
+        saved_any = False
+        for output in result.outputs:
+            content = output.content.strip()
+            if not content:
+                continue
+            self._log_runtime_event(
+                "runtime_output_persisting",
+                thread_id=thread_id,
+                agent_name=agent_name,
+                provider=session.provider if session is not None else None,
+                transport_mode=session.transport_mode if session is not None else None,
+                message="persisting runtime output",
+                details={
+                    "phase": output.phase,
+                    "stateAffecting": output.state_affecting,
+                    "contentPreview": content[:120],
+                },
+            )
+            self._save_agent_message(
+                thread_id,
+                agent_name,
+                content,
+                chain_depth,
+                message_phase=output.phase,
+                state_affecting=output.state_affecting,
+            )
+            saved_any = True
+
+        if saved_any or not result.response_text.strip():
+            return
+
+        self._log_runtime_event(
+            "runtime_output_persisting",
+            thread_id=thread_id,
+            agent_name=agent_name,
+            provider=session.provider if session is not None else None,
+            transport_mode=session.transport_mode if session is not None else None,
+            message="persisting fallback runtime output",
+            details={
+                "phase": "final_answer",
+                "stateAffecting": True,
+                "contentPreview": result.response_text.strip()[:120],
+            },
+        )
+        self._save_agent_message(
+            thread_id,
+            agent_name,
+            result.response_text.strip(),
+            chain_depth,
+            message_phase="final_answer",
+            state_affecting=True,
+        )
+
+    def _save_agent_message(
+        self,
+        thread_id: str,
+        agent_name: str,
+        content: str,
+        chain_depth: int,
+        *,
+        message_phase: str | None = None,
+        state_affecting: bool = True,
+    ) -> None:
         tldr = content[:100].replace("\n", " ")
         if len(content) > 100:
             tldr = tldr[:97] + "..."
@@ -1070,8 +1162,12 @@ class AgentRunner:
             content=content,
             tldr=tldr,
             msg_type="message",
+            message_phase=message_phase,
+            state_affecting=state_affecting,
         )
         if saved_message is None:
+            return
+        if not state_affecting:
             return
         self._event_bus.publish(SSEEvent(
             type="message_sent",
@@ -1081,6 +1177,8 @@ class AgentRunner:
                 "from_agent": agent_name,
                 "content": content,
                 "chain_depth": chain_depth,
+                "message_phase": message_phase,
+                "state_affecting": state_affecting,
             },
         ))
 
@@ -1152,6 +1250,7 @@ class AgentRunner:
             )
 
             observed_text_deltas: list[str] = []
+            completed_outputs: list[RuntimeOutput] = []
             final_text = ""
             captured_session_id = session.provider_session_id
             seen_text_delta = False
@@ -1165,6 +1264,7 @@ class AgentRunner:
             turn_deadline = loop.time() + turn_timeout if turn_timeout is not None else None
             idle_deadline = loop.time() + idle_timeout if idle_timeout is not None else None
             codex_idle_completion_deadline: float | None = None
+            post_turn_completion_deadline: float | None = None
 
             while True:
                 now = loop.time()
@@ -1181,9 +1281,18 @@ class AgentRunner:
                         if timeout_seconds is None
                         else min(timeout_seconds, idle_completion_remaining)
                     )
+                if post_turn_completion_deadline is not None:
+                    post_completion_remaining = max(post_turn_completion_deadline - now, 0.0)
+                    timeout_seconds = (
+                        post_completion_remaining
+                        if timeout_seconds is None
+                        else min(timeout_seconds, post_completion_remaining)
+                    )
                 if timeout_seconds is not None and timeout_seconds <= 0:
                     if codex_idle_completion_deadline is not None and now >= codex_idle_completion_deadline:
                         turn_complete_seen = True
+                        break
+                    if post_turn_completion_deadline is not None and now >= post_turn_completion_deadline:
                         break
                     if idle_deadline is not None and now >= idle_deadline:
                         raise TimeoutError(
@@ -1198,12 +1307,15 @@ class AgentRunner:
                     else:
                         event = await asyncio.wait_for(anext(event_iterator), timeout=timeout_seconds)
                 except StopAsyncIteration:
-                    if codex_idle_completion_deadline is not None:
+                    if codex_idle_completion_deadline is not None or post_turn_completion_deadline is not None:
                         turn_complete_seen = True
                     break
                 except asyncio.TimeoutError as exc:
                     now = loop.time()
                     if codex_idle_completion_deadline is not None and now >= codex_idle_completion_deadline:
+                        turn_complete_seen = True
+                        break
+                    if post_turn_completion_deadline is not None and now >= post_turn_completion_deadline:
                         turn_complete_seen = True
                         break
                     if idle_deadline is not None and now >= idle_deadline:
@@ -1216,6 +1328,42 @@ class AgentRunner:
 
                 if idle_timeout is not None:
                     idle_deadline = loop.time() + idle_timeout
+                raw_method = None
+                if isinstance(event.metadata, dict):
+                    raw = event.metadata.get("raw")
+                    if isinstance(raw, dict):
+                        method = raw.get("method")
+                        if isinstance(method, str) and method:
+                            raw_method = method
+                self._log_runtime_event(
+                    "runtime_event_observed",
+                    thread_id=thread_id,
+                    agent_name=agent_name,
+                    provider=session.provider,
+                    transport_mode=session.transport_mode,
+                    message="runtime event observed",
+                    details={
+                        "kind": event.kind,
+                        "contentPreview": (event.content or "")[:120],
+                        "rawMethod": raw_method,
+                    },
+                )
+                if event.kind == "turn_error":
+                    self._log_runtime_event(
+                        "runtime_turn_error",
+                        thread_id=thread_id,
+                        agent_name=agent_name,
+                        provider=session.provider,
+                        transport_mode=session.transport_mode,
+                        level="warning",
+                        message=event.content or "runtime turn error",
+                        details={
+                            "willRetry": event.metadata.get("will_retry"),
+                            "codexErrorInfo": event.metadata.get("codex_error_info"),
+                            "additionalDetails": event.metadata.get("additional_details"),
+                            "turnId": event.metadata.get("turn_id"),
+                        },
+                    )
                 if event.kind == "turn_started" and isinstance(event.content, str) and event.content:
                     active_turn_id = event.content
                     codex_idle_completion_deadline = None
@@ -1241,21 +1389,57 @@ class AgentRunner:
                             observed_text_deltas.append(normalized.content)
                             self._emit_agent_typing(thread_id, agent_name, normalized.content)
                         continue
+                    if normalized.kind == "agent_message_completed":
+                        output_content = (normalized.content or "").strip()
+                        if not output_content:
+                            continue
+                        output_phase = str(normalized.metadata.get("phase") or "unknown")
+                        self._log_runtime_event(
+                            "runtime_output_received",
+                            thread_id=thread_id,
+                            agent_name=agent_name,
+                            provider=session.provider,
+                            transport_mode=session.transport_mode,
+                            message="runtime output received",
+                            details={
+                                "phase": output_phase,
+                                "stateAffecting": output_phase == "final_answer",
+                                "contentPreview": output_content[:120],
+                                "turnId": active_turn_id,
+                            },
+                        )
+                        output = RuntimeOutput(
+                            content=output_content,
+                            phase=output_phase,
+                            state_affecting=(output_phase == "final_answer"),
+                        )
+                        completed_outputs.append(output)
+                        if output.state_affecting:
+                            final_text = output.content
+                        continue
                     if normalized.kind == "turn_complete":
                         if session.provider == "codex":
                             if active_turn_id is None:
                                 continue
+                            if normalized.content and normalized.content != active_turn_id:
+                                if not final_text:
+                                    final_text = normalized.content
+                                turn_complete_seen = True
+                                break
+                            turn_complete_seen = True
+                            post_turn_completion_deadline = loop.time() + CODEX_IDLE_COMPLETION_GRACE_SECONDS
+                            continue
                         elif (
                             active_turn_id
                             and normalized.content
                             and normalized.content != active_turn_id
                         ):
                             continue
-                        if normalized.content and not observed_text_deltas:
+                        if normalized.content and not observed_text_deltas and not final_text:
                             final_text = normalized.content
                         turn_complete_seen = True
                         break
-                if turn_complete_seen:
+                if turn_complete_seen and post_turn_completion_deadline is None:
                     break
                 if self._is_codex_idle_completion_event(event, active_turn_id=active_turn_id):
                     grace_deadline = loop.time() + CODEX_IDLE_COMPLETION_GRACE_SECONDS
@@ -1270,7 +1454,24 @@ class AgentRunner:
 
             if not final_text and observed_text_deltas:
                 final_text = "".join(observed_text_deltas)
+            if not completed_outputs and final_text.strip():
+                completed_outputs.append(
+                    RuntimeOutput(content=final_text.strip(), phase="final_answer", state_affecting=True)
+                )
 
+            self._log_runtime_event(
+                "runtime_turn_completed",
+                thread_id=thread_id,
+                agent_name=agent_name,
+                provider=session.provider,
+                transport_mode=session.transport_mode,
+                message="runtime turn completed",
+                details={
+                    "outputCount": len(completed_outputs),
+                    "responseTextPreview": final_text[:120],
+                    "providerSessionId": captured_session_id,
+                },
+            )
             session.last_transport_error = None
             self._emit_session_state(thread_id, agent_name, "done")
             if not defer_typing_done:
@@ -1284,6 +1485,7 @@ class AgentRunner:
             return InvocationResult(
                 ok=True,
                 response_text=final_text,
+                outputs=tuple(completed_outputs),
                 session_id_captured=captured_session_id,
             )
         except Exception as exc:  # noqa: BLE001

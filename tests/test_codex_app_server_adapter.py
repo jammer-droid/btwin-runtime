@@ -122,3 +122,57 @@ async def test_codex_app_server_start_uses_configured_cwd(
 
     assert result.metadata["ok"] is True
     assert captured_kwargs["cwd"] == str(cwd)
+
+
+def test_codex_app_server_parse_notification_keeps_agent_message_completion_text_and_phase() -> None:
+    adapter = CodexAppServerPersistentAdapter()
+
+    event = adapter._parse_notification(
+        {
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "type": "agentMessage",
+                    "id": "msg-1",
+                    "text": "Done",
+                    "phase": "final_answer",
+                },
+            },
+        }
+    )
+
+    assert event is not None
+    assert event.kind == "agent_message_completed"
+    assert event.content == "Done"
+    assert event.metadata["phase"] == "final_answer"
+    assert event.metadata["item_id"] == "msg-1"
+
+
+def test_codex_app_server_parse_error_notification_keeps_retry_and_error_info() -> None:
+    adapter = CodexAppServerPersistentAdapter()
+
+    event = adapter._parse_notification(
+        {
+            "method": "error",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "willRetry": True,
+                "error": {
+                    "message": "stream disconnected",
+                    "additionalDetails": "connection reset",
+                    "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 502}},
+                },
+            },
+        }
+    )
+
+    assert event is not None
+    assert event.kind == "turn_error"
+    assert event.content == "stream disconnected"
+    assert event.metadata["turn_id"] == "turn-1"
+    assert event.metadata["will_retry"] is True
+    assert event.metadata["additional_details"] == "connection reset"
+    assert event.metadata["codex_error_info"] == {"responseStreamDisconnected": {"httpStatusCode": 502}}
