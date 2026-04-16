@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.11, pytest, pytest-html, existing btwin CLI/core test helpers, isolated attached env bootstrap script
 
+**Scenario policy:** Keep `provider-smoke` as one marker group, but split real provider scenarios into a baseline flow and targeted gate flows. Isolate btwin config/data per run, while reusing the authenticated provider home by default or `BTWIN_PROVIDER_AUTH_HOME` when explicitly set.
+
 ---
 
 ### Task 1: Add pytest-html and marker policy
@@ -317,6 +319,14 @@ Expected: PASS and run metadata correctly identifies the group
 
 Run: `uv run python scripts/run_tests.py provider-smoke`
 Expected: PASS or SKIP with explicit preflight reason, and provider artifacts include `requested_model=gpt-5.4-mini`
+
+Also verify at least one targeted provider scenario selection, for example:
+
+```bash
+uv run python scripts/run_tests.py provider-smoke --pytest-arg tests/test_provider_smoke_runner.py::test_provider_smoke_runs_scripted_thread_flow
+```
+
+Expected: the selected baseline or gate scenario runs by itself and still writes the standard HTML/artifact bundle
 
 **Step 5: Commit**
 

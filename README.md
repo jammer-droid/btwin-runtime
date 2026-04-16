@@ -446,6 +446,19 @@ updates `.test-artifacts/latest` to the newest run, and keeps the most recent
 and captured pytest stdout/stderr. Provider smoke is intentionally opt-in and
 uses the default profile `app-server` long-term with `gpt-5.4-mini`.
 
+`provider-smoke` is a group, not one monolithic test. Keep the group composed
+of a shared baseline flow plus narrower gate/regression scenarios, then select
+just the scenario you want when needed:
+
+```bash
+uv run python scripts/run_tests.py provider-smoke --pytest-arg tests/test_provider_smoke_runner.py::test_provider_smoke_runs_scripted_thread_flow
+```
+
+Provider smoke keeps btwin data/config isolated, but by default reuses the
+current user's provider authentication home so attached Codex sessions can
+actually authenticate. Override only the provider auth home with
+`BTWIN_PROVIDER_AUTH_HOME` when you need a different authenticated profile.
+
 For workflow-constraints validation in the preferred `btwin test-env` flow,
 keep a second terminal open with:
 

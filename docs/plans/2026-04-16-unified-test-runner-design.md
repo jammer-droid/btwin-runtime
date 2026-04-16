@@ -83,6 +83,8 @@ provider smoke의 규칙:
 - 사용자가 명시적으로 `provider-smoke`를 선택했을 때만 실행
 - provider CLI 또는 인증 상태가 준비되지 않았으면 hard fail보다 `skip`을 우선
 - runner가 관련 상태를 preflight로 검사하고 결과를 리포트와 metadata에 남김
+- isolated btwin data/config는 유지하되, provider 인증은 기본적으로 현재 사용자 홈을 재사용한다
+- 필요하면 `BTWIN_PROVIDER_AUTH_HOME`으로 provider 인증 홈만 별도로 override할 수 있다
 
 ### 6. Provider Smoke Default Profile
 
@@ -95,6 +97,22 @@ provider smoke의 기본 프로필은 아래와 같다.
 `exec`, fallback, short-term, recover는 기본 경로가 아니다. 해당 동작 자체를 검증하는 시나리오에서만 별도 marker나 명시적 옵션으로 돌린다.
 
 테스트 결과에는 `requested_model`과 `effective_model`을 모두 남겨 실제 provider가 어떤 모델을 썼는지 확인 가능해야 한다.
+
+### 6.5. Provider Smoke Scenario Shape
+
+`provider-smoke`는 하나의 거대한 end-to-end 테스트가 아니다. 같은 marker 그룹 안에서 아래처럼 여러 시나리오로 나눈다.
+
+- baseline scenario
+  - `live attach -> direct message -> final answer persist`
+- gate scenarios
+  - 예: `thread close` blocked, `contribution submit` phase/actor gate, `protocol apply-next` hint
+
+이 방식의 목적은 두 가지다.
+
+- real provider attach 비용은 공유하되, 실패 원인을 시나리오 단위로 분리한다
+- 평소에는 baseline만 빠르게 돌리고, gate regression이 필요할 때는 특정 시나리오만 선택 실행할 수 있게 한다
+
+즉 “provider smoke는 하나의 실행 그룹”으로 관리하되, 내부 시나리오는 baseline과 targeted gate flow로 분해한다.
 
 ### 7. Automation Boundary for Provider Smoke
 
@@ -121,6 +139,7 @@ provider smoke의 기본 프로필은 아래와 같다.
 1차에서는 새 manifest DSL을 만들지 않는다. 시나리오는 `pytest` 테스트 함수로 정의하고, 공통 fixture와 helper가 env 준비, provider attach, prompt 주입, artifact 캡처를 맡는다.
 
 이 선택은 초기 구현 비용을 줄이면서도 충분한 구조화를 제공한다. 시나리오가 늘고 중복이 실제로 문제 되기 전까지는 manifest 레이어를 추가하지 않는다.
+특히 provider smoke는 동일한 fixture를 공유하는 여러 `pytest` 시나리오로 구성하고, `scripts/run_tests.py provider-smoke --pytest-arg <test-selector>`로 특정 baseline/gate 시나리오만 선택 실행할 수 있게 한다.
 
 ## Runner Interface
 
@@ -167,6 +186,7 @@ uv run python scripts/run_tests.py all
 - 기본 경로는 isolated attached env + `app-server` long-term + `gpt-5.4-mini`
 - `requested_model`과 `effective_model`이 artifact에 기록되는지 확인
 - thread/contribution/phase/workflow-event가 기대 상태로 바뀌는지 확인
+- baseline 경로와 gate 경로는 같은 `provider_smoke` 그룹 안의 개별 시나리오로 검증
 
 ## Open Questions Resolved
 
