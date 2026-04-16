@@ -87,6 +87,20 @@ standard B-TWIN workflow, install the `codex` CLI first and then run `btwin init
 If you are using macOS, the intended workflow is to keep `serve-api` running in
 the background and let Codex connect through `btwin mcp-proxy`.
 
+### First-Time Setup From a Fresh Clone
+
+If you cloned this repository and want a normal global B-TWIN install for daily
+Codex use, follow this exact order:
+
+1. clone the repository and install the repo-local environment with `uv sync`
+2. install `btwin` globally with `uv tool install -e .`
+3. run `btwin init` once to register the Codex MCP entry and bundled assets
+4. run `btwin service install` so `serve-api` stays available in the background
+5. restart Codex so it reconnects with the new MCP config
+
+After that, opening Codex in other repositories should reuse the same global
+`btwin` install. You do not need to rerun `btwin init` for every repository.
+
 Install and verify the repo-local environment:
 
 ```bash
@@ -103,6 +117,10 @@ cd btwin
 uv tool install -e .
 btwin --help
 ```
+
+Using only `uv run btwin ...` from the repo clone is fine for development, but
+it does not create the stable global CLI path that Codex MCP config and launchd
+expect. For normal user setup, prefer `uv tool install -e .`.
 
 Initialize the Codex provider config:
 
@@ -130,6 +148,10 @@ Codex MCP entry and installs the bundled B-TWIN assets needed for the Codex-faci
 workflow. `btwin install-skills --platform codex` remains available as a compatibility
 refresh path when you only want to relink bundled skills.
 
+`btwin init` handles the global Codex-facing setup. It does not pre-create
+repo-local helper files for every repository. Those are bootstrapped lazily
+when B-TWIN actually launches a managed helper inside a target repository.
+
 For B-TWIN-managed helper sessions, the expected working model is:
 
 - the helper `cwd` stays inside the target git repository
@@ -138,15 +160,32 @@ For B-TWIN-managed helper sessions, the expected working model is:
 - existing project `AGENTS.md` and `.codex/hooks.json` remain untouched
 - B-TWIN adds deeper helper-scoped layers on top instead of rewriting user files
 
+In practice, that means the first helper launch for a repository can create:
+
+- `.btwin/helpers/<agent>/workspace/`
+- `.btwin/helpers/<agent>/AGENTS.md`
+- `.btwin/helpers/<agent>/.codex/hooks.json`
+
+These files belong to the B-TWIN helper overlay. They are repo-local runtime
+state, not source files, and should normally stay untracked.
+
 If a helper session is launched outside the target repo, or inside a project that
 Codex does not trust, project-scoped `AGENTS.md` / `.codex/` behavior is not
 guaranteed.
+
+If helper launch fails because the project is not trusted, trust that repository
+in Codex first and then retry from inside the same git repo. Helper overlay
+bootstrapping depends on Codex's normal project-scoped config behavior.
 
 If the repository already defines hooks, they can affect helper behavior because
 Codex loads matching hooks from multiple active layers. B-TWIN hook integrations
 should be treated as additive; do not assume a deterministic hook ordering.
 
 After setup, restart Codex so it reconnects with the new MCP config:
+
+```bash
+codex
+```
 
 After that, the normal daily workflow is:
 
@@ -155,6 +194,19 @@ After that, the normal daily workflow is:
 3. use the global `~/.btwin` data directory
 
 You should not need to run `btwin serve-api` manually in a terminal for normal use.
+
+### Quick Setup Verification
+
+After the first-time setup, these checks should succeed:
+
+```bash
+btwin --help
+btwin service status
+btwin init
+```
+
+And in `~/.codex/config.toml` you should see a `mcp_servers.btwin` entry that
+launches `btwin mcp-proxy`.
 
 ## Local Development Setup
 
