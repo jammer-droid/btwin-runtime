@@ -109,3 +109,29 @@ def test_run_tests_all_group_excludes_provider_by_default(tmp_path: Path) -> Non
     metadata = json.loads((latest.resolve() / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["group"] == "all"
     assert metadata["provider_smoke_included"] is False
+
+
+def test_cli_smoke_group_runs_cli_smoke_target(tmp_path: Path) -> None:
+    result = _run_runner(
+        tmp_path,
+        "cli-smoke",
+        "--pytest-arg",
+        "tests/test_attached_helper_smoke_script.py::test_attached_helper_smoke_script_runs_end_to_end",
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    metadata = json.loads(((tmp_path / "latest").resolve() / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["group"] == "cli-smoke"
+
+
+def test_integration_group_runs_integration_target(tmp_path: Path) -> None:
+    result = _run_runner(
+        tmp_path,
+        "integration",
+        "--pytest-arg",
+        "tests/test_bootstrap_isolated_attached_env.py::test_bootstrap_script_start_skip_server_creates_isolated_env",
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    metadata = json.loads(((tmp_path / "latest").resolve() / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["group"] == "integration"

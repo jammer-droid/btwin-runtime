@@ -8,6 +8,15 @@ from pathlib import Path
 
 import pytest
 
+CLI_SMOKE_FILES = {
+    "test_attached_helper_smoke_script.py",
+}
+
+INTEGRATION_FILES = {
+    "test_bootstrap_isolated_attached_env.py",
+    "test_codex_session_health_script.py",
+}
+
 
 def pytest_configure(config) -> None:
     config.addinivalue_line(
@@ -44,6 +53,22 @@ def _parse_env_file(env_path: Path) -> dict[str, str]:
         if match:
             exports[match.group(1)] = match.group(2)
     return exports
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    del config
+    for item in items:
+        marker_names = {mark.name for mark in item.iter_markers()}
+        if {"unit", "integration", "cli_smoke", "provider_smoke"} & marker_names:
+            continue
+
+        file_name = Path(str(item.fspath)).name
+        if file_name in CLI_SMOKE_FILES:
+            item.add_marker(pytest.mark.cli_smoke)
+        elif file_name in INTEGRATION_FILES:
+            item.add_marker(pytest.mark.integration)
+        else:
+            item.add_marker(pytest.mark.unit)
 
 
 @pytest.fixture
