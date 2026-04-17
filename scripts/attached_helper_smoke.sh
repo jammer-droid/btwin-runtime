@@ -114,8 +114,8 @@ protocol = {
             "actions": ["contribute", "discuss"],
             "template": [{"section": "completed", "required": True}],
             "procedure": [
-                {"role": "reviewer", "action": "review", "alias": "Review"},
-                {"role": "implementer", "action": "revise", "alias": "Revise"},
+                {"key": "review-pass", "role": "reviewer", "action": "review", "alias": "Review"},
+                {"key": "revise-pass", "role": "implementer", "action": "revise", "alias": "Revise"},
             ],
         },
         {
@@ -124,8 +124,8 @@ protocol = {
         },
     ],
     "transitions": [
-        {"from": "review", "to": "review", "on": "retry", "alias": "Retry Gate"},
-        {"from": "review", "to": "decision", "on": "accept", "alias": "Accept Gate"},
+        {"key": "retry-loop", "from": "review", "to": "review", "on": "retry", "alias": "Retry Gate"},
+        {"key": "accept-loop", "from": "review", "to": "decision", "on": "accept", "alias": "Accept Gate"},
     ],
 }
 
@@ -263,14 +263,14 @@ assert phase_cycle["state"]["phase_name"] == "review", phase_cycle
 assert phase_cycle["context_core"]["next_expected_role"] == "reviewer", phase_cycle
 assert phase_cycle["context_core"]["current_step_alias"] == "Review", phase_cycle
 assert phase_cycle["context_core"]["current_step_role"] == "reviewer", phase_cycle
-assert phase_cycle["visual"]["procedure"][0]["key"] == "review", phase_cycle
+assert phase_cycle["visual"]["procedure"][0]["key"] == "review-pass", phase_cycle
 assert phase_cycle["visual"]["procedure"][0]["label"] == "Review", phase_cycle
-assert phase_cycle["visual"]["procedure"][1]["key"] == "revise", phase_cycle
+assert phase_cycle["visual"]["procedure"][1]["key"] == "revise-pass", phase_cycle
 assert phase_cycle["visual"]["procedure"][1]["label"] == "Revise", phase_cycle
-assert phase_cycle["visual"]["gates"][0]["key"] == "retry", phase_cycle
+assert phase_cycle["visual"]["gates"][0]["key"] == "retry-loop", phase_cycle
 assert phase_cycle["visual"]["gates"][0]["label"] == "Retry Gate", phase_cycle
 assert phase_cycle["visual"]["gates"][0]["target_phase"] == "review", phase_cycle
-assert phase_cycle["visual"]["gates"][1]["key"] == "accept", phase_cycle
+assert phase_cycle["visual"]["gates"][1]["key"] == "accept-loop", phase_cycle
 assert phase_cycle["visual"]["gates"][1]["label"] == "Accept Gate", phase_cycle
 assert phase_cycle["visual"]["gates"][1]["target_phase"] == "decision", phase_cycle
 assert mailbox["count"] == 2, mailbox
@@ -303,9 +303,11 @@ print(f"- thread_id: {thread['thread_id']}")
 print(f"- runtime binding: {bind['binding']['agent_name']} -> {bind['binding']['thread_id']}")
 print(f"- protocol apply-next cycle 1: {apply_one['thread']['current_phase']}")
 print(f"- protocol apply-next cycle 2: {apply_two['thread']['current_phase']}")
-print(f"- phase-cycle api visible: {phase_cycle['state']['cycle_index'] == 3 and phase_cycle['visual']['procedure'][0]['label'] == 'Review'}")
+print(f"- phase-cycle api visible: {phase_cycle['state']['cycle_index'] == 3 and phase_cycle['visual']['procedure'][0]['key'] == 'review-pass'}")
 print(f"- phase-cycle next role: {phase_cycle['context_core']['next_expected_role']}")
 print(f"- phase-cycle step alias: {phase_cycle['context_core']['current_step_alias']}")
+print(f"- phase-cycle step key: {phase_cycle['visual']['procedure'][0]['key']}")
+print(f"- phase-cycle gate key: {phase_cycle['visual']['gates'][0]['key']}")
 print(f"- mailbox reports: {mailbox['count']}")
 print(f"- hud cycle feed visible: {'Cycle Feed' in hud and 'cycle report' in hud}")
 print(f"- hud protocol progress visible: {'Protocol Progress' in hud}")

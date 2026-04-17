@@ -710,14 +710,14 @@ def test_attached_scenario_repeats_same_phase_across_multiple_cycles(provider_sm
                     "actions": ["contribute"],
                     "template": [{"section": "completed", "required": True}],
                     "procedure": [
-                        {"role": "reviewer", "action": "review", "alias": "Review"},
-                        {"role": "implementer", "action": "revise", "alias": "Revise"},
+                        {"key": "review-pass", "role": "reviewer", "action": "review", "alias": "Review"},
+                        {"key": "revise-pass", "role": "implementer", "action": "revise", "alias": "Revise"},
                     ],
                 }
             ],
             "transitions": [
-                {"from": "review", "to": "review", "on": "retry", "alias": "Retry Gate"},
-                {"from": "review", "to": "review", "on": "accept", "alias": "Accept Gate"},
+                {"key": "retry-loop", "from": "review", "to": "review", "on": "retry", "alias": "Retry Gate"},
+                {"key": "accept-loop", "from": "review", "to": "review", "on": "accept", "alias": "Accept Gate"},
             ],
         },
         participants=("alice",),
@@ -802,16 +802,24 @@ def test_attached_scenario_repeats_same_phase_across_multiple_cycles(provider_sm
     assert phase_cycle_payload["state"]["phase_name"] == "review"
     assert phase_cycle_payload["context_core"]["current_cycle_index"] == 3
     assert phase_cycle_payload["context_core"]["next_expected_action"] == "review"
-    assert phase_cycle_payload["visual"]["procedure"][0] == {"key": "review", "label": "Review", "status": "active"}
-    assert phase_cycle_payload["visual"]["procedure"][1] == {"key": "revise", "label": "Revise", "status": "pending"}
+    assert phase_cycle_payload["visual"]["procedure"][0] == {
+        "key": "review-pass",
+        "label": "Review",
+        "status": "active",
+    }
+    assert phase_cycle_payload["visual"]["procedure"][1] == {
+        "key": "revise-pass",
+        "label": "Revise",
+        "status": "pending",
+    }
     assert phase_cycle_payload["visual"]["gates"][0] == {
-        "key": "retry",
+        "key": "retry-loop",
         "label": "Retry Gate",
         "status": "completed",
         "target_phase": "review",
     }
     assert phase_cycle_payload["visual"]["gates"][1] == {
-        "key": "accept",
+        "key": "accept-loop",
         "label": "Accept Gate",
         "status": "pending",
         "target_phase": "review",
