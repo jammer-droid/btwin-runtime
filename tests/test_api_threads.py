@@ -157,6 +157,22 @@ def test_threads_router_exposes_phase_cycle_progress(tmp_path):
     thread_store = ThreadStore(tmp_path / "threads")
     protocol_store = ProtocolStore(tmp_path / "protocols")
     event_bus = EventBus()
+    protocol_store.save_protocol(
+        Protocol(
+            name="debate",
+            phases=[
+                ProtocolPhase(
+                    name="review",
+                    actions=["contribute"],
+                    template=[ProtocolSection(section="completed", required=True)],
+                    procedure=[
+                        {"role": "reviewer", "action": "review", "alias": "Review"},
+                        {"role": "implementer", "action": "revise", "alias": "Revise"},
+                    ],
+                )
+            ],
+        )
+    )
 
     thread = thread_store.create_thread(
         topic="Cycle thread",
@@ -191,7 +207,11 @@ def test_threads_router_exposes_phase_cycle_progress(tmp_path):
     assert payload["state"]["cycle_index"] == 2
     assert payload["state"]["procedure_steps"] == ["review", "revise"]
     assert payload["state"]["current_step_label"] == "revise"
-    assert payload["visual"]["procedure"][0]["label"] == "review"
+    assert payload["context_core"]["next_expected_role"] == "implementer"
+    assert payload["context_core"]["next_expected_action"] == "revise"
+    assert payload["context_core"]["current_step_alias"] == "Revise"
+    assert payload["context_core"]["current_step_role"] == "implementer"
+    assert payload["visual"]["procedure"][0]["label"] == "Review"
     assert payload["visual"]["procedure"][-1]["key"] == "gate"
 
 

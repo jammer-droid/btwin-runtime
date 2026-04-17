@@ -103,3 +103,52 @@ def test_engine_derives_next_expected_action_from_procedure_step():
     )
 
     assert result.context_core.next_expected_action == "Review the current implementation state."
+    assert result.context_core.next_expected_role == "reviewer"
+    assert result.context_core.current_step_alias == "review"
+    assert result.context_core.current_step_role == "reviewer"
+
+
+def test_engine_uses_step_alias_and_role_when_available():
+    protocol = Protocol(
+        name="aliased-review-loop",
+        phases=[
+            ProtocolPhase(
+                name="review",
+                description="Review the implementation and request changes if needed.",
+                actions=["contribute"],
+                template=[ProtocolSection(section="completed", required=True)],
+                procedure=[
+                    {
+                        "role": "reviewer",
+                        "action": "review",
+                        "alias": "Review Pass",
+                        "guidance": "Review the current implementation state.",
+                    },
+                    {
+                        "role": "implementer",
+                        "action": "revise",
+                        "alias": "Revision Pass",
+                        "guidance": "Implement revisions from review feedback.",
+                    },
+                ],
+            )
+        ],
+        transitions=[ProtocolTransition.model_validate({"from": "review", "to": "review", "on": "retry"})],
+        outcomes=["retry", "accept"],
+    )
+
+    result = advance_phase_cycle(
+        thread={"thread_id": "thread-1", "topic": "Review loop thread"},
+        protocol=protocol,
+        current_state=PhaseCycleState.start(
+            thread_id="thread-1",
+            phase_name="review",
+            procedure_steps=["review", "revise"],
+        ),
+        outcome="retry",
+    )
+
+    assert result.context_core.current_step_label == "review"
+    assert result.context_core.current_step_alias == "Review Pass"
+    assert result.context_core.current_step_role == "reviewer"
+    assert result.context_core.next_expected_role == "reviewer"

@@ -39,6 +39,8 @@ def test_attached_helper_smoke_script_runs_end_to_end(tmp_path):
     assert "protocol apply-next cycle 1: review" in result.stdout
     assert "protocol apply-next cycle 2: review" in result.stdout
     assert "phase-cycle api visible: True" in result.stdout
+    assert "phase-cycle next role: reviewer" in result.stdout
+    assert "phase-cycle step alias: Review" in result.stdout
     assert "mailbox reports: 2" in result.stdout
     assert "hud cycle feed visible: True" in result.stdout
     assert "hud protocol progress visible: True" in result.stdout

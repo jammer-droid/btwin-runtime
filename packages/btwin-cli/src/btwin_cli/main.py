@@ -47,7 +47,11 @@ from btwin_core.context_core import ContextCore
 from btwin_core.handoff_archive import get_handoff_record, list_handoff_records, write_handoff_record
 from btwin_core.locale_settings import LocaleSettingsStore
 from btwin_core.phase_cycle import PhaseCycleState
-from btwin_core.phase_cycle_engine import advance_phase_cycle
+from btwin_core.phase_cycle_engine import (
+    advance_phase_cycle,
+    build_phase_cycle_context_core,
+    phase_cycle_procedure_actions,
+)
 from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.protocol_flow import describe_next
 from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolStore
@@ -584,9 +588,7 @@ def _render_thread_runtime_diagnostics(thread_id: str, config: BTwinConfig) -> l
 
 
 def _phase_cycle_procedure_steps(phase: ProtocolPhase) -> list[str]:
-    if not phase.procedure:
-        return []
-    return [step.action for step in phase.procedure]
+    return phase_cycle_procedure_actions(phase)
 
 
 def _phase_cycle_visual_payload(
@@ -652,17 +654,6 @@ def _phase_cycle_visual_payload(
     return {"procedure": procedure_nodes, "gates": gate_nodes}
 
 
-def _phase_cycle_next_expected_action(phase: ProtocolPhase, state: PhaseCycleState) -> str | None:
-    if not phase.procedure:
-        return None
-    if state.current_step_label is not None:
-        for step in phase.procedure:
-            if step.action == state.current_step_label:
-                return step.guidance or step.action
-    first_step = phase.procedure[0]
-    return first_step.guidance or first_step.action
-
-
 def _build_phase_cycle_context_core(
     *,
     thread: dict[str, object],
@@ -670,17 +661,11 @@ def _build_phase_cycle_context_core(
     state: PhaseCycleState,
     last_cycle_outcome: str | None,
 ) -> ContextCore:
-    required_sections = [section.section for section in (phase.template or []) if section.required]
-    required_result = ", ".join(required_sections) if required_sections else f"{phase.name} result"
-    return ContextCore(
-        thread_goal=str(thread.get("topic") or thread.get("thread_id") or ""),
-        phase_purpose=phase.description or phase.name,
-        non_goals=[],
-        required_result=required_result,
+    return build_phase_cycle_context_core(
+        thread=thread,
+        phase=phase,
+        state=state,
         last_cycle_outcome=last_cycle_outcome,
-        next_expected_action=_phase_cycle_next_expected_action(phase, state),
-        current_cycle_index=state.cycle_index,
-        current_step_label=state.current_step_label,
     )
 
 

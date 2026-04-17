@@ -298,7 +298,10 @@ def test_protocol_apply_next_updates_phase_cycle_state_on_retry(tmp_path, monkey
     assert payload["cycle"]["cycle_index"] == 2
     assert payload["cycle"]["phase_name"] == "review"
     assert payload["context_core"]["current_cycle_index"] == 2
+    assert payload["context_core"]["next_expected_role"] == "reviewer"
     assert payload["context_core"]["next_expected_action"] == "Review the current implementation state."
+    assert payload["context_core"]["current_step_alias"] == "review"
+    assert payload["context_core"]["current_step_role"] == "reviewer"
 
 
 def test_protocol_apply_next_reports_unsupported_outcome_error(tmp_path, monkeypatch):

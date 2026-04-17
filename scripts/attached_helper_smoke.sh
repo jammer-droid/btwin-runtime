@@ -255,8 +255,14 @@ assert apply_two["applied"] is True, apply_two
 assert apply_two["cycle"]["cycle_index"] == 3, apply_two
 assert apply_two["thread"]["current_phase"] == "review", apply_two
 assert apply_two["thread_source"] == "explicit", apply_two
+assert apply_two["context_core"]["next_expected_role"] == "reviewer", apply_two
+assert apply_two["context_core"]["current_step_alias"] == "Review", apply_two
+assert apply_two["context_core"]["current_step_role"] == "reviewer", apply_two
 assert phase_cycle["state"]["cycle_index"] == 3, phase_cycle
 assert phase_cycle["state"]["phase_name"] == "review", phase_cycle
+assert phase_cycle["context_core"]["next_expected_role"] == "reviewer", phase_cycle
+assert phase_cycle["context_core"]["current_step_alias"] == "Review", phase_cycle
+assert phase_cycle["context_core"]["current_step_role"] == "reviewer", phase_cycle
 assert phase_cycle["visual"]["procedure"][0]["key"] == "review", phase_cycle
 assert phase_cycle["visual"]["procedure"][0]["label"] == "Review", phase_cycle
 assert phase_cycle["visual"]["procedure"][1]["key"] == "revise", phase_cycle
@@ -298,6 +304,8 @@ print(f"- runtime binding: {bind['binding']['agent_name']} -> {bind['binding']['
 print(f"- protocol apply-next cycle 1: {apply_one['thread']['current_phase']}")
 print(f"- protocol apply-next cycle 2: {apply_two['thread']['current_phase']}")
 print(f"- phase-cycle api visible: {phase_cycle['state']['cycle_index'] == 3 and phase_cycle['visual']['procedure'][0]['label'] == 'Review'}")
+print(f"- phase-cycle next role: {phase_cycle['context_core']['next_expected_role']}")
+print(f"- phase-cycle step alias: {phase_cycle['context_core']['current_step_alias']}")
 print(f"- mailbox reports: {mailbox['count']}")
 print(f"- hud cycle feed visible: {'Cycle Feed' in hud and 'cycle report' in hud}")
 print(f"- hud protocol progress visible: {'Protocol Progress' in hud}")

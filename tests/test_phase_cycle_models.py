@@ -9,9 +9,12 @@ def test_context_core_contains_reanchor_fields():
         non_goals=["rewrite unrelated files"],
         required_result="review verdict",
         last_cycle_outcome="revisions requested",
+        next_expected_role="implementer",
         next_expected_action="implement changes from the current review",
         current_cycle_index=2,
         current_step_label="revise",
+        current_step_alias="Revise",
+        current_step_role="implementer",
     ).model_dump()
 
     assert set(payload) >= {
@@ -20,9 +23,12 @@ def test_context_core_contains_reanchor_fields():
         "non_goals",
         "required_result",
         "last_cycle_outcome",
+        "next_expected_role",
         "next_expected_action",
         "current_cycle_index",
         "current_step_label",
+        "current_step_alias",
+        "current_step_role",
     }
 
 

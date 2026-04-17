@@ -13,6 +13,7 @@ from btwin_core.context_core import ContextCore
 from btwin_core.event_bus import EventBus, SSEEvent
 from btwin_core.locale_settings import LocaleSettingsStore
 from btwin_core.phase_cycle import PhaseCycleState
+from btwin_core.phase_cycle_engine import build_phase_cycle_context_core
 from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.phase_context import PhaseContextBuilder
 from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolStore
@@ -181,34 +182,16 @@ def _install_runtime_event_enricher(event_bus: EventBus, agent_runner: Any | Non
     setattr(event_bus, "_btwin_runtime_event_enricher_installed", True)
 
 
-def _phase_cycle_next_expected_action(phase: ProtocolPhase, state: PhaseCycleState) -> str | None:
-    if not phase.procedure:
-        return None
-    if state.current_step_label is not None:
-        for step in phase.procedure:
-            if step.action == state.current_step_label:
-                return step.guidance or step.action
-    first_step = phase.procedure[0]
-    return first_step.guidance or first_step.action
-
-
 def _build_phase_cycle_context_core(
     *,
     thread: dict[str, object],
     phase: ProtocolPhase,
     state: PhaseCycleState,
 ) -> ContextCore:
-    required_sections = [section.section for section in (phase.template or []) if section.required]
-    required_result = ", ".join(required_sections) if required_sections else f"{phase.name} result"
-    return ContextCore(
-        thread_goal=str(thread.get("topic") or thread.get("thread_id") or ""),
-        phase_purpose=phase.description or phase.name,
-        non_goals=[],
-        required_result=required_result,
-        last_cycle_outcome=state.last_gate_outcome,
-        next_expected_action=_phase_cycle_next_expected_action(phase, state),
-        current_cycle_index=state.cycle_index,
-        current_step_label=state.current_step_label,
+    return build_phase_cycle_context_core(
+        thread=thread,
+        phase=phase,
+        state=state,
     )
 
 
