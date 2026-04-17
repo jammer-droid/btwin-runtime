@@ -171,6 +171,59 @@ def test_api_phase_cycle_visual_prefers_protocol_keys_and_aliases():
     }
 
 
+def test_api_phase_cycle_visual_uses_step_index_for_repeated_actions():
+    protocol = Protocol(
+        name="review-loop",
+        phases=[
+            ProtocolPhase(
+                name="review",
+                actions=["contribute"],
+                procedure=[
+                    {"role": "reviewer", "action": "review", "alias": "Review 1", "key": "step-review-1"},
+                    {"role": "implementer", "action": "revise", "alias": "Revise", "key": "step-revise"},
+                    {"role": "reviewer", "action": "review", "alias": "Review 2", "key": "step-review-2"},
+                ],
+            ),
+        ],
+        transitions=[
+            ProtocolTransition.model_validate(
+                {"from": "review", "to": "review", "on": "retry", "alias": "Retry Gate", "key": "gate-retry"}
+            ),
+        ],
+        outcomes=["retry", "accept"],
+    )
+    phase = protocol.phases[0]
+    state = PhaseCycleState.start(
+        thread_id="thread-1",
+        phase_name="review",
+        procedure_steps=["review", "revise", "review"],
+    ).model_copy(
+        update={
+            "current_step_index": 2,
+            "current_step_label": "review",
+            "completed_steps": ["review", "revise"],
+        }
+    )
+
+    visual = _build_phase_cycle_visual(protocol=protocol, phase=phase, state=state)
+
+    assert visual["procedure"][0] == {
+        "key": "step-review-1",
+        "label": "Review 1",
+        "status": "completed",
+    }
+    assert visual["procedure"][1] == {
+        "key": "step-revise",
+        "label": "Revise",
+        "status": "completed",
+    }
+    assert visual["procedure"][2] == {
+        "key": "step-review-2",
+        "label": "Review 2",
+        "status": "active",
+    }
+
+
 def test_protocol_flow_can_restart_same_phase_for_next_cycle():
     protocol = Protocol(
         name="review-loop",

@@ -270,6 +270,78 @@ def test_standalone_phase_cycle_payload_prefers_protocol_keys_in_visuals(tmp_pat
     }
 
 
+def test_standalone_phase_cycle_payload_uses_step_index_for_repeated_actions(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    protocol_store = ProtocolStore(project_root / ".btwin" / "protocols")
+    protocol_store.save_protocol(
+        Protocol(
+            name="review-loop",
+            phases=[
+                ProtocolPhase(
+                    name="review",
+                    actions=["contribute"],
+                    template=[ProtocolSection(section="completed", required=True)],
+                    procedure=[
+                        {"role": "reviewer", "action": "review", "alias": "Review 1", "key": "step-review-1"},
+                        {"role": "implementer", "action": "revise", "alias": "Revise", "key": "step-revise"},
+                        {"role": "reviewer", "action": "review", "alias": "Review 2", "key": "step-review-2"},
+                    ],
+                ),
+            ],
+            transitions=[
+                ProtocolTransition.model_validate(
+                    {"from": "review", "to": "review", "on": "retry", "alias": "Retry Gate", "key": "gate-retry"}
+                ),
+            ],
+            outcomes=["retry", "accept"],
+        )
+    )
+    thread = thread_store.create_thread(
+        topic="Repeated review HUD progress thread",
+        protocol="review-loop",
+        participants=["alice"],
+        initial_phase="review",
+    )
+    PhaseCycleStore(project_root / ".btwin").write(
+        PhaseCycleState.start(
+            thread_id=thread["thread_id"],
+            phase_name="review",
+            procedure_steps=["review", "revise", "review"],
+        ).model_copy(
+            update={
+                "current_step_index": 2,
+                "current_step_label": "review",
+                "completed_steps": ["review", "revise"],
+            }
+        )
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+
+    payload = main._phase_cycle_payload_for_thread(thread["thread_id"], thread=thread, config=_standalone_config(data_dir))
+
+    assert payload is not None
+    assert payload["visual"]["procedure"][0] == {
+        "key": "step-review-1",
+        "label": "Review 1",
+        "status": "completed",
+    }
+    assert payload["visual"]["procedure"][1] == {
+        "key": "step-revise",
+        "label": "Revise",
+        "status": "completed",
+    }
+    assert payload["visual"]["procedure"][2] == {
+        "key": "step-review-2",
+        "label": "Review 2",
+        "status": "active",
+    }
+
+
 def test_hud_with_closed_binding_shows_closed_status_without_focusing_thread(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"

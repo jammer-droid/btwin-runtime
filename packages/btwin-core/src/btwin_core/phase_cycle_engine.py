@@ -75,6 +75,25 @@ def build_phase_cycle_context_core(
     )
 
 
+def resolve_phase_cycle_current_step_index(
+    phase: ProtocolPhase | None,
+    state: PhaseCycleState,
+) -> int | None:
+    if phase is not None and phase.procedure:
+        if 0 <= state.current_step_index < len(phase.procedure):
+            indexed_step = phase.procedure[state.current_step_index]
+            if state.current_step_label is None or indexed_step.action == state.current_step_label:
+                return state.current_step_index
+        if state.current_step_label is not None:
+            for index, step in enumerate(phase.procedure):
+                if step.action == state.current_step_label:
+                    return index
+        if state.status == "active":
+            return 0
+        return None
+    return _resolve_step_index_from_labels(state.procedure_steps, state)
+
+
 def phase_cycle_procedure_actions(phase: ProtocolPhase) -> list[str]:
     if not phase.procedure:
         return []
@@ -98,17 +117,10 @@ def _get_phase(protocol: Protocol, phase_name: str) -> ProtocolPhase:
 def _current_step(phase: ProtocolPhase, state: PhaseCycleState) -> ProtocolProcedureStep | None:
     if not phase.procedure:
         return None
-    if 0 <= state.current_step_index < len(phase.procedure):
-        indexed_step = phase.procedure[state.current_step_index]
-        if state.current_step_label is None or indexed_step.action == state.current_step_label:
-            return indexed_step
-    if state.current_step_label is not None:
-        for step in phase.procedure:
-            if step.action == state.current_step_label:
-                return step
-    if state.status == "active":
-        return phase.procedure[0]
-    return None
+    current_index = resolve_phase_cycle_current_step_index(phase, state)
+    if current_index is None:
+        return None
+    return phase.procedure[current_index]
 
 
 def _step_guidance(step: ProtocolProcedureStep | None) -> str | None:
@@ -129,3 +141,21 @@ def _required_result(phase: ProtocolPhase) -> str:
         if required_sections:
             return ", ".join(required_sections)
     return f"{phase.name} result"
+
+
+def _resolve_step_index_from_labels(
+    step_labels: list[str] | None,
+    state: PhaseCycleState,
+) -> int | None:
+    labels = list(step_labels or [])
+    if 0 <= state.current_step_index < len(labels):
+        indexed_label = labels[state.current_step_index]
+        if state.current_step_label is None or indexed_label == state.current_step_label:
+            return state.current_step_index
+    if state.current_step_label is not None:
+        for index, label in enumerate(labels):
+            if label == state.current_step_label:
+                return index
+    if state.status == "active" and labels:
+        return 0
+    return None

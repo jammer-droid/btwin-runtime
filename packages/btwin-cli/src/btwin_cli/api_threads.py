@@ -13,7 +13,10 @@ from btwin_core.context_core import ContextCore
 from btwin_core.event_bus import EventBus, SSEEvent
 from btwin_core.locale_settings import LocaleSettingsStore
 from btwin_core.phase_cycle import PhaseCycleState
-from btwin_core.phase_cycle_engine import build_phase_cycle_context_core
+from btwin_core.phase_cycle_engine import (
+    build_phase_cycle_context_core,
+    resolve_phase_cycle_current_step_index,
+)
 from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.phase_context import PhaseContextBuilder
 from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolStore
@@ -202,18 +205,17 @@ def _build_phase_cycle_visual(
     state: PhaseCycleState,
 ) -> dict[str, object]:
     procedure_nodes: list[dict[str, object]] = []
-    step_labels: list[str] = []
+    current_step_index = resolve_phase_cycle_current_step_index(phase, state)
     raw_steps = phase.procedure if phase is not None and phase.procedure else None
     if raw_steps:
-        step_labels = [step.action for step in raw_steps]
         for index, step in enumerate(raw_steps):
             status = "pending"
-            if state.current_step_label == step.action:
+            if state.status == "completed":
+                status = "completed"
+            elif current_step_index is not None and index < current_step_index:
+                status = "completed"
+            elif current_step_index is not None and index == current_step_index:
                 status = "active"
-            elif step.action in state.completed_steps or (state.current_step_label in step_labels and index < step_labels.index(state.current_step_label)):
-                status = "completed"
-            elif state.status == "completed":
-                status = "completed"
             procedure_nodes.append(
                 {
                     "key": step.visual_key(),
@@ -225,12 +227,12 @@ def _build_phase_cycle_visual(
         step_labels = [step for step in state.procedure_steps if isinstance(step, str)]
         for index, step in enumerate(step_labels):
             status = "pending"
-            if state.current_step_label == step:
+            if state.status == "completed":
+                status = "completed"
+            elif current_step_index is not None and index < current_step_index:
+                status = "completed"
+            elif current_step_index is not None and index == current_step_index:
                 status = "active"
-            elif step in state.completed_steps or (state.current_step_label in step_labels and index < step_labels.index(state.current_step_label)):
-                status = "completed"
-            elif state.status == "completed":
-                status = "completed"
             procedure_nodes.append({"key": step, "label": step, "status": status})
     gate_status = "completed" if state.status == "completed" else "pending"
     procedure_nodes.append({"key": "gate", "label": "gate", "status": gate_status})
