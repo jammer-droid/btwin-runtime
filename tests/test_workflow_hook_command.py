@@ -430,6 +430,8 @@ def test_workflow_hook_stdin_mode_records_block_event(tmp_path, monkeypatch):
     assert events[-1]["decision"] == "block"
     assert events[-1]["hook_event_name"] == "Stop"
     assert events[-1]["agent"] == "alice"
+    assert events[-1]["scope"] == "local_recovery"
+    assert events[-1]["cycle_finished"] is False
 
 
 def test_contribution_submit_records_workflow_event(tmp_path, monkeypatch):

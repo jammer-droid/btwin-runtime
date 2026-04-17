@@ -43,12 +43,17 @@ from rich.markdown import Markdown
 
 from btwin_core.agent_store import AgentStore
 from btwin_core.config import BTwinConfig, load_config, resolve_config_path
+from btwin_core.context_core import ContextCore
 from btwin_core.handoff_archive import get_handoff_record, list_handoff_records, write_handoff_record
 from btwin_core.locale_settings import LocaleSettingsStore
+from btwin_core.phase_cycle import PhaseCycleState
+from btwin_core.phase_cycle_engine import advance_phase_cycle
+from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.protocol_flow import describe_next
 from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolStore
 from btwin_core.protocol_validator import ProtocolValidator
 from btwin_core.sources import SourceRegistry
+from btwin_core.system_mailbox_store import SystemMailboxStore
 from btwin_core.runtime_binding_store import RuntimeBinding, RuntimeBindingState, RuntimeBindingStore
 from btwin_core.runtime_logging import RuntimeEventLogger
 from btwin_core.thread_chat import parse_thread_chat_input
@@ -212,6 +217,80 @@ def _iso_now() -> str:
 def _append_workflow_event(thread_id: str, **event: object) -> None:
     record = {"timestamp": _iso_now(), "thread_id": thread_id, **event}
     _workflow_event_log(thread_id).append(record)
+
+
+def _system_mailbox_path(config: BTwinConfig | None = None) -> Path:
+    return _shared_runtime_data_dir(config) / "runtime" / "system-mailbox.jsonl"
+
+
+def _get_system_mailbox_store(config: BTwinConfig | None = None) -> SystemMailboxStore:
+    return SystemMailboxStore(_shared_runtime_data_dir(config))
+
+
+def _get_phase_cycle_store(config: BTwinConfig | None = None) -> PhaseCycleStore:
+    return PhaseCycleStore(_shared_runtime_data_dir(config))
+
+
+def _append_system_mailbox_report(
+    *,
+    thread_id: str,
+    report_type: str,
+    source_action: str,
+    summary: str,
+    cycle_finished: bool,
+    audience: str = "monitoring",
+    phase: str | None = None,
+    protocol: str | None = None,
+    next_phase: str | None = None,
+    cycle_index: int | None = None,
+    next_cycle_index: int | None = None,
+    requires_human_attention: bool = False,
+    config: BTwinConfig | None = None,
+) -> dict[str, object]:
+    report = {
+        "created_at": _iso_now(),
+        "thread_id": thread_id,
+        "report_type": report_type,
+        "source_action": source_action,
+        "summary": summary,
+        "cycle_finished": cycle_finished,
+        "audience": audience,
+        "requires_human_attention": requires_human_attention,
+    }
+    if phase is not None:
+        report["phase"] = phase
+    if protocol is not None:
+        report["protocol"] = protocol
+    if next_phase is not None:
+        report["next_phase"] = next_phase
+    if cycle_index is not None:
+        report["cycle_index"] = cycle_index
+    if next_cycle_index is not None:
+        report["next_cycle_index"] = next_cycle_index
+
+    return _get_system_mailbox_store(config).append_report(report)
+
+
+def _list_system_mailbox_reports(
+    *,
+    thread_id: str | None = None,
+    limit: int = 5,
+    config: BTwinConfig | None = None,
+) -> list[dict[str, object]]:
+    if limit <= 0:
+        return []
+    current_config = config or _get_config()
+    if _use_attached_api(current_config):
+        try:
+            payload = _api_get(
+                "/api/system-mailbox",
+                params={"threadId": thread_id, "limit": limit},
+            )
+        except Exception:
+            return []
+        reports = payload.get("reports", []) if isinstance(payload, dict) else []
+        return [dict(report) for report in reports if isinstance(report, dict)]
+    return _get_system_mailbox_store(current_config).list_reports(thread_id=thread_id, limit=limit)
 
 
 def _load_thread_snapshot(thread_id: str, config: BTwinConfig) -> tuple[dict[str, object], dict[str, object]]:
@@ -504,6 +583,260 @@ def _render_thread_runtime_diagnostics(thread_id: str, config: BTwinConfig) -> l
     return lines
 
 
+def _phase_cycle_procedure_steps(phase: ProtocolPhase) -> list[str]:
+    if not phase.procedure:
+        return []
+    return [step.action for step in phase.procedure]
+
+
+def _phase_cycle_visual_payload(
+    *,
+    protocol: Protocol | None,
+    phase: ProtocolPhase | None,
+    state: PhaseCycleState,
+) -> dict[str, object]:
+    procedure_nodes: list[dict[str, object]] = []
+    step_labels: list[str] = []
+    raw_steps = phase.procedure if phase is not None and phase.procedure else None
+    if raw_steps:
+        step_labels = [step.action for step in raw_steps]
+        for index, step in enumerate(raw_steps):
+            label = step.alias or step.action
+            status = "pending"
+            if state.current_step_label == step.action:
+                status = "active"
+            elif step.action in state.completed_steps or (state.current_step_label in step_labels and index < step_labels.index(state.current_step_label)):
+                status = "completed"
+            elif state.status == "completed":
+                status = "completed"
+            procedure_nodes.append({"key": step.action, "label": label, "status": status})
+    else:
+        step_labels = [step for step in state.procedure_steps if isinstance(step, str)]
+        for index, step in enumerate(step_labels):
+            status = "pending"
+            if state.current_step_label == step:
+                status = "active"
+            elif step in state.completed_steps or (state.current_step_label in step_labels and index < step_labels.index(state.current_step_label)):
+                status = "completed"
+            elif state.status == "completed":
+                status = "completed"
+            procedure_nodes.append({"key": step, "label": step, "status": status})
+    gate_status = "completed" if state.status == "completed" else "pending"
+    procedure_nodes.append({"key": "gate", "label": "Gate", "status": gate_status})
+
+    gate_nodes: list[dict[str, object]] = []
+    if protocol is not None:
+        for transition in protocol.transitions:
+            if transition.from_phase != state.phase_name:
+                continue
+            label = transition.alias or transition.on or transition.to
+            status = "completed" if transition.on and state.last_gate_outcome == transition.on else "pending"
+            gate_nodes.append(
+                {
+                    "key": transition.on or transition.to,
+                    "label": label,
+                    "status": status,
+                    "target_phase": transition.to,
+                }
+            )
+    elif state.last_gate_outcome:
+        gate_nodes.append(
+            {
+                "key": state.last_gate_outcome,
+                "label": state.last_gate_outcome,
+                "status": "completed",
+                "target_phase": state.phase_name,
+            }
+        )
+
+    return {"procedure": procedure_nodes, "gates": gate_nodes}
+
+
+def _phase_cycle_next_expected_action(phase: ProtocolPhase, state: PhaseCycleState) -> str | None:
+    if not phase.procedure:
+        return None
+    if state.current_step_label is not None:
+        for step in phase.procedure:
+            if step.action == state.current_step_label:
+                return step.guidance or step.action
+    first_step = phase.procedure[0]
+    return first_step.guidance or first_step.action
+
+
+def _build_phase_cycle_context_core(
+    *,
+    thread: dict[str, object],
+    phase: ProtocolPhase,
+    state: PhaseCycleState,
+    last_cycle_outcome: str | None,
+) -> ContextCore:
+    required_sections = [section.section for section in (phase.template or []) if section.required]
+    required_result = ", ".join(required_sections) if required_sections else f"{phase.name} result"
+    return ContextCore(
+        thread_goal=str(thread.get("topic") or thread.get("thread_id") or ""),
+        phase_purpose=phase.description or phase.name,
+        non_goals=[],
+        required_result=required_result,
+        last_cycle_outcome=last_cycle_outcome,
+        next_expected_action=_phase_cycle_next_expected_action(phase, state),
+        current_cycle_index=state.cycle_index,
+        current_step_label=state.current_step_label,
+    )
+
+
+def _ensure_phase_cycle_state(
+    *,
+    thread: dict[str, object],
+    phase: ProtocolPhase,
+    config: BTwinConfig,
+) -> PhaseCycleState:
+    store = _get_phase_cycle_store(config)
+    thread_id = str(thread.get("thread_id") or "")
+    current = store.read(thread_id) if thread_id else None
+    if current is not None and current.phase_name == phase.name:
+        return current
+    return store.start_cycle(
+        thread_id=thread_id,
+        phase_name=phase.name,
+        procedure_steps=_phase_cycle_procedure_steps(phase),
+    )
+
+
+def _phase_cycle_payload_for_thread(
+    thread_id: str,
+    *,
+    thread: dict[str, object] | None = None,
+    config: BTwinConfig | None = None,
+) -> dict[str, object] | None:
+    current_config = config or _get_config()
+    if _use_attached_api(current_config):
+        try:
+            payload = _api_get(f"/api/threads/{thread_id}/phase-cycle")
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    if thread is None:
+        thread_obj = _get_thread_store().get_thread(thread_id)
+        if thread_obj is None:
+            return None
+        thread = thread_obj
+
+    protocol_name = thread.get("protocol")
+    protocol = _get_protocol_store().get_protocol(protocol_name) if isinstance(protocol_name, str) else None
+    state = _get_phase_cycle_store(current_config).read(thread_id)
+    if state is None:
+        return None
+    if protocol is None:
+        return {
+            "state": state.model_dump(),
+            "visual": _phase_cycle_visual_payload(protocol=None, phase=None, state=state),
+        }
+    current_phase = thread.get("current_phase")
+    phase = next((item for item in protocol.phases if item.name == current_phase), None)
+    if phase is None:
+        return {
+            "state": state.model_dump(),
+            "visual": _phase_cycle_visual_payload(protocol=protocol, phase=None, state=state),
+        }
+    context_core = _build_phase_cycle_context_core(
+        thread=thread,
+        phase=phase,
+        state=state,
+        last_cycle_outcome=state.last_gate_outcome,
+    )
+    return {
+        "state": state.model_dump(),
+        "context_core": context_core.model_dump(),
+        "visual": _phase_cycle_visual_payload(protocol=protocol, phase=phase, state=state),
+    }
+
+
+def _cycle_report_summary(
+    *,
+    current_phase: str,
+    next_phase: str | None,
+    requested_outcome: str | None,
+    next_cycle_index: int | None,
+) -> str:
+    if requested_outcome == "retry" and next_phase == current_phase:
+        cycle_suffix = f" with active cycle {next_cycle_index}" if next_cycle_index is not None else ""
+        return f"Phase `{current_phase}` requested retry; continuing in `{next_phase}`{cycle_suffix}."
+    if next_phase is None:
+        return f"Phase `{current_phase}` complete; thread closed."
+    return f"Phase `{current_phase}` complete; advanced to `{next_phase}`."
+
+
+def _phase_cycle_completed_count(state: dict[str, object]) -> int:
+    cycle_index = state.get("cycle_index")
+    if not isinstance(cycle_index, int) or cycle_index < 1:
+        return 0
+    if state.get("status") == "completed":
+        return cycle_index
+    return cycle_index - 1
+
+
+def _hud_report_label(report: dict[str, object]) -> str:
+    report_type = str(report.get("report_type", "report"))
+    if report_type == "cycle_result":
+        return "cycle report"
+    return report_type.replace("_", " ")
+
+
+def _protocol_progress_node(label: str, status: str, *, animation_phase: int) -> str:
+    if status == "completed":
+        return f"[green]● {escape(label)}[/green]"
+    if status == "active":
+        symbol = "◉" if animation_phase % 2 == 0 else "◎"
+        style = "bold cyan" if animation_phase % 2 == 0 else "bold white"
+        return f"[{style}]{symbol} {escape(label)}[/{style}]"
+    if status == "blocked":
+        return f"[red]✕ {escape(label)}[/red]"
+    return f"[dim]○ {escape(label)}[/dim]"
+
+
+def _render_protocol_progress_lines(
+    phase_cycle_payload: dict[str, object],
+    *,
+    animation_phase: int,
+) -> list[str]:
+    lines: list[str] = ["Protocol Progress"]
+    state = phase_cycle_payload.get("state")
+    if not isinstance(state, dict):
+        return lines
+    lines.append(f"Active cycle: {state.get('cycle_index')}")
+    lines.append(f"Completed cycles: {_phase_cycle_completed_count(state)}")
+    visual = phase_cycle_payload.get("visual")
+    if isinstance(visual, dict):
+        procedure = visual.get("procedure")
+        if isinstance(procedure, list) and procedure:
+            procedure_line = " -- ".join(
+                _protocol_progress_node(
+                    str(node.get("label", node.get("key", ""))),
+                    str(node.get("status", "pending")),
+                    animation_phase=animation_phase,
+                )
+                for node in procedure
+                if isinstance(node, dict)
+            )
+            lines.append("Procedure")
+            lines.append(procedure_line)
+        gates = visual.get("gates")
+        if isinstance(gates, list) and gates:
+            gate_line = " -- ".join(
+                _protocol_progress_node(
+                    str(node.get("label", node.get("key", ""))),
+                    str(node.get("status", "pending")),
+                    animation_phase=animation_phase,
+                )
+                for node in gates
+                if isinstance(node, dict)
+            )
+            lines.append("Gates")
+            lines.append(gate_line)
+    return lines
+
+
 def _resolve_bound_thread_id() -> str | None:
     state = _get_runtime_binding_store().read_state()
     if not state.bound:
@@ -511,11 +844,12 @@ def _resolve_bound_thread_id() -> str | None:
     return state.binding.thread_id
 
 
-def _render_hud(thread_id: str | None, limit: int) -> str:
+def _render_hud(thread_id: str | None, limit: int, animation_phase: int | None = None) -> str:
     config = _get_config()
     binding_state = _get_runtime_binding_store().read_state()
     binding = binding_state.binding
     lines = ["B-TWIN HUD"]
+    current_animation_phase = animation_phase if animation_phase is not None else int(time.time() * 2) % 2
 
     binding_label = "none"
     if binding is not None:
@@ -537,6 +871,31 @@ def _render_hud(thread_id: str | None, limit: int) -> str:
 
     lines.append("")
     lines.append(_render_thread_watch(thread, status_summary, _workflow_event_log(target_thread_id).list_events(limit=limit)))
+    phase_cycle_payload = _phase_cycle_payload_for_thread(
+        target_thread_id,
+        thread=thread,
+        config=config,
+    )
+    if isinstance(phase_cycle_payload, dict):
+        state = phase_cycle_payload.get("state")
+        if isinstance(state, dict):
+            lines.append("")
+            lines.extend(_render_protocol_progress_lines(phase_cycle_payload, animation_phase=current_animation_phase))
+    mailbox_reports = [
+        report
+        for report in _list_system_mailbox_reports(thread_id=target_thread_id, limit=limit, config=config)
+        if str(report.get("audience", "monitoring")) == "monitoring"
+    ]
+    if mailbox_reports:
+        lines.append("")
+        lines.append("Cycle Feed")
+        for report in mailbox_reports:
+            created_at = str(report.get("created_at", ""))
+            time_label = created_at[11:19] if "T" in created_at and len(created_at) >= 19 else created_at
+            summary = str(report.get("summary", "")).strip()
+            lines.append(f"{time_label}  {_hud_report_label(report)}")
+            if summary:
+                lines.append(f"          summary: {summary}")
     return "\n".join(lines)
 
 
@@ -3018,6 +3377,7 @@ def protocol_apply_next(
     config = _get_config()
     resolved_thread_id, thread_source = _resolve_runtime_thread_id(thread_id, config)
     thread, protocol, phase, _phase_participants, contributions = _load_protocol_flow_context(resolved_thread_id, config)
+    current_cycle_state = _ensure_phase_cycle_state(thread=thread, phase=phase, config=config)
     plan = describe_next(thread, protocol, contributions, outcome=outcome)
     base_payload = {
         "thread_id": resolved_thread_id,
@@ -3079,6 +3439,19 @@ def protocol_apply_next(
                 closed = dict(closed)
                 closed["result_record_id"] = result_record_id
 
+        next_cycle_state = _get_phase_cycle_store(config).write(
+            current_cycle_state.finish_cycle(
+                gate_outcome=plan.requested_outcome or "completed",
+                next_phase=None,
+            )
+        )
+        context_core = _build_phase_cycle_context_core(
+            thread=thread,
+            phase=phase,
+            state=next_cycle_state,
+            last_cycle_outcome=next_cycle_state.last_gate_outcome,
+        )
+
         result_payload = {
             "thread_id": resolved_thread_id,
             "thread_source": thread_source,
@@ -3087,8 +3460,40 @@ def protocol_apply_next(
             "next_phase": plan.next_phase,
             "suggested_action": plan.suggested_action,
             "applied": True,
+            "cycle": next_cycle_state.model_dump(),
+            "context_core": context_core.model_dump(),
             "thread": closed,
         }
+        cycle_summary = _cycle_report_summary(
+            current_phase=plan.current_phase,
+            next_phase=plan.next_phase,
+            requested_outcome=plan.requested_outcome,
+            next_cycle_index=next_cycle_state.cycle_index,
+        )
+        _append_workflow_event(
+            resolved_thread_id,
+            event_type="cycle_gate_completed",
+            source="btwin.protocol.apply_next",
+            phase=plan.current_phase,
+            scope="cycle_gate",
+            cycle_finished=True,
+            cycle_index=current_cycle_state.cycle_index,
+            next_cycle_index=next_cycle_state.cycle_index,
+            summary=cycle_summary,
+        )
+        _append_system_mailbox_report(
+            thread_id=resolved_thread_id,
+            report_type="cycle_result",
+            source_action="close_thread",
+            summary=cycle_summary,
+            cycle_finished=True,
+            phase=plan.current_phase,
+            protocol=protocol.name,
+            next_phase=plan.next_phase,
+            cycle_index=current_cycle_state.cycle_index,
+            next_cycle_index=next_cycle_state.cycle_index,
+            config=config,
+        )
         _emit_payload(result_payload, as_json=as_json)
         return
 
@@ -3110,6 +3515,32 @@ def protocol_apply_next(
                 console.print(f"[red]Thread not found:[/red] {resolved_thread_id}")
                 raise typer.Exit(4)
 
+        if plan.requested_outcome is not None:
+            transition = advance_phase_cycle(
+                thread=thread,
+                protocol=protocol,
+                current_state=current_cycle_state,
+                outcome=plan.requested_outcome,
+            )
+            next_cycle_state = _get_phase_cycle_store(config).write(transition.next_state)
+            context_core = transition.context_core
+        else:
+            target_phase = next((item for item in protocol.phases if item.name == plan.next_phase), None)
+            if target_phase is None:
+                console.print(f"[red]Phase not found:[/red] {plan.next_phase}")
+                raise typer.Exit(4)
+            next_cycle_state = _get_phase_cycle_store(config).start_cycle(
+                thread_id=resolved_thread_id,
+                phase_name=target_phase.name,
+                procedure_steps=_phase_cycle_procedure_steps(target_phase),
+            )
+            context_core = _build_phase_cycle_context_core(
+                thread=thread,
+                phase=target_phase,
+                state=next_cycle_state,
+                last_cycle_outcome=plan.requested_outcome or "completed",
+            )
+
         result_payload = {
             "thread_id": resolved_thread_id,
             "thread_source": thread_source,
@@ -3118,8 +3549,40 @@ def protocol_apply_next(
             "next_phase": plan.next_phase,
             "suggested_action": plan.suggested_action,
             "applied": True,
+            "cycle": next_cycle_state.model_dump(),
+            "context_core": context_core.model_dump(),
             "thread": closed_or_updated,
         }
+        cycle_summary = _cycle_report_summary(
+            current_phase=plan.current_phase,
+            next_phase=plan.next_phase,
+            requested_outcome=plan.requested_outcome,
+            next_cycle_index=next_cycle_state.cycle_index,
+        )
+        _append_workflow_event(
+            resolved_thread_id,
+            event_type="cycle_gate_completed",
+            source="btwin.protocol.apply_next",
+            phase=plan.current_phase,
+            scope="cycle_gate",
+            cycle_finished=True,
+            cycle_index=current_cycle_state.cycle_index,
+            next_cycle_index=next_cycle_state.cycle_index,
+            summary=cycle_summary,
+        )
+        _append_system_mailbox_report(
+            thread_id=resolved_thread_id,
+            report_type="cycle_result",
+            source_action="advance_phase",
+            summary=cycle_summary,
+            cycle_finished=True,
+            phase=plan.current_phase,
+            protocol=protocol.name,
+            next_phase=plan.next_phase,
+            cycle_index=current_cycle_state.cycle_index,
+            next_cycle_index=next_cycle_state.cycle_index,
+            config=config,
+        )
         _emit_payload(result_payload, as_json=as_json)
         return
 
@@ -3802,6 +4265,8 @@ def workflow_hook(
                     resolved_thread_id,
                     event_type="phase_exit_blocked",
                     source="btwin.workflow.hook",
+                    scope="local_recovery",
+                    cycle_finished=False,
                     decision=result.decision,
                     reason=result.reason,
                     summary=result.overlay or result.reason or "Stop blocked by workflow constraints.",

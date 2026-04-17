@@ -102,6 +102,39 @@ def _transition_protocol() -> Protocol:
     )
 
 
+def _review_retry_protocol() -> Protocol:
+    return Protocol(
+        name="review-retry",
+        description="Repeat the same phase until accepted",
+        phases=[
+            ProtocolPhase(
+                name="review",
+                description="Review and revise the work.",
+                actions=["contribute"],
+                template=[ProtocolSection(section="completed", required=True)],
+                procedure=[
+                    {
+                        "role": "reviewer",
+                        "action": "review",
+                        "guidance": "Review the current implementation state.",
+                    },
+                    {
+                        "role": "implementer",
+                        "action": "revise",
+                        "guidance": "Implement revisions from review feedback.",
+                    },
+                ],
+            ),
+            ProtocolPhase(name="decision", description="Record final acceptance.", actions=["decide"]),
+        ],
+        transitions=[
+            ProtocolTransition.model_validate({"from": "review", "to": "review", "on": "retry"}),
+            ProtocolTransition.model_validate({"from": "review", "to": "decision", "on": "accept"}),
+        ],
+        outcomes=["retry", "accept"],
+    )
+
+
 def test_protocol_apply_next_preserves_interaction_metadata(tmp_path):
     project_root = tmp_path / "project"
     protocol = _transition_protocol()
@@ -228,6 +261,44 @@ def test_protocol_apply_next_uses_runtime_binding_and_advances_phase(tmp_path, m
     assert payload["next_phase"] == "followup"
     updated_thread = thread_store.get_thread(thread["thread_id"])
     assert updated_thread["current_phase"] == "followup"
+
+
+def test_protocol_apply_next_updates_phase_cycle_state_on_retry(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    thread_store, thread = _seed_agentless_thread(project_root, "review-retry", participants=["alice"], initial_phase="review")
+    _save_protocol(project_root, _review_retry_protocol())
+    thread_store.submit_contribution(
+        thread["thread_id"],
+        "alice",
+        "review",
+        content="## completed\nNeeds another pass.\n",
+        tldr="review retry",
+    )
+
+    RuntimeBindingStore(project_root / ".btwin").bind(thread["thread_id"], "alice")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    result = runner.invoke(
+        app,
+        [
+            "protocol",
+            "apply-next",
+            "--outcome",
+            "retry",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["applied"] is True
+    assert payload["cycle"]["cycle_index"] == 2
+    assert payload["cycle"]["phase_name"] == "review"
+    assert payload["context_core"]["current_cycle_index"] == 2
+    assert payload["context_core"]["next_expected_action"] == "Review the current implementation state."
 
 
 def test_protocol_apply_next_reports_unsupported_outcome_error(tmp_path, monkeypatch):

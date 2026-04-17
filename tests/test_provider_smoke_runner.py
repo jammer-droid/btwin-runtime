@@ -695,3 +695,96 @@ def test_provider_smoke_workflow_hook_allows_non_required_actor_in_user_decision
     assert payload["event"] == "Stop"
     assert payload["decision"] == "allow"
     assert payload["required_result_recorded"] is False
+
+
+def test_attached_scenario_repeats_same_phase_across_multiple_cycles(provider_smoke_env) -> None:
+    state = _setup_provider_smoke_thread(
+        provider_smoke_env,
+        protocol_name="provider-smoke-repeat-cycle",
+        protocol_definition={
+            "name": "provider-smoke-repeat-cycle",
+            "outcomes": ["retry", "accept"],
+            "phases": [
+                {
+                    "name": "review",
+                    "actions": ["contribute"],
+                    "template": [{"section": "completed", "required": True}],
+                    "procedure": [
+                        {"role": "reviewer", "action": "review"},
+                        {"role": "implementer", "action": "revise"},
+                    ],
+                }
+            ],
+            "transitions": [
+                {"from": "review", "to": "review", "on": "retry"},
+            ],
+        },
+        participants=("alice",),
+    )
+    thread_id = str(state["thread_id"])
+
+    blocked = _run_btwin(
+        provider_smoke_env,
+        "workflow",
+        "hook",
+        "--event",
+        "Stop",
+        "--thread",
+        thread_id,
+        "--agent",
+        "alice",
+        "--json",
+        expected_returncode=2,
+    )
+    assert blocked["decision"] == "block"
+
+    mailbox_before = httpx.get(
+        f'{provider_smoke_env["BTWIN_API_URL"]}/api/system-mailbox',
+        params={"threadId": thread_id, "limit": 10},
+        timeout=5.0,
+    )
+    mailbox_before.raise_for_status()
+    assert mailbox_before.json()["reports"] == []
+
+    for cycle_index in (1, 2):
+        _run_btwin(
+            provider_smoke_env,
+            "contribution",
+            "submit",
+            "--thread",
+            thread_id,
+            "--agent",
+            "alice",
+            "--phase",
+            "review",
+            "--content",
+            f"## completed\nCycle {cycle_index} ready for another pass.\n",
+            "--tldr",
+            f"review cycle {cycle_index}",
+            "--json",
+        )
+        payload = _run_btwin(
+            provider_smoke_env,
+            "protocol",
+            "apply-next",
+            "--thread",
+            thread_id,
+            "--outcome",
+            "retry",
+            "--json",
+        )
+        assert payload["applied"] is True
+        assert payload["thread"]["current_phase"] == "review"
+
+    mailbox_response = httpx.get(
+        f'{provider_smoke_env["BTWIN_API_URL"]}/api/system-mailbox',
+        params={"threadId": thread_id, "limit": 10},
+        timeout=5.0,
+    )
+    mailbox_response.raise_for_status()
+    reports = mailbox_response.json()["reports"]
+
+    assert len(reports) == 2
+    assert all(report["report_type"] == "cycle_result" for report in reports)
+    assert all(report["cycle_finished"] is True for report in reports)
+    assert all(report["next_phase"] == "review" for report in reports)

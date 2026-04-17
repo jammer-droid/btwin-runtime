@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import random
+import shutil
 import string
 from datetime import datetime, timezone
 from pathlib import Path
@@ -253,6 +254,51 @@ class ThreadStore:
             results.append(meta)
         return results
 
+    def gc_closed_threads(
+        self,
+        *,
+        mailbox_store,
+        gc_log,
+        max_closed_threads: int,
+    ) -> dict[str, int]:
+        if max_closed_threads < 0:
+            raise ValueError("max_closed_threads must be >= 0")
+
+        closed_threads: list[tuple[datetime, dict]] = []
+        for meta in self.list_threads(status="completed"):
+            closed_threads.append((self._closed_thread_sort_key(meta), meta))
+
+        closed_threads.sort(key=lambda item: item[0], reverse=True)
+        stale_threads = closed_threads[max_closed_threads:]
+        stale_thread_ids = {
+            meta["thread_id"]
+            for _, meta in stale_threads
+            if isinstance(meta.get("thread_id"), str)
+        }
+        deleted_threads = 0
+        for _, meta in stale_threads:
+            thread_id = meta.get("thread_id")
+            if not isinstance(thread_id, str):
+                continue
+            thread_dir = self._dir / thread_id
+            if thread_dir.exists():
+                shutil.rmtree(thread_dir)
+                deleted_threads += 1
+            gc_log.append_event(
+                {
+                    "thread_id": thread_id,
+                    "deleted_at": _iso_now(),
+                    "reason": "lru_closed_thread_gc",
+                    "last_status": meta.get("status"),
+                }
+            )
+
+        deleted_reports = mailbox_store.delete_reports_for_threads(stale_thread_ids)
+        return {
+            "deleted_threads": deleted_threads,
+            "deleted_reports": deleted_reports,
+        }
+
     # -- Messages --
 
     def send_message(
@@ -476,3 +522,19 @@ class ThreadStore:
         raw = path.read_text(encoding="utf-8")
         parts = raw.split("---\n", 2)
         return parts[2].strip() if len(parts) >= 3 else ""
+
+    def _closed_thread_sort_key(self, meta: dict) -> datetime:
+        for field in ("last_accessed_at", "closed_at", "created_at"):
+            value = meta.get(field)
+            parsed = self._parse_datetime(value)
+            if parsed is not None:
+                return parsed
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    def _parse_datetime(self, value: object) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None

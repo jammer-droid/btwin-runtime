@@ -1,4 +1,5 @@
 import io
+import json
 from pathlib import Path
 
 from rich.console import Console
@@ -8,6 +9,8 @@ import btwin_cli.main as main
 from btwin_cli.main import app
 from btwin_core.agent_store import AgentStore
 from btwin_core.config import BTwinConfig, RuntimeConfig
+from btwin_core.phase_cycle import PhaseCycleState
+from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.runtime_binding_store import RuntimeBindingStore
 from btwin_core.thread_store import ThreadStore
 from btwin_core.workflow_event_log import WorkflowEventLog
@@ -83,6 +86,116 @@ def test_hud_with_binding_shows_bound_thread_and_recent_events(tmp_path, monkeyp
     assert thread["thread_id"] in result.output
     assert "phase=context" in result.output
     assert "Stop allowed." in result.output
+
+
+def test_hud_can_render_system_mailbox_reports(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    thread = thread_store.create_thread(
+        topic="HUD mailbox thread",
+        protocol="debate",
+        participants=["alice"],
+        initial_phase="context",
+    )
+    RuntimeBindingStore(project_root / ".btwin").bind(thread["thread_id"], "alice")
+    mailbox_path = project_root / ".btwin" / "runtime" / "system-mailbox.jsonl"
+    mailbox_path.parent.mkdir(parents=True, exist_ok=True)
+    mailbox_path.write_text(
+        json.dumps(
+            {
+                "thread_id": thread["thread_id"],
+                "report_type": "cycle_result",
+                "audience": "monitoring",
+                "summary": "Cycle 1 complete.",
+                "cycle_finished": True,
+                "created_at": "2026-04-17T00:00:00+00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+
+    result = runner.invoke(app, ["hud"])
+
+    assert result.exit_code == 0, result.output
+    assert "Cycle Feed" in result.output
+    assert "cycle_result" not in result.output
+    assert "Cycle 1 complete." in result.output
+
+
+def test_hud_renders_current_protocol_cycle_and_step(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    thread = thread_store.create_thread(
+        topic="HUD progress thread",
+        protocol="review-loop",
+        participants=["alice"],
+        initial_phase="review",
+    )
+    RuntimeBindingStore(project_root / ".btwin").bind(thread["thread_id"], "alice")
+    PhaseCycleStore(project_root / ".btwin").write(
+        PhaseCycleState.start(
+            thread_id=thread["thread_id"],
+            phase_name="review",
+            procedure_steps=["review", "revise"],
+        ).model_copy(
+            update={
+                "cycle_index": 2,
+                "current_step_label": "revise",
+                "last_gate_outcome": "retry",
+            }
+        )
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+    monkeypatch.setattr(
+        main,
+        "_phase_cycle_payload_for_thread",
+        lambda thread_id, thread=None, config=None: {
+            "state": {
+                "thread_id": thread_id,
+                "phase_name": "review",
+                "cycle_index": 2,
+                "procedure_steps": ["review", "revise"],
+                "current_step_label": "revise",
+                "last_gate_outcome": "retry",
+                "status": "active",
+            },
+            "visual": {
+                "procedure": [
+                    {"key": "review", "label": "Review", "status": "completed"},
+                    {"key": "revise", "label": "Revise", "status": "active"},
+                    {"key": "gate", "label": "Gate", "status": "pending"},
+                ],
+                "gates": [
+                    {"key": "retry", "label": "Retry Gate", "status": "completed", "target_phase": "review"},
+                    {"key": "accept", "label": "Accept Gate", "status": "pending", "target_phase": "decision"},
+                ],
+            },
+        },
+    )
+
+    result = runner.invoke(app, ["hud"])
+
+    assert result.exit_code == 0, result.output
+    assert "Protocol Progress" in result.output
+    assert "Active cycle: 2" in result.output
+    assert "Completed cycles: 1" in result.output
+    assert "Procedure" in result.output
+    assert "Review" in result.output
+    assert "Revise" in result.output
+    assert "Retry Gate" in result.output
+    assert "Accept Gate" in result.output
+    assert "Current:" not in result.output
+    assert "Last gate:" not in result.output
 
 
 def test_hud_with_closed_binding_shows_closed_status_without_focusing_thread(tmp_path, monkeypatch):
@@ -221,6 +334,164 @@ def test_hud_attached_uses_shared_runtime_state_for_binding_and_workflow_events(
     assert "thread-1" in result.output
     assert "shared-session" in result.output
     assert "Phase attempt started" in result.output
+
+
+def test_hud_attached_renders_system_mailbox_reports(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+
+    def fake_api_get(path: str, params: dict | None = None):
+        if path == "/api/threads/thread-1":
+            return {
+                "thread_id": "thread-1",
+                "topic": "Attached HUD thread",
+                "protocol": "debate",
+                "current_phase": "context",
+            }
+        if path == "/api/threads/thread-1/status":
+            return {
+                "thread_id": "thread-1",
+                "current_phase": "context",
+                "agents": [{"name": "alice", "status": "joined"}],
+            }
+        if path == "/api/agent-runtime-status":
+            return {"agents": {}}
+        if path == "/api/runtime/logs":
+            return {"events": []}
+        if path == "/api/system-mailbox":
+            assert params == {"threadId": "thread-1", "limit": 5}
+            return {
+                "count": 1,
+                "reports": [
+                    {
+                        "thread_id": "thread-1",
+                        "report_type": "cycle_result",
+                        "audience": "monitoring",
+                        "summary": "Cycle 2 complete.",
+                        "created_at": "2026-04-17T01:00:00+00:00",
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected path: {path} params={params}")
+
+    monkeypatch.setattr(main, "_api_get", fake_api_get)
+
+    rendered = main._render_hud("thread-1", limit=5)
+
+    assert "Cycle Feed" in rendered
+    assert "cycle_result" not in rendered
+    assert "Cycle 2 complete." in rendered
+
+
+def test_hud_attached_renders_protocol_progress(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+
+    def fake_api_get(path: str, params: dict | None = None):
+        if path == "/api/threads/thread-1":
+            return {
+                "thread_id": "thread-1",
+                "topic": "Attached HUD thread",
+                "protocol": "debate",
+                "current_phase": "review",
+            }
+        if path == "/api/threads/thread-1/status":
+            return {
+                "thread_id": "thread-1",
+                "current_phase": "review",
+                "agents": [{"name": "alice", "status": "joined"}],
+            }
+        if path == "/api/threads/thread-1/phase-cycle":
+            return {
+                "state": {
+                    "thread_id": "thread-1",
+                    "phase_name": "review",
+                    "cycle_index": 2,
+                    "procedure_steps": ["review", "revise"],
+                    "current_step_label": "revise",
+                    "last_gate_outcome": "retry",
+                    "status": "active",
+                },
+                "visual": {
+                    "procedure": [
+                        {"key": "review", "label": "Review", "status": "completed"},
+                        {"key": "revise", "label": "Revise", "status": "active"},
+                        {"key": "gate", "label": "Gate", "status": "pending"},
+                    ],
+                    "gates": [
+                        {"key": "retry", "label": "Retry Gate", "status": "completed", "target_phase": "review"},
+                        {"key": "accept", "label": "Accept Gate", "status": "pending", "target_phase": "decision"},
+                    ],
+                },
+            }
+        if path == "/api/agent-runtime-status":
+            return {"agents": {}}
+        if path == "/api/runtime/logs":
+            return {"events": []}
+        if path == "/api/system-mailbox":
+            return {"count": 0, "reports": []}
+        raise AssertionError(f"unexpected path: {path} params={params}")
+
+    monkeypatch.setattr(main, "_api_get", fake_api_get)
+
+    rendered = main._render_hud("thread-1", limit=5)
+
+    assert "Protocol Progress" in rendered
+    assert "Active cycle: 2" in rendered
+    assert "Completed cycles: 1" in rendered
+    assert "Procedure" in rendered
+    assert "Review" in rendered
+    assert "Revise" in rendered
+    assert "Retry Gate" in rendered
+    assert "Accept Gate" in rendered
+    assert "Current:" not in rendered
+    assert "Last gate:" not in rendered
+
+
+def test_protocol_progress_active_node_animates_between_frames(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    phase_cycle_payload = {
+        "state": {
+            "thread_id": "thread-1",
+            "phase_name": "review",
+            "cycle_index": 2,
+            "procedure_steps": ["review", "revise"],
+            "current_step_label": "revise",
+            "last_gate_outcome": "retry",
+            "status": "active",
+        },
+        "visual": {
+            "procedure": [
+                {"key": "review", "label": "Review", "status": "completed"},
+                {"key": "revise", "label": "Revise", "status": "active"},
+                {"key": "gate", "label": "Gate", "status": "pending"},
+            ],
+            "gates": [
+                {"key": "retry", "label": "Retry Gate", "status": "completed", "target_phase": "review"},
+            ],
+        },
+    }
+
+    frame_one = main._render_protocol_progress_lines(phase_cycle_payload, animation_phase=0)
+    frame_two = main._render_protocol_progress_lines(phase_cycle_payload, animation_phase=1)
+
+    assert frame_one != frame_two
+    assert any("Revise" in line for line in frame_one)
+    assert any("Revise" in line for line in frame_two)
 
 
 def test_render_thread_runtime_diagnostics_shows_long_term_app_server_sessions(monkeypatch, tmp_path):

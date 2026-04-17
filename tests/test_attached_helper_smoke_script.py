@@ -37,6 +37,8 @@ def test_attached_helper_smoke_script_runs_end_to_end(tmp_path):
     assert result.returncode == 0, result.stderr or result.stdout
     assert "Attached helper smoke passed" in result.stdout
     assert "protocol next: advance_phase -> discussion" in result.stdout
+    assert "mailbox reports: 1" in result.stdout
+    assert "hud cycle feed visible: True" in result.stdout
     assert "runtime clear: False" in result.stdout
     assert "agent inbox: pending=1 diagnostics=True" in result.stdout
     assert not fake_btwin_log.exists()
