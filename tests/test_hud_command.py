@@ -11,6 +11,7 @@ from btwin_core.agent_store import AgentStore
 from btwin_core.config import BTwinConfig, RuntimeConfig
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.phase_cycle_store import PhaseCycleStore
+from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolSection, ProtocolStore, ProtocolTransition
 from btwin_core.runtime_binding_store import RuntimeBindingStore
 from btwin_core.thread_store import ThreadStore
 from btwin_core.workflow_event_log import WorkflowEventLog
@@ -132,6 +133,29 @@ def test_hud_renders_current_protocol_cycle_and_step(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"
     thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    protocol_store = ProtocolStore(project_root / ".btwin" / "protocols")
+    protocol_store.save_protocol(
+        Protocol(
+            name="review-loop",
+            phases=[
+                ProtocolPhase(
+                    name="review",
+                    actions=["contribute"],
+                    template=[ProtocolSection(section="completed", required=True)],
+                    procedure=[
+                        {"role": "reviewer", "action": "review", "alias": "Review"},
+                        {"role": "implementer", "action": "revise", "alias": "Revise"},
+                    ],
+                ),
+                ProtocolPhase(name="decision", actions=["decide"]),
+            ],
+            transitions=[
+                ProtocolTransition.model_validate({"from": "review", "to": "review", "on": "retry", "alias": "Retry Gate"}),
+                ProtocolTransition.model_validate({"from": "review", "to": "decision", "on": "accept", "alias": "Accept Gate"}),
+            ],
+            outcomes=["retry", "accept"],
+        )
+    )
     thread = thread_store.create_thread(
         topic="HUD progress thread",
         protocol="review-loop",
@@ -156,32 +180,6 @@ def test_hud_renders_current_protocol_cycle_and_step(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_project_root", lambda: project_root)
     monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
     monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
-    monkeypatch.setattr(
-        main,
-        "_phase_cycle_payload_for_thread",
-        lambda thread_id, thread=None, config=None: {
-            "state": {
-                "thread_id": thread_id,
-                "phase_name": "review",
-                "cycle_index": 2,
-                "procedure_steps": ["review", "revise"],
-                "current_step_label": "revise",
-                "last_gate_outcome": "retry",
-                "status": "active",
-            },
-            "visual": {
-                "procedure": [
-                    {"key": "review", "label": "Review", "status": "completed"},
-                    {"key": "revise", "label": "Revise", "status": "active"},
-                    {"key": "gate", "label": "Gate", "status": "pending"},
-                ],
-                "gates": [
-                    {"key": "retry", "label": "Retry Gate", "status": "completed", "target_phase": "review"},
-                    {"key": "accept", "label": "Accept Gate", "status": "pending", "target_phase": "decision"},
-                ],
-            },
-        },
-    )
 
     result = runner.invoke(app, ["hud"])
 

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 PhaseCycleStatus = Literal["active", "completed", "blocked"]
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class PhaseCycleState(BaseModel):
@@ -54,6 +59,7 @@ class PhaseCycleState(BaseModel):
                     "current_step_label": self.procedure_steps[0] if self.procedure_steps else None,
                     "completed_steps": [],
                     "status": "active",
+                    "last_completed_at": _iso_now(),
                     "last_gate_outcome": gate_outcome,
                 }
             )
@@ -62,6 +68,7 @@ class PhaseCycleState(BaseModel):
                 "current_step_label": None,
                 "completed_steps": list(self.procedure_steps),
                 "status": "completed",
+                "last_completed_at": _iso_now(),
                 "last_gate_outcome": gate_outcome,
             }
         )

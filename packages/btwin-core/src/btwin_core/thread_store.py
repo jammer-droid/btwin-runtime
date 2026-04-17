@@ -12,6 +12,8 @@ from pathlib import Path
 
 import yaml
 
+from btwin_core.phase_cycle_store import PhaseCycleStore
+
 logger = logging.getLogger(__name__)
 
 
@@ -275,6 +277,7 @@ class ThreadStore:
             for _, meta in stale_threads
             if isinstance(meta.get("thread_id"), str)
         }
+        phase_cycle_store = PhaseCycleStore(self.data_dir)
         deleted_threads = 0
         for _, meta in stale_threads:
             thread_id = meta.get("thread_id")
@@ -284,6 +287,7 @@ class ThreadStore:
             if thread_dir.exists():
                 shutil.rmtree(thread_dir)
                 deleted_threads += 1
+            phase_cycle_store.delete_thread(thread_id)
             gc_log.append_event(
                 {
                     "thread_id": thread_id,

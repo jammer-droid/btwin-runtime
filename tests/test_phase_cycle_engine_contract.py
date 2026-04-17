@@ -14,6 +14,7 @@ def test_retry_outcome_starts_next_cycle_in_same_phase():
     assert next_state.cycle_index == 2
     assert next_state.status == "active"
     assert next_state.last_gate_outcome == "retry"
+    assert next_state.last_completed_at is not None
 
 
 def test_accept_outcome_completes_phase_cycle_state():
@@ -28,6 +29,7 @@ def test_accept_outcome_completes_phase_cycle_state():
     assert completed.status == "completed"
     assert completed.last_gate_outcome == "accept"
     assert completed.cycle_index == 1
+    assert completed.last_completed_at is not None
 
 
 def test_stop_hook_block_does_not_advance_cycle_index():
