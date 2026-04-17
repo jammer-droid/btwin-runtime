@@ -1,5 +1,5 @@
 from btwin_core.phase_cycle import PhaseCycleState
-from btwin_core.phase_cycle_engine import advance_phase_cycle
+from btwin_core.phase_cycle_engine import advance_phase_cycle, build_phase_cycle_context_core
 from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolSection, ProtocolTransition
 
 
@@ -152,3 +152,51 @@ def test_engine_uses_step_alias_and_role_when_available():
     assert result.context_core.current_step_alias == "Review Pass"
     assert result.context_core.current_step_role == "reviewer"
     assert result.context_core.next_expected_role == "reviewer"
+
+
+def test_context_core_uses_current_step_index_when_action_labels_repeat():
+    protocol = Protocol(
+        name="dual-review",
+        phases=[
+            ProtocolPhase(
+                name="review",
+                description="Two review passes with the same action label.",
+                actions=["contribute"],
+                procedure=[
+                    {
+                        "role": "reviewer",
+                        "action": "review",
+                        "alias": "Reviewer Pass",
+                        "guidance": "Reviewer inspects the change.",
+                    },
+                    {
+                        "role": "approver",
+                        "action": "review",
+                        "alias": "Approval Pass",
+                        "guidance": "Approver checks the final revision.",
+                    },
+                ],
+            )
+        ],
+    )
+
+    state = PhaseCycleState.start(
+        thread_id="thread-1",
+        phase_name="review",
+        procedure_steps=["review", "review"],
+    ).model_copy(
+        update={
+            "current_step_index": 1,
+            "current_step_label": "review",
+        }
+    )
+
+    context_core = build_phase_cycle_context_core(
+        thread={"thread_id": "thread-1", "topic": "Dual review thread"},
+        phase=protocol.phases[0],
+        state=state,
+    )
+
+    assert context_core.current_step_label == "review"
+    assert context_core.current_step_alias == "Approval Pass"
+    assert context_core.current_step_role == "approver"

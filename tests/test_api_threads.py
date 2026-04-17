@@ -6,7 +6,7 @@ from btwin_cli.api_threads import create_threads_router
 from btwin_core.event_bus import EventBus
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.phase_cycle_store import PhaseCycleStore
-from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolSection, ProtocolStore
+from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolSection, ProtocolStore, ProtocolTransition
 from btwin_core.system_mailbox_store import SystemMailboxStore
 from btwin_core.thread_store import ThreadStore
 
@@ -213,6 +213,67 @@ def test_threads_router_exposes_phase_cycle_progress(tmp_path):
     assert payload["context_core"]["current_step_role"] == "implementer"
     assert payload["visual"]["procedure"][0]["label"] == "Review"
     assert payload["visual"]["procedure"][-1]["key"] == "gate"
+
+
+def test_threads_router_preserves_last_cycle_outcome_after_phase_transition(tmp_path):
+    thread_store = ThreadStore(tmp_path / "threads")
+    protocol_store = ProtocolStore(tmp_path / "protocols")
+    event_bus = EventBus()
+    protocol_store.save_protocol(
+        Protocol(
+            name="review-then-decision",
+            phases=[
+                ProtocolPhase(
+                    name="review",
+                    actions=["contribute"],
+                    template=[ProtocolSection(section="completed", required=True)],
+                    procedure=[
+                        {"role": "reviewer", "action": "review", "alias": "Review"},
+                    ],
+                ),
+                ProtocolPhase(
+                    name="decision",
+                    actions=["decide"],
+                    procedure=[
+                        {"role": "decider", "action": "decide", "alias": "Decision"},
+                    ],
+                ),
+            ],
+            transitions=[ProtocolTransition.model_validate({"from": "review", "to": "decision", "on": "accept"})],
+        )
+    )
+
+    thread = thread_store.create_thread(
+        topic="Transitioned cycle thread",
+        protocol="review-then-decision",
+        participants=["alice"],
+        initial_phase="decision",
+    )
+    PhaseCycleStore(thread_store.data_dir).write(
+        PhaseCycleState.start(
+            thread_id=thread["thread_id"],
+            phase_name="decision",
+            procedure_steps=["decide"],
+        ).model_copy(
+            update={
+                "last_gate_outcome": None,
+                "last_cycle_outcome": "accept",
+            }
+        )
+    )
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(create_threads_router(thread_store, protocol_store, event_bus))
+    client = TestClient(app)
+
+    response = client.get(f"/api/threads/{thread['thread_id']}/phase-cycle")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"]["phase_name"] == "decision"
+    assert payload["context_core"]["last_cycle_outcome"] == "accept"
 
 
 def test_agent_runtime_status_includes_helper_overlay_fields(tmp_path):

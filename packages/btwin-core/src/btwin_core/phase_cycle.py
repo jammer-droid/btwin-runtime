@@ -28,6 +28,7 @@ class PhaseCycleState(BaseModel):
     status: PhaseCycleStatus = "active"
     last_completed_at: str | None = None
     last_gate_outcome: str | None = None
+    last_cycle_outcome: str | None = None
 
     @classmethod
     def start(
@@ -36,6 +37,7 @@ class PhaseCycleState(BaseModel):
         thread_id: str,
         phase_name: str,
         procedure_steps: list[str] | None = None,
+        last_cycle_outcome: str | None = None,
     ) -> "PhaseCycleState":
         return cls(
             thread_id=thread_id,
@@ -48,6 +50,7 @@ class PhaseCycleState(BaseModel):
             status="active",
             last_completed_at=None,
             last_gate_outcome=None,
+            last_cycle_outcome=last_cycle_outcome,
         )
 
     def finish_cycle(self, *, gate_outcome: str, next_phase: str | None) -> "PhaseCycleState":
@@ -61,6 +64,7 @@ class PhaseCycleState(BaseModel):
                     "status": "active",
                     "last_completed_at": _iso_now(),
                     "last_gate_outcome": gate_outcome,
+                    "last_cycle_outcome": gate_outcome,
                 }
             )
         return self.model_copy(
@@ -70,6 +74,7 @@ class PhaseCycleState(BaseModel):
                 "status": "completed",
                 "last_completed_at": _iso_now(),
                 "last_gate_outcome": gate_outcome,
+                "last_cycle_outcome": gate_outcome,
             }
         )
 

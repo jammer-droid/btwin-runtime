@@ -36,6 +36,7 @@ def advance_phase_cycle(
             thread_id=current_state.thread_id,
             phase_name=next_phase_name,
             procedure_steps=phase_cycle_procedure_actions(target_phase),
+            last_cycle_outcome=outcome,
         )
 
     context_core = build_phase_cycle_context_core(
@@ -60,7 +61,11 @@ def build_phase_cycle_context_core(
         phase_purpose=phase.description or phase.name,
         non_goals=[],
         required_result=_required_result(phase),
-        last_cycle_outcome=last_cycle_outcome if last_cycle_outcome is not None else state.last_gate_outcome,
+        last_cycle_outcome=(
+            last_cycle_outcome
+            if last_cycle_outcome is not None
+            else state.last_cycle_outcome or state.last_gate_outcome
+        ),
         next_expected_role=current_step.role if current_step is not None else None,
         next_expected_action=_step_guidance(current_step),
         current_cycle_index=state.cycle_index,
@@ -93,6 +98,10 @@ def _get_phase(protocol: Protocol, phase_name: str) -> ProtocolPhase:
 def _current_step(phase: ProtocolPhase, state: PhaseCycleState) -> ProtocolProcedureStep | None:
     if not phase.procedure:
         return None
+    if 0 <= state.current_step_index < len(phase.procedure):
+        indexed_step = phase.procedure[state.current_step_index]
+        if state.current_step_label is None or indexed_step.action == state.current_step_label:
+            return indexed_step
     if state.current_step_label is not None:
         for step in phase.procedure:
             if step.action == state.current_step_label:
