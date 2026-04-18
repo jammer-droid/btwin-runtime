@@ -18,6 +18,18 @@ from btwin_cli.main import _phase_cycle_visual_payload
 from tests.protocol_scenario_matrix import get_scenario, scenario_protocol_definition
 
 
+def _expected_phase_cycle_visual_payload(scenario_id: str) -> dict[str, object]:
+    scenario = get_scenario(scenario_id)
+    return {
+        "procedure": [
+            *[step.as_dict() for step in scenario.visual_procedure],
+            {"key": "gate", "label": "Gate", "status": "pending"},
+        ],
+        "gates": [gate.as_dict() for gate in scenario.visual_gates],
+        "guards": [],
+    }
+
+
 def test_protocol_phase_can_define_role_agnostic_procedure_steps():
     proto = Protocol.model_validate(
         {
@@ -286,22 +298,20 @@ def test_api_phase_cycle_visual_uses_step_index_for_repeated_actions():
     ),
 )
 def test_cli_phase_cycle_visual_matches_shared_scenario_matrix(scenario_id: str):
-    scenario = get_scenario(scenario_id)
     protocol = Protocol.model_validate(scenario_protocol_definition(scenario_id))
     phase = protocol.phases[0]
     state = PhaseCycleState.start(
         thread_id="thread-1",
         phase_name=phase.name,
         procedure_steps=phase_cycle_procedure_actions(phase),
-    ).model_copy(update={"last_gate_outcome": scenario.outcome})
+    ).model_copy(update={"last_gate_outcome": get_scenario(scenario_id).outcome})
 
-    visual = _phase_cycle_visual_payload(protocol=protocol, phase=phase, state=state)
+    expected_visual = _expected_phase_cycle_visual_payload(scenario_id)
+    cli_visual = _phase_cycle_visual_payload(protocol=protocol, phase=phase, state=state)
+    api_visual = _build_phase_cycle_visual(protocol=protocol, phase=phase, state=state)
 
-    assert visual["procedure"] == [
-        *[step.as_dict() for step in scenario.visual_procedure],
-        {"key": "gate", "label": "Gate", "status": "pending"},
-    ]
-    assert visual["gates"] == [gate.as_dict() for gate in scenario.visual_gates]
+    assert cli_visual == expected_visual
+    assert api_visual == expected_visual
 
 
 def test_protocol_flow_can_restart_same_phase_for_next_cycle():
