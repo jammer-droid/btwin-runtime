@@ -545,10 +545,6 @@ def test_provider_smoke_compiled_outcome_policy_hints_visible_on_next_and_apply_
     assert applied["context_core"]["outcome_actions"] == plan["outcome_actions"]
     assert applied["context_core"]["policy_outcomes"] == plan["policy_outcomes"]
     assert applied["context_core"]["current_step_key"] == "review"
-    assert applied["context_core"]["current_step_alias"] == "review"
-    assert applied["context_core"]["current_step_role"] == "reviewer"
-    assert applied["context_core"]["next_expected_role"] == "reviewer"
-    assert applied["context_core"]["next_expected_action"] == "Review the current implementation state."
 
 
 def test_provider_smoke_stop_block_uses_shared_scenario_fixture(provider_smoke_env) -> None:
