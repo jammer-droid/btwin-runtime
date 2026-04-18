@@ -1,5 +1,15 @@
 from btwin_core.protocol_flow import describe_next
-from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolProcedureStep, ProtocolSection, ProtocolStore, ProtocolTransition
+import pytest
+
+from btwin_core.protocol_store import (
+    Protocol,
+    ProtocolGuardSet,
+    ProtocolPhase,
+    ProtocolProcedureStep,
+    ProtocolSection,
+    ProtocolStore,
+    ProtocolTransition,
+)
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_cli.api_threads import _build_phase_cycle_visual
 
@@ -114,6 +124,44 @@ def test_protocol_phase_procedure_and_transition_keys_round_trip_through_store(t
     assert proto.phases[0].procedure[0].key == "step-review"
     assert proto.phases[0].procedure[1].key == "step-revise"
     assert proto.transitions[0].key == "gate-retry"
+
+
+def test_protocol_guard_sets_and_phase_guard_set_round_trip_through_store(tmp_path):
+    store = ProtocolStore(tmp_path / "protocols")
+    store.save_protocol(
+        Protocol(
+            name="review-loop",
+            guard_sets=[
+                ProtocolGuardSet(
+                    name="review-guards",
+                    description="Guard set for the review phase.",
+                    guards=["contribution_required", "phase_actor_eligibility"],
+                )
+            ],
+            phases=[
+                ProtocolPhase(
+                    name="review",
+                    actions=["contribute"],
+                    guard_set="review-guards",
+                    template=[ProtocolSection(section="completed", required=True)],
+                    procedure=[
+                        {"role": "reviewer", "action": "review", "alias": "Review"},
+                        {"role": "implementer", "action": "revise", "alias": "Revise"},
+                    ],
+                )
+            ],
+            transitions=[ProtocolTransition.model_validate({"from": "review", "to": "review", "on": "retry"})],
+            outcomes=["retry", "accept"],
+        )
+    )
+
+    proto = store.get_protocol("review-loop")
+
+    assert proto is not None
+    assert proto.guard_sets[0].name == "review-guards"
+    assert proto.guard_sets[0].description == "Guard set for the review phase."
+    assert proto.guard_sets[0].guards == ["contribution_required", "phase_actor_eligibility"]
+    assert proto.phases[0].guard_set == "review-guards"
 
 
 def test_api_phase_cycle_visual_prefers_protocol_keys_and_aliases():

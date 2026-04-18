@@ -10,6 +10,12 @@ import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 logger = logging.getLogger(__name__)
+SUPPORTED_PROTOCOL_GUARDS = {
+    "contribution_required",
+    "phase_actor_eligibility",
+    "direct_target_eligibility",
+    "transition_precondition",
+}
 
 
 class ProtocolSection(BaseModel):
@@ -42,12 +48,19 @@ class ProtocolInteraction(BaseModel):
     default_actor: str | None = None
 
 
+class ProtocolGuardSet(BaseModel):
+    name: str
+    description: str | None = None
+    guards: list[str] = []
+
+
 class ProtocolPhase(BaseModel):
     name: str
     description: str = ""
     actions: list[Literal["contribute", "review", "discuss", "decide"]] = []
     template: list[ProtocolSection] | None = None
     procedure: list[ProtocolProcedureStep] | None = None
+    guard_set: str | None = None
     mode: Literal["realtime_messages"] | None = None
     guidance: str | None = None
     decided_by: Literal["user", "consensus", "vote"] | None = None
@@ -92,8 +105,25 @@ class Protocol(BaseModel):
     phases: list[ProtocolPhase]
     interaction: ProtocolInteraction = Field(default_factory=ProtocolInteraction)
     roles: list[str] = []
+    guard_sets: list[ProtocolGuardSet] = []
     transitions: list[ProtocolTransition] = []
     outcomes: list[str] = []
+
+    @model_validator(mode="after")
+    def validate_guard_sets(self) -> "Protocol":
+        guard_set_names = {guard_set.name for guard_set in self.guard_sets}
+        for guard_set in self.guard_sets:
+            for guard in guard_set.guards:
+                if guard not in SUPPORTED_PROTOCOL_GUARDS:
+                    raise ValueError(
+                        f"Guard set '{guard_set.name}' contains unsupported guard '{guard}'"
+                    )
+        for phase in self.phases:
+            if phase.guard_set is not None and phase.guard_set not in guard_set_names:
+                raise ValueError(
+                    f"Phase '{phase.name}' references unknown guard_set '{phase.guard_set}'"
+                )
+        return self
 
 
 class ProtocolStore:
