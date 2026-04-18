@@ -53,6 +53,15 @@ class ProtocolGuardSet(BaseModel):
     description: str | None = None
     guards: list[str] = []
 
+    @model_validator(mode="after")
+    def validate_guard_vocabulary(self) -> "ProtocolGuardSet":
+        for guard in self.guards:
+            if guard not in SUPPORTED_PROTOCOL_GUARDS:
+                raise ValueError(
+                    f"Guard set '{self.name}' contains unsupported guard '{guard}'"
+                )
+        return self
+
 
 class ProtocolPhase(BaseModel):
     name: str
@@ -112,12 +121,8 @@ class Protocol(BaseModel):
     @model_validator(mode="after")
     def validate_guard_sets(self) -> "Protocol":
         guard_set_names = {guard_set.name for guard_set in self.guard_sets}
-        for guard_set in self.guard_sets:
-            for guard in guard_set.guards:
-                if guard not in SUPPORTED_PROTOCOL_GUARDS:
-                    raise ValueError(
-                        f"Guard set '{guard_set.name}' contains unsupported guard '{guard}'"
-                    )
+        if len(guard_set_names) != len(self.guard_sets):
+            raise ValueError("duplicate guard_set name values are not allowed")
         for phase in self.phases:
             if phase.guard_set is not None and phase.guard_set not in guard_set_names:
                 raise ValueError(
