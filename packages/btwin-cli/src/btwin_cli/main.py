@@ -59,6 +59,7 @@ from btwin_core.protocol_store import (
     Protocol,
     ProtocolPhase,
     ProtocolStore,
+    build_protocol_preview,
     compile_protocol_definition,
     load_protocol_yaml,
 )
@@ -1918,6 +1919,15 @@ def _api_post(path: str, data: dict) -> dict:
         return resp.json()
 
 
+def _api_put(path: str, data: dict) -> dict:
+    import httpx
+
+    with httpx.Client(base_url=_api_base_url(), timeout=30.0) as client:
+        resp = client.put(path, json=data)
+        resp.raise_for_status()
+        return resp.json()
+
+
 def _api_get(path: str, params: dict | None = None):
     import httpx
 
@@ -2044,6 +2054,19 @@ def _attached_api_call_or_exit(path: str, data: dict) -> dict:
 
     try:
         return _api_post(path, data)
+    except httpx.HTTPStatusError as exc:
+        _render_attached_http_status_error(exc)
+        raise typer.Exit(_attached_http_status_exit_code(exc))
+    except httpx.RequestError as exc:
+        _render_attached_transport_error(exc)
+        raise typer.Exit(1)
+
+
+def _attached_api_put_or_exit(path: str, data: dict) -> dict:
+    import httpx
+
+    try:
+        return _api_put(path, data)
     except httpx.HTTPStatusError as exc:
         _render_attached_http_status_error(exc)
         raise typer.Exit(_attached_http_status_exit_code(exc))
@@ -3905,6 +3928,125 @@ def protocol_validate(
         "phase_count": len(protocol.phases),
     }
     _emit_payload(payload, as_json=as_json)
+
+
+def _protocol_file_payload(path: Path) -> dict[str, object]:
+    data = load_protocol_yaml(path)
+    if not isinstance(data, dict):
+        raise typer.BadParameter("Protocol YAML must decode to a mapping object.")
+    return data
+
+
+def _protocol_saved_payload(
+    *,
+    protocol: Protocol,
+    source_file: Path,
+    saved_path: Path | None,
+) -> dict[str, object]:
+    payload = {
+        "saved": True,
+        "name": protocol.name,
+        "source_file": str(source_file),
+        "protocol": protocol.model_dump(exclude_none=True, by_alias=True),
+    }
+    if saved_path is not None:
+        payload["path"] = str(saved_path)
+    return payload
+
+
+@protocol_app.command("create")
+def protocol_create(
+    file: str = typer.Option(..., "--file", help="Path to a protocol YAML file"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Create a protocol from a YAML file."""
+    path = Path(file).expanduser()
+    data = _protocol_file_payload(path)
+    config = _get_config()
+    if _use_attached_api(config):
+        protocol_payload = _attached_api_call_or_exit("/api/protocols", data)
+        protocol = Protocol.model_validate(protocol_payload)
+        _emit_payload(
+            _protocol_saved_payload(protocol=protocol, source_file=path, saved_path=None),
+            as_json=as_json,
+        )
+        return
+
+    protocol = compile_protocol_definition(data)
+    saved_path = _get_protocol_store().save_protocol(protocol)
+    _emit_payload(
+        _protocol_saved_payload(protocol=protocol, source_file=path, saved_path=saved_path),
+        as_json=as_json,
+    )
+
+
+@protocol_app.command("edit")
+def protocol_edit(
+    name: str = typer.Argument(..., help="Existing protocol name"),
+    file: str = typer.Option(..., "--file", help="Path to a protocol YAML file"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Update an existing protocol from a YAML file."""
+    path = Path(file).expanduser()
+    data = _protocol_file_payload(path)
+    protocol = compile_protocol_definition(data)
+    if protocol.name != name:
+        console.print(
+            f"[red]Protocol name mismatch:[/red] file defines '{protocol.name}', expected '{name}'."
+        )
+        raise typer.Exit(2)
+
+    config = _get_config()
+    if _use_attached_api(config):
+        protocol_payload = _attached_api_put_or_exit(f"/api/protocols/{name}", data)
+        updated = Protocol.model_validate(protocol_payload)
+        _emit_payload(
+            _protocol_saved_payload(protocol=updated, source_file=path, saved_path=None),
+            as_json=as_json,
+        )
+        return
+
+    saved_path = _get_protocol_store().save_protocol(protocol)
+    _emit_payload(
+        _protocol_saved_payload(protocol=protocol, source_file=path, saved_path=saved_path),
+        as_json=as_json,
+    )
+
+
+@protocol_app.command("preview")
+def protocol_preview(
+    name: str | None = typer.Argument(None, help="Protocol name"),
+    file: str | None = typer.Option(None, "--file", help="Path to a protocol YAML file"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Preview the runtime-canonical interpretation of a protocol."""
+    if bool(name) == bool(file):
+        raise typer.BadParameter("Provide exactly one of a protocol name or --file.")
+
+    config = _get_config()
+    if file is not None:
+        path = Path(file).expanduser()
+        payload = build_protocol_preview(
+            _protocol_file_payload(path),
+            source={"kind": "file", "file": str(path)},
+        )
+        _emit_payload(payload, as_json=as_json)
+        return
+
+    assert name is not None
+    if _use_attached_api(config):
+        payload = _attached_api_get_or_exit(f"/api/protocols/{name}/preview")
+        _emit_payload(payload, as_json=as_json)
+        return
+
+    protocol = _get_protocol_store().get_protocol(name)
+    if protocol is None:
+        console.print(f"[red]Protocol not found:[/red] {name}")
+        raise typer.Exit(4)
+    _emit_payload(
+        build_protocol_preview(protocol, source={"kind": "store", "name": name}),
+        as_json=as_json,
+    )
 
 
 @protocol_app.command("check")

@@ -352,6 +352,18 @@ def _phase_map(phases: list[ProtocolPhase]) -> dict[str, ProtocolPhase]:
     return {phase.name: phase for phase in phases}
 
 
+def _coerce_authoring_document(data: Any) -> ProtocolAuthoringDocument:
+    authoring_payload = (
+        data.model_dump(exclude_none=True, by_alias=True)
+        if isinstance(data, (Protocol, ProtocolAuthoringDocument))
+        else data
+    )
+    try:
+        return ProtocolAuthoringDocument.model_validate(authoring_payload)
+    except ValidationError as exc:
+        raise ProtocolValidationLayerError("schema", _format_validation_error(exc)) from exc
+
+
 def _validate_protocol_semantics(protocol: ProtocolAuthoringDocument) -> None:
     phase_names = {phase.name for phase in protocol.phases}
     declared_outcomes = set(protocol.outcomes)
@@ -568,21 +580,35 @@ def _compile_protocol(protocol: ProtocolAuthoringDocument) -> Protocol:
 
 
 def compile_protocol_definition(data: Any) -> Protocol:
-    authoring_payload = (
-        data.model_dump(exclude_none=True, by_alias=True)
-        if isinstance(data, (Protocol, ProtocolAuthoringDocument))
-        else data
-    )
-    try:
-        authoring = ProtocolAuthoringDocument.model_validate(authoring_payload)
-    except ValidationError as exc:
-        raise ProtocolValidationLayerError("schema", _format_validation_error(exc)) from exc
+    authoring = _coerce_authoring_document(data)
     _validate_protocol_semantics(authoring)
     return _compile_protocol(authoring)
 
 
 def ensure_protocol_compiled(protocol: Protocol) -> Protocol:
     return compile_protocol_definition(protocol)
+
+
+def build_protocol_preview(
+    data: Any,
+    *,
+    source: dict[str, object] | None = None,
+) -> dict[str, object]:
+    authoring = _coerce_authoring_document(data)
+    _validate_protocol_semantics(authoring)
+    compiled = _compile_protocol(authoring)
+    payload: dict[str, object] = {
+        "authoring": {
+            "name": authoring.name,
+            "phase_count": len(authoring.phases),
+            "gate_count": len(authoring.gates),
+            "outcome_policy_count": len(authoring.outcome_policies),
+        },
+        "compiled": compiled.model_dump(exclude_none=True, by_alias=True),
+    }
+    if source:
+        payload["source"] = source
+    return payload
 
 
 class ProtocolStore:
