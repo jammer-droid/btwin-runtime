@@ -104,6 +104,34 @@ def test_protocol_rejects_authoring_gate_route_with_unknown_target_phase():
         )
 
 
+def test_protocol_rejects_duplicate_authoring_gate_routes_for_same_outcome():
+    with pytest.raises(
+        ValueError,
+        match="gate 'review-gate' defines duplicate routes for outcome 'retry'",
+    ):
+        Protocol.model_validate(
+            {
+                "name": "review-loop",
+                "phases": [
+                    {"name": "review", "gate": "review-gate"},
+                    {"name": "decision-a"},
+                    {"name": "decision-b"},
+                ],
+                "gates": [
+                    {
+                        "name": "review-gate",
+                        "routes": [
+                            {"outcome": "retry", "target_phase": "decision-a"},
+                            {"outcome": "retry", "target_phase": "decision-b"},
+                        ],
+                    }
+                ],
+                "transitions": [{"from": "review", "to": "decision-a", "on": "retry"}],
+                "outcomes": ["retry"],
+            }
+        )
+
+
 def test_protocol_rejects_authoring_gate_route_with_outcome_outside_top_level_outcomes():
     with pytest.raises(ValueError, match="gate 'review-gate' uses undeclared outcome 'accept'"):
         Protocol.model_validate(

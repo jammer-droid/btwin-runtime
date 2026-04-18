@@ -194,7 +194,13 @@ class Protocol(BaseModel):
                 (transition.from_phase, transition.on), []
             ).append(transition)
         for gate in self.gates:
+            route_outcomes: set[str] = set()
             for route in gate.routes:
+                if route.outcome in route_outcomes:
+                    raise ValueError(
+                        f"gate '{gate.name}' defines duplicate routes for outcome '{route.outcome}'"
+                    )
+                route_outcomes.add(route.outcome)
                 if route.target_phase not in phase_names:
                     raise ValueError(
                         f"gate '{gate.name}' references unknown target_phase '{route.target_phase}'"
