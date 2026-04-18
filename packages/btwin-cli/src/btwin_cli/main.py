@@ -562,6 +562,99 @@ def _enrich_thread_watch_row(
         )
 
 
+def _synthetic_thread_watch_gate_row(
+    *,
+    thread: dict[str, object],
+    protocol: Protocol | None,
+    phase_cycle_payload: dict[str, object] | None,
+    reports: list[dict[str, object]],
+    existing_rows: list[dict[str, object]],
+) -> dict[str, object] | None:
+    if any(row.get("kind") == "gate" for row in existing_rows):
+        return None
+    if protocol is None or not isinstance(phase_cycle_payload, dict):
+        return None
+    state = phase_cycle_payload.get("state")
+    if not isinstance(state, dict):
+        return None
+    outcome = state.get("last_gate_outcome")
+    if not isinstance(outcome, str) or not outcome.strip():
+        return None
+
+    phase_name = state.get("phase_name") or thread.get("current_phase")
+    if not isinstance(phase_name, str) or not phase_name.strip():
+        return None
+
+    cycle_index_value = state.get("cycle_index")
+    if not isinstance(cycle_index_value, int) or cycle_index_value < 1:
+        return None
+
+    status = state.get("status")
+    fallback_cycle_index = None
+    fallback_next_cycle_index = None
+    if status == "active" and cycle_index_value > 1:
+        fallback_cycle_index = cycle_index_value - 1
+        fallback_next_cycle_index = cycle_index_value
+
+    cycle_report = _thread_watch_cycle_report(
+        {
+            "phase": phase_name,
+            "cycle_index": fallback_cycle_index,
+            "next_cycle_index": fallback_next_cycle_index,
+        },
+        reports,
+    )
+
+    if cycle_report is None and fallback_cycle_index is None:
+        return None
+
+    row = {
+        "kind": "gate",
+        "timestamp": (
+            cycle_report.get("created_at")
+            if isinstance(cycle_report, dict)
+            else state.get("last_completed_at")
+        ),
+        "thread_id": thread.get("thread_id"),
+        "phase": cycle_report.get("phase") if isinstance(cycle_report, dict) else phase_name,
+        "cycle_index": cycle_report.get("cycle_index") if isinstance(cycle_report, dict) else fallback_cycle_index,
+        "next_cycle_index": (
+            cycle_report.get("next_cycle_index")
+            if isinstance(cycle_report, dict)
+            else fallback_next_cycle_index
+        ),
+        "outcome": outcome,
+        "procedure_key": None,
+        "procedure_alias": None,
+        "gate_key": None,
+        "gate_alias": None,
+        "target_phase": cycle_report.get("next_phase") if isinstance(cycle_report, dict) else None,
+        "reason": None,
+        "summary": (
+            cycle_report.get("summary")
+            if isinstance(cycle_report, dict)
+            else "Gate row synthesized from phase-cycle state."
+        ),
+        "source": "btwin.thread_watch.synthetic",
+        "agent": None,
+        "session_id": None,
+        "turn_id": None,
+        "event_type": "synthetic_gate",
+        "hook_event_name": None,
+        "decision": None,
+    }
+    _enrich_thread_watch_row(
+        row=row,
+        thread=thread,
+        protocol=protocol,
+        phase_cycle_payload=phase_cycle_payload,
+        reports=reports,
+    )
+    if not any(row.get(key) for key in ("gate_key", "gate_alias", "target_phase", "procedure_key", "procedure_alias")):
+        return None
+    return row
+
+
 def _build_thread_watch_trace_rows(
     thread: dict[str, object],
     events: list[dict[str, object]],
@@ -605,6 +698,15 @@ def _build_thread_watch_trace_rows(
             reports=reports,
         )
         rows.append(row)
+    synthetic_gate = _synthetic_thread_watch_gate_row(
+        thread=thread,
+        protocol=protocol,
+        phase_cycle_payload=phase_cycle_payload,
+        reports=reports,
+        existing_rows=rows,
+    )
+    if synthetic_gate is not None:
+        rows.append(synthetic_gate)
     return rows
 
 
