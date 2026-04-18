@@ -842,7 +842,8 @@ def test_render_thread_watch_formats_codex_and_btwin_events_for_humans():
         },
     ]
 
-    rendered = main._render_thread_watch(thread, status_summary, events)
+    trace = main._build_thread_watch_trace_rows(thread, events)
+    rendered = main._render_thread_watch(thread, status_summary, trace)
 
     assert "[cyan]04:04:50  CODEX -> BTWIN  Exit check requested[/cyan]" in rendered
     assert "[red]04:04:50  BTWIN -> CODEX  Exit blocked[/red]" in rendered
@@ -882,10 +883,73 @@ def test_render_thread_watch_colors_allow_and_noop_headlines():
         },
     ]
 
-    rendered = main._render_thread_watch(thread, status_summary, events)
+    trace = main._build_thread_watch_trace_rows(thread, events)
+    rendered = main._render_thread_watch(thread, status_summary, trace)
 
     assert "[cyan]04:04:46  CODEX -> BTWIN  Phase attempt started[/cyan]" in rendered
     assert "[green]04:07:27  BTWIN -> CODEX  Required result recorded[/green]" in rendered
+
+
+def test_build_thread_watch_trace_rows_normalizes_required_fields():
+    thread = {
+        "thread_id": "thread-1",
+        "protocol": "debate",
+        "current_phase": "context",
+    }
+    events = [
+        {
+            "timestamp": "2026-04-15T04:04:46+00:00",
+            "thread_id": "thread-1",
+            "event_type": "phase_attempt_started",
+            "source": "codex.hook",
+            "agent": "alice",
+            "phase": "context",
+            "summary": "Current phase: context. Required result type: contribution.",
+        },
+        {
+            "timestamp": "2026-04-15T04:07:27+00:00",
+            "thread_id": "thread-1",
+            "event_type": "runtime_binding_closed",
+            "source": "btwin.runtime.binding.cleanup",
+            "reason": "stale_last_seen",
+            "summary": "Runtime binding closed: stale last seen.",
+        },
+    ]
+
+    trace = main._build_thread_watch_trace_rows(thread, events)
+
+    assert len(trace) == 2
+    assert trace[0]["kind"] == "phase_attempt"
+    assert trace[0]["timestamp"] == "2026-04-15T04:04:46+00:00"
+    assert trace[0]["thread_id"] == "thread-1"
+    assert trace[0]["phase"] == "context"
+    assert trace[0]["cycle_index"] is None
+    assert trace[0]["next_cycle_index"] is None
+    assert trace[0]["outcome"] is None
+    assert trace[0]["procedure_key"] is None
+    assert trace[0]["procedure_alias"] is None
+    assert trace[0]["gate_key"] is None
+    assert trace[0]["gate_alias"] is None
+    assert trace[0]["target_phase"] is None
+    assert trace[0]["reason"] is None
+    assert trace[0]["summary"] == "Current phase: context. Required result type: contribution."
+    assert trace[0]["source"] == "codex.hook"
+
+    assert trace[1]["kind"] == "runtime_binding"
+    assert trace[1]["timestamp"] == "2026-04-15T04:07:27+00:00"
+    assert trace[1]["thread_id"] == "thread-1"
+    assert trace[1]["phase"] is None
+    assert trace[1]["cycle_index"] is None
+    assert trace[1]["next_cycle_index"] is None
+    assert trace[1]["outcome"] is None
+    assert trace[1]["procedure_key"] is None
+    assert trace[1]["procedure_alias"] is None
+    assert trace[1]["gate_key"] is None
+    assert trace[1]["gate_alias"] is None
+    assert trace[1]["target_phase"] is None
+    assert trace[1]["reason"] == "stale_last_seen"
+    assert trace[1]["summary"] == "Runtime binding closed: stale last seen."
+    assert trace[1]["source"] == "btwin.runtime.binding.cleanup"
 
 
 def test_render_thread_watch_adds_app_server_hint_to_agents_summary(monkeypatch, tmp_path):

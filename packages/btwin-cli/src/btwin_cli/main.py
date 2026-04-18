@@ -343,7 +343,82 @@ def _try_load_thread_snapshot(thread_id: str, config: BTwinConfig) -> tuple[dict
     return thread, status_summary, None
 
 
-def _render_thread_watch(thread: dict[str, object], status_summary: dict[str, object], events: list[dict[str, object]]) -> str:
+def _thread_watch_kind_for_event(event_type: str) -> str:
+    if event_type == "hook_received":
+        return "hook_check"
+    if event_type == "hook_decision":
+        return "hook_decision"
+    if event_type == "phase_attempt_started":
+        return "phase_attempt"
+    if event_type == "phase_exit_check_requested":
+        return "phase_exit_check"
+    if event_type == "required_result_recorded":
+        return "required_result"
+    if event_type == "phase_exit_blocked":
+        return "phase_blocked"
+    if event_type == "runtime_binding_closed":
+        return "runtime_binding"
+    if event_type == "cycle_gate_completed":
+        return "cycle_gate"
+    return event_type or "event"
+
+
+def _build_thread_watch_trace_rows(
+    thread: dict[str, object],
+    events: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    thread_id = str(thread.get("thread_id") or "")
+    rows: list[dict[str, object]] = []
+    for event in events:
+        event_type = str(event.get("event_type") or "event")
+        rows.append(
+            {
+                "kind": _thread_watch_kind_for_event(event_type),
+                "timestamp": event.get("timestamp"),
+                "thread_id": event.get("thread_id") or thread_id,
+                "phase": event.get("phase"),
+                "cycle_index": event.get("cycle_index"),
+                "next_cycle_index": event.get("next_cycle_index"),
+                "outcome": event.get("outcome"),
+                "procedure_key": event.get("procedure_key"),
+                "procedure_alias": event.get("procedure_alias"),
+                "gate_key": event.get("gate_key"),
+                "gate_alias": event.get("gate_alias"),
+                "target_phase": event.get("target_phase"),
+                "reason": event.get("reason"),
+                "summary": event.get("summary"),
+                "source": event.get("source"),
+                "agent": event.get("agent"),
+                "session_id": event.get("session_id"),
+                "turn_id": event.get("turn_id"),
+                "event_type": event_type,
+                "hook_event_name": event.get("hook_event_name"),
+                "decision": event.get("decision"),
+            }
+        )
+    return rows
+
+
+def _thread_watch_payload(
+    thread: dict[str, object],
+    status_summary: dict[str, object],
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "thread_id": thread.get("thread_id"),
+        "protocol": thread.get("protocol"),
+        "current_phase": thread.get("current_phase"),
+        "topic": thread.get("topic"),
+        "status_summary": status_summary,
+        "trace": _build_thread_watch_trace_rows(thread, events),
+    }
+
+
+def _render_thread_watch(
+    thread: dict[str, object],
+    status_summary: dict[str, object],
+    trace_rows: list[dict[str, object]],
+) -> str:
     config = _get_config()
     thread_id = str(thread.get("thread_id", ""))
     lines = [
@@ -373,27 +448,57 @@ def _render_thread_watch(thread: dict[str, object], status_summary: dict[str, ob
     if runtime_lines:
         lines.extend(["", "Runtime"])
         lines.extend(runtime_lines)
-    if events:
+    if trace_rows:
         lines.append("")
-        for event in events:
-            timestamp = str(event.get("timestamp", ""))
+        for row in trace_rows:
+            timestamp = str(row.get("timestamp", ""))
             time_label = timestamp[11:19] if "T" in timestamp and len(timestamp) >= 19 else timestamp
-            lane, headline, headline_style = _workflow_event_heading(event)
-            agent = event.get("agent")
-            phase = event.get("phase")
-            reason = event.get("reason")
-            session_id = event.get("session_id")
-            turn_id = event.get("turn_id")
+            lane, headline, headline_style = _workflow_event_heading(row)
+            agent = row.get("agent")
+            phase = row.get("phase")
+            reason = row.get("reason")
+            session_id = row.get("session_id")
+            turn_id = row.get("turn_id")
             lines.append(_style_hud_line(f"{time_label}  {lane}  {headline}", headline_style))
             details = []
             if agent:
                 details.append(f"agent: {agent}")
             if phase:
                 details.append(f"phase: {phase}")
+            cycle_index = row.get("cycle_index")
+            next_cycle_index = row.get("next_cycle_index")
+            if isinstance(cycle_index, int):
+                cycle_text = f"cycle: {cycle_index}"
+                if isinstance(next_cycle_index, int):
+                    cycle_text += f" -> {next_cycle_index}"
+                details.append(cycle_text)
+            outcome = row.get("outcome")
+            if outcome:
+                details.append(f"outcome: {outcome}")
             if reason:
                 details.append(f"reason: {reason}")
             if details:
                 lines.append(f"          {'  '.join(details)}")
+            protocol_details = []
+            procedure_alias = row.get("procedure_alias")
+            procedure_key = row.get("procedure_key")
+            if procedure_alias or procedure_key:
+                label = str(procedure_alias or procedure_key)
+                if procedure_alias and procedure_key:
+                    label = f"{procedure_alias} [{procedure_key}]"
+                protocol_details.append(f"procedure: {label}")
+            gate_alias = row.get("gate_alias")
+            gate_key = row.get("gate_key")
+            if gate_alias or gate_key:
+                label = str(gate_alias or gate_key)
+                if gate_alias and gate_key:
+                    label = f"{gate_alias} [{gate_key}]"
+                protocol_details.append(f"gate: {label}")
+            target_phase = row.get("target_phase")
+            if target_phase:
+                protocol_details.append(f"target: {target_phase}")
+            if protocol_details:
+                lines.append(f"          {'  '.join(protocol_details)}")
             ids = []
             if session_id:
                 ids.append(f"session: {session_id}")
@@ -401,7 +506,7 @@ def _render_thread_watch(thread: dict[str, object], status_summary: dict[str, ob
                 ids.append(f"turn: {turn_id}")
             if ids:
                 lines.append(f"          {'  '.join(ids)}")
-            summary = event.get("summary")
+            summary = row.get("summary")
             if summary:
                 lines.append(f"          summary: {summary}")
     return "\n".join(lines)
@@ -422,7 +527,7 @@ def _style_hud_line(text: str, style: str | None = None) -> str:
 
 
 def _workflow_event_heading(event: dict[str, object]) -> tuple[str, str, str | None]:
-    event_type = str(event.get("event_type", "event"))
+    event_type = str(event.get("event_type") or event.get("kind") or "event")
     hook_name = str(event.get("hook_event_name") or "").strip()
     decision = str(event.get("decision") or "").strip()
     source = str(event.get("source") or "").strip()
@@ -447,6 +552,18 @@ def _workflow_event_heading(event: dict[str, object]) -> tuple[str, str, str | N
     if event_type == "phase_exit_blocked":
         return lane, "Exit blocked", "red"
     if event_type == "runtime_binding_closed":
+        return lane, "Runtime binding closed", "yellow"
+    if event_type == "cycle_gate_completed" or event_type == "cycle_gate":
+        return lane, "Cycle gate completed", "green"
+    if event_type == "phase_attempt":
+        return lane, "Phase attempt started", "cyan"
+    if event_type == "phase_exit_check":
+        return lane, "Exit check requested", "cyan"
+    if event_type == "required_result":
+        return lane, "Required result recorded", "green"
+    if event_type == "phase_blocked":
+        return lane, "Exit blocked", "red"
+    if event_type == "runtime_binding":
         return lane, "Runtime binding closed", "yellow"
     return lane, event_type.replace("_", " "), style
 
@@ -818,7 +935,12 @@ def _render_hud(thread_id: str | None, limit: int, animation_phase: int | None =
         return "\n".join(lines)
 
     lines.append("")
-    lines.append(_render_thread_watch(thread, status_summary, _workflow_event_log(target_thread_id).list_events(limit=limit)))
+    trace_payload = _thread_watch_payload(
+        thread,
+        status_summary,
+        _workflow_event_log(target_thread_id).list_events(limit=limit),
+    )
+    lines.append(_render_thread_watch(thread, status_summary, trace_payload["trace"]))
     phase_cycle_payload = _phase_cycle_payload_for_thread(
         target_thread_id,
         thread=thread,
@@ -3946,18 +4068,31 @@ def thread_watch(
     thread_id: str = typer.Argument(..., help="Thread id"),
     limit: int = typer.Option(10, "--limit", min=1, help="Number of recent workflow events to show"),
     follow: bool = typer.Option(False, "--follow", help="Poll and redraw the thread HUD"),
+    as_json: bool = typer.Option(False, "--json", help="Output normalized JSON trace"),
     interval: float = typer.Option(1.0, "--interval", min=0.2, help="Poll interval in seconds"),
 ):
     """Show a compact workflow HUD for one thread."""
 
+    if follow and as_json:
+        raise typer.BadParameter("--json cannot be used with --follow")
+
     def render_once() -> str:
         config = _get_config()
         thread, status_summary = _load_thread_snapshot(thread_id, config)
-        events = _workflow_event_log(thread_id).list_events(limit=limit)
-        return _render_thread_watch(thread, status_summary, events)
+        payload = _thread_watch_payload(
+            thread,
+            status_summary,
+            _workflow_event_log(thread_id).list_events(limit=limit),
+        )
+        if as_json:
+            _emit_payload(payload, as_json=True)
+            return ""
+        return _render_thread_watch(thread, status_summary, payload["trace"])
 
     if not follow:
-        console.print(render_once())
+        rendered = render_once()
+        if rendered:
+            console.print(rendered)
         return
 
     _run_live_view(render_once, interval)
