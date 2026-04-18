@@ -50,6 +50,7 @@ from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.phase_cycle_engine import (
     advance_phase_cycle,
     build_phase_cycle_context_core,
+    build_phase_cycle_trace_context,
     phase_cycle_procedure_actions,
 )
 from btwin_core.phase_cycle_store import PhaseCycleStore
@@ -665,6 +666,7 @@ def _synthetic_thread_watch_gate_row(
         "event_type": "synthetic_gate",
         "hook_event_name": None,
         "decision": None,
+        "baseline_guard": None,
     }
     _enrich_thread_watch_row(
         row=row,
@@ -712,6 +714,7 @@ def _build_thread_watch_trace_rows(
             "event_type": event_type,
             "hook_event_name": event.get("hook_event_name"),
             "decision": event.get("decision"),
+            "baseline_guard": event.get("baseline_guard"),
         }
         _enrich_thread_watch_row(
             row=row,
@@ -856,6 +859,9 @@ def _render_trace_row_lines(row: dict[str, object]) -> list[str]:
         details.append(f"outcome: {outcome}")
     if reason:
         details.append(f"reason: {reason}")
+    baseline_guard = row.get("baseline_guard")
+    if baseline_guard:
+        details.append(f"baseline guard: {baseline_guard}")
     if details:
         lines.append(f"          {'  '.join(details)}")
     protocol_details = []
@@ -1119,6 +1125,79 @@ def _build_phase_cycle_context_core(
         state=state,
         last_cycle_outcome=last_cycle_outcome,
     )
+
+
+def _phase_cycle_state_for_trace(
+    *,
+    thread: dict[str, object],
+    phase: ProtocolPhase,
+    config: BTwinConfig,
+) -> PhaseCycleState:
+    thread_id = str(thread.get("thread_id") or "")
+    current_state = _get_phase_cycle_store(config).read(thread_id) if thread_id else None
+    if current_state is not None and current_state.phase_name == phase.name:
+        return current_state
+    return PhaseCycleState.start(
+        thread_id=thread_id,
+        phase_name=phase.name,
+        procedure_steps=_phase_cycle_procedure_steps(phase),
+    )
+
+
+def _phase_cycle_trace_fields(
+    *,
+    thread: dict[str, object],
+    protocol: Protocol | None,
+    phase: ProtocolPhase | None,
+    config: BTwinConfig,
+    outcome: str | None = None,
+    next_cycle_index: int | None = None,
+    target_phase: str | None = None,
+) -> dict[str, object]:
+    if phase is None:
+        return {}
+    trace_context = build_phase_cycle_trace_context(
+        protocol=protocol,
+        phase=phase,
+        state=_phase_cycle_state_for_trace(thread=thread, phase=phase, config=config),
+        outcome=outcome,
+        next_cycle_index=next_cycle_index,
+        target_phase=target_phase,
+    )
+    return trace_context.model_dump()
+
+
+def _attached_protocol_flow_context_or_none(
+    thread_id: str,
+) -> tuple[dict[str, object] | None, Protocol | None, ProtocolPhase | None]:
+    try:
+        thread_payload = _api_get(f"/api/threads/{thread_id}")
+    except Exception:
+        return None, None, None
+    if not isinstance(thread_payload, dict):
+        return None, None, None
+    protocol_name = thread_payload.get("protocol")
+    if not isinstance(protocol_name, str) or not protocol_name.strip():
+        return dict(thread_payload), None, None
+    try:
+        protocol_payload = _api_get(f"/api/protocols/{protocol_name}")
+    except Exception:
+        return dict(thread_payload), None, None
+    if not isinstance(protocol_payload, dict):
+        return dict(thread_payload), None, None
+    try:
+        protocol = Protocol.model_validate(protocol_payload)
+    except Exception:
+        return dict(thread_payload), None, None
+    phase_name = thread_payload.get("current_phase")
+    phase = next((item for item in protocol.phases if item.name == phase_name), None)
+    return dict(thread_payload), protocol, phase
+
+
+def _baseline_guard_identity(reason: object) -> str | None:
+    if reason == "missing_contribution":
+        return "contribution_required"
+    return None
 
 
 def _ensure_phase_cycle_state(
@@ -3927,6 +4006,15 @@ def protocol_apply_next(
             requested_outcome=plan.requested_outcome,
             next_cycle_index=next_cycle_state.cycle_index,
         )
+        close_trace_fields = _phase_cycle_trace_fields(
+            thread=thread,
+            protocol=protocol,
+            phase=phase,
+            config=config,
+            outcome=plan.requested_outcome or "completed",
+            next_cycle_index=next_cycle_state.cycle_index,
+            target_phase=plan.next_phase,
+        )
         _append_workflow_event(
             resolved_thread_id,
             event_type="cycle_gate_completed",
@@ -3934,9 +4022,8 @@ def protocol_apply_next(
             phase=plan.current_phase,
             scope="cycle_gate",
             cycle_finished=True,
-            cycle_index=current_cycle_state.cycle_index,
-            next_cycle_index=next_cycle_state.cycle_index,
             summary=cycle_summary,
+            **close_trace_fields,
         )
         _append_system_mailbox_report(
             thread_id=resolved_thread_id,
@@ -3981,6 +4068,7 @@ def protocol_apply_next(
             )
             next_cycle_state = _get_phase_cycle_store(config).write(transition.next_state)
             context_core = transition.context_core
+            advance_trace_fields = transition.trace_context.model_dump()
         else:
             target_phase = next((item for item in protocol.phases if item.name == plan.next_phase), None)
             if target_phase is None:
@@ -3997,6 +4085,15 @@ def protocol_apply_next(
                 phase=target_phase,
                 state=next_cycle_state,
                 last_cycle_outcome=plan.requested_outcome or "completed",
+            )
+            advance_trace_fields = _phase_cycle_trace_fields(
+                thread=thread,
+                protocol=protocol,
+                phase=phase,
+                config=config,
+                outcome=plan.requested_outcome,
+                next_cycle_index=next_cycle_state.cycle_index,
+                target_phase=plan.next_phase,
             )
 
         result_payload = {
@@ -4024,9 +4121,8 @@ def protocol_apply_next(
             phase=plan.current_phase,
             scope="cycle_gate",
             cycle_finished=True,
-            cycle_index=current_cycle_state.cycle_index,
-            next_cycle_index=next_cycle_state.cycle_index,
             summary=cycle_summary,
+            **advance_trace_fields,
         )
         _append_system_mailbox_report(
             thread_id=resolved_thread_id,
@@ -4613,6 +4709,16 @@ def contribution_submit(
     """Persist a structured contribution for the current protocol phase."""
     current_config = _get_config()
     resolved_content = _resolve_content(content)
+    thread: dict[str, object] | None = None
+    protocol: Protocol | None = None
+    phase_definition: ProtocolPhase | None = None
+    if _use_attached_api(current_config):
+        thread, protocol, phase_definition = _attached_protocol_flow_context_or_none(thread_id)
+    else:
+        thread, protocol, phase_definition, _phase_participants, _contributions = _load_protocol_flow_context(
+            thread_id,
+            current_config,
+        )
     if _use_attached_api(current_config):
         contribution = _attached_api_call_or_exit(
             f"/api/threads/{thread_id}/contributions",
@@ -4624,10 +4730,6 @@ def contribution_submit(
             },
         )
     else:
-        thread, protocol, _phase, _phase_participants, _contributions = _load_protocol_flow_context(
-            thread_id,
-            current_config,
-        )
         violation = validate_contribution_submission(
             thread=thread,
             protocol=protocol,
@@ -4655,6 +4757,16 @@ def contribution_submit(
         phase=phase,
         contribution_id=contribution.get("contribution_id"),
         summary=tldr,
+        **(
+            _phase_cycle_trace_fields(
+                thread=thread,
+                protocol=protocol,
+                phase=phase_definition,
+                config=current_config,
+            )
+            if thread is not None
+            else {}
+        ),
     )
     _emit_payload(contribution, as_json=as_json)
 
@@ -4696,7 +4808,7 @@ def workflow_hook(
 
     _observe_runtime_binding_on_hook_event(resolved_thread_id, agent_name, event)
 
-    thread, protocol, _phase, _phase_participants, contributions = _load_protocol_flow_context(
+    thread, protocol, phase_definition, _phase_participants, contributions = _load_protocol_flow_context(
         resolved_thread_id,
         current_config,
     )
@@ -4706,6 +4818,12 @@ def workflow_hook(
         protocol=protocol,
         actor=agent_name,
         contributions=contributions,
+    )
+    trace_fields = _phase_cycle_trace_fields(
+        thread=thread,
+        protocol=protocol,
+        phase=phase_definition,
+        config=current_config,
     )
     if codex_payload is not None:
         canonical_extra: dict[str, object] = {
@@ -4721,6 +4839,7 @@ def workflow_hook(
                 event_type="phase_attempt_started",
                 source="codex.hook",
                 summary=result.overlay or "Phase attempt started.",
+                **trace_fields,
                 **canonical_extra,
             )
         elif event == "Stop":
@@ -4729,6 +4848,7 @@ def workflow_hook(
                 event_type="phase_exit_check_requested",
                 source="codex.hook",
                 summary="Stop exit check requested.",
+                **trace_fields,
                 **canonical_extra,
             )
             if result.decision == "block":
@@ -4740,7 +4860,9 @@ def workflow_hook(
                     cycle_finished=False,
                     decision=result.decision,
                     reason=result.reason,
+                    baseline_guard=_baseline_guard_identity(result.reason),
                     summary=result.overlay or result.reason or "Stop blocked by workflow constraints.",
+                    **trace_fields,
                     **canonical_extra,
                 )
     if codex_payload is not None and not as_json:

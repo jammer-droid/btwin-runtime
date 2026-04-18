@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from btwin_core.context_core import ContextCore
+from btwin_core.context_core import ContextCore, PhaseCycleTraceContext
 from btwin_core.phase_cycle import PhaseCycleState
-from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolProcedureStep
+from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolProcedureStep, ProtocolTransition
 
 
 class PhaseCycleAdvanceResult(BaseModel):
@@ -14,6 +14,7 @@ class PhaseCycleAdvanceResult(BaseModel):
 
     next_state: PhaseCycleState
     context_core: ContextCore
+    trace_context: PhaseCycleTraceContext
 
 
 def advance_phase_cycle(
@@ -54,7 +55,15 @@ def advance_phase_cycle(
         state=next_state,
         last_cycle_outcome=outcome,
     )
-    return PhaseCycleAdvanceResult(next_state=next_state, context_core=context_core)
+    trace_context = build_phase_cycle_trace_context(
+        protocol=protocol,
+        phase=_get_phase(protocol, current_state.phase_name),
+        state=current_state,
+        outcome=outcome,
+        next_cycle_index=next_state.cycle_index,
+        target_phase=next_phase_name,
+    )
+    return PhaseCycleAdvanceResult(next_state=next_state, context_core=context_core, trace_context=trace_context)
 
 
 def _valid_outcomes(protocol: Protocol, current_phase_name: str) -> list[str]:
@@ -87,10 +96,42 @@ def build_phase_cycle_context_core(
         next_expected_action=_step_guidance(current_step),
         current_cycle_index=state.cycle_index,
         current_step_label=state.current_step_label,
+        current_step_key=_step_key(current_step, state.current_step_label),
         current_step_alias=_step_alias(current_step, state.current_step_label),
         current_step_role=current_step.role if current_step is not None else None,
         guard_set=phase.guard_set,
         declared_guards=list(declared_guard_set.guards) if declared_guard_set is not None else [],
+    )
+
+
+def build_phase_cycle_trace_context(
+    *,
+    protocol: Protocol | None,
+    phase: ProtocolPhase,
+    state: PhaseCycleState,
+    outcome: str | None,
+    next_cycle_index: int | None,
+    target_phase: str | None,
+) -> PhaseCycleTraceContext:
+    current_step = _current_step(phase, state)
+    selected_transition = _select_transition(
+        protocol=protocol,
+        phase_name=phase.name,
+        outcome=outcome,
+        target_phase=target_phase,
+    )
+    resolved_target_phase = target_phase
+    if resolved_target_phase is None and selected_transition is not None:
+        resolved_target_phase = selected_transition.to
+    return PhaseCycleTraceContext(
+        cycle_index=state.cycle_index,
+        next_cycle_index=next_cycle_index,
+        outcome=outcome,
+        procedure_key=_step_key(current_step, state.current_step_label),
+        procedure_alias=_step_alias(current_step, state.current_step_label),
+        gate_key=selected_transition.visual_key() if selected_transition is not None else None,
+        gate_alias=selected_transition.visual_label() if selected_transition is not None else None,
+        target_phase=resolved_target_phase,
     )
 
 
@@ -148,10 +189,37 @@ def _step_guidance(step: ProtocolProcedureStep | None) -> str | None:
     return step.guidance or step.action
 
 
+def _step_key(step: ProtocolProcedureStep | None, fallback_label: str | None) -> str | None:
+    if step is None:
+        return fallback_label
+    return step.visual_key()
+
+
 def _step_alias(step: ProtocolProcedureStep | None, fallback_label: str | None) -> str | None:
     if step is None:
         return fallback_label
     return step.alias or step.action or fallback_label
+
+
+def _select_transition(
+    *,
+    protocol: Protocol | None,
+    phase_name: str,
+    outcome: str | None,
+    target_phase: str | None,
+) -> ProtocolTransition | None:
+    if protocol is None:
+        return None
+    transitions = [transition for transition in protocol.transitions if transition.from_phase == phase_name]
+    if outcome:
+        matched = next((transition for transition in transitions if transition.on == outcome), None)
+        if matched is not None:
+            return matched
+    if target_phase:
+        matches = [transition for transition in transitions if transition.to == target_phase]
+        if len(matches) == 1:
+            return matches[0]
+    return None
 
 
 def _required_result(phase: ProtocolPhase) -> str:

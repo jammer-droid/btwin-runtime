@@ -9,6 +9,7 @@ from btwin_core.config import BTwinConfig, RuntimeConfig
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolSection, ProtocolStore, ProtocolTransition
+from btwin_core.runtime_binding_store import RuntimeBindingStore
 from btwin_core.thread_store import ThreadStore
 from btwin_core.workflow_event_log import WorkflowEventLog
 
@@ -175,6 +176,46 @@ def _seed_retry_trace_thread(tmp_path: Path):
         )
         + "\n",
         encoding="utf-8",
+    )
+    return project_root, data_dir, thread_store, thread
+
+
+def _seed_traceable_review_thread(tmp_path: Path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    protocol_store = ProtocolStore(project_root / ".btwin" / "protocols")
+    protocol_store.save_protocol(
+        Protocol(
+            name="review-loop",
+            phases=[
+                ProtocolPhase(
+                    name="review",
+                    actions=["contribute"],
+                    template=[ProtocolSection(section="completed", required=True)],
+                    procedure=[
+                        {"role": "reviewer", "action": "review", "alias": "Review", "key": "review-pass"},
+                        {"role": "implementer", "action": "revise", "alias": "Revise", "key": "revise-pass"},
+                    ],
+                ),
+                ProtocolPhase(name="decision", actions=["decide"]),
+            ],
+            transitions=[
+                ProtocolTransition.model_validate(
+                    {"from": "review", "to": "review", "on": "retry", "alias": "Retry Gate", "key": "retry-loop"}
+                ),
+                ProtocolTransition.model_validate(
+                    {"from": "review", "to": "decision", "on": "accept", "alias": "Accept Gate", "key": "accept-gate"}
+                ),
+            ],
+            outcomes=["retry", "accept"],
+        )
+    )
+    thread = thread_store.create_thread(
+        topic="Traceable review",
+        protocol="review-loop",
+        participants=["alice"],
+        initial_phase="review",
     )
     return project_root, data_dir, thread_store, thread
 
@@ -657,3 +698,133 @@ def test_thread_watch_json_attached_mode_synthesizes_cross_phase_gate_row_withou
     assert row["gate_alias"] == "Accept Gate"
     assert row["outcome"] == "accept"
     assert row["target_phase"] == "decision"
+
+
+def test_thread_watch_records_contribution_event_trace_fields(tmp_path, monkeypatch):
+    project_root, data_dir, thread_store, thread = _seed_traceable_review_thread(tmp_path)
+    PhaseCycleStore(project_root / ".btwin").write(
+        PhaseCycleState.start(
+            thread_id=thread["thread_id"],
+            phase_name="review",
+            procedure_steps=["review", "revise"],
+        ).model_copy(
+            update={
+                "cycle_index": 2,
+                "current_step_label": "review",
+            }
+        )
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+
+    result = runner.invoke(
+        app,
+        [
+            "contribution",
+            "submit",
+            "--thread",
+            thread["thread_id"],
+            "--agent",
+            "alice",
+            "--phase",
+            "review",
+            "--content",
+            "## completed\nNeeds another pass.\n",
+            "--tldr",
+            "review contribution recorded",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    events = WorkflowEventLog(thread_store.workflow_event_log_path(thread["thread_id"])).list_events()
+    event = events[-1]
+    assert event["event_type"] == "required_result_recorded"
+    assert event["cycle_index"] == 2
+    assert event["procedure_key"] == "review-pass"
+    assert event["procedure_alias"] == "Review"
+
+
+def test_thread_watch_records_blocked_stop_guard_identity_and_trace_fields(tmp_path, monkeypatch):
+    project_root, data_dir, thread_store, thread = _seed_traceable_review_thread(tmp_path)
+    PhaseCycleStore(project_root / ".btwin").write(
+        PhaseCycleState.start(
+            thread_id=thread["thread_id"],
+            phase_name="review",
+            procedure_steps=["review", "revise"],
+        )
+    )
+    RuntimeBindingStore(project_root / ".btwin").bind(thread["thread_id"], "alice")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    payload = {
+        "session_id": "codex-session-1",
+        "cwd": str(project_root),
+        "hook_event_name": "Stop",
+        "model": "gpt-5.4",
+        "turn_id": "turn-1",
+        "stop_hook_active": False,
+        "last_assistant_message": "done",
+    }
+    result = runner.invoke(app, ["workflow", "hook"], input=json.dumps(payload))
+
+    assert result.exit_code == 0, result.output
+    events = WorkflowEventLog(thread_store.workflow_event_log_path(thread["thread_id"])).list_events()
+    blocked = events[-1]
+    assert blocked["event_type"] == "phase_exit_blocked"
+    assert blocked["baseline_guard"] == "contribution_required"
+    assert blocked["cycle_index"] == 1
+    assert blocked["procedure_key"] == "review-pass"
+    assert blocked["procedure_alias"] == "Review"
+
+    watch = runner.invoke(app, ["thread", "watch", thread["thread_id"], "--json"])
+    assert watch.exit_code == 0, watch.output
+    payload = json.loads(watch.output)
+    row = payload["trace"][-1]
+    assert row["kind"] == "guard"
+    assert row["baseline_guard"] == "contribution_required"
+
+
+def test_thread_watch_records_apply_next_event_trace_fields(tmp_path, monkeypatch):
+    project_root, data_dir, thread_store, thread = _seed_traceable_review_thread(tmp_path)
+    thread_store.submit_contribution(
+        thread["thread_id"],
+        "alice",
+        "review",
+        content="## completed\nNeeds another pass.\n",
+        tldr="review contribution recorded",
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+
+    result = runner.invoke(
+        app,
+        [
+            "protocol",
+            "apply-next",
+            "--thread",
+            thread["thread_id"],
+            "--outcome",
+            "retry",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    events = WorkflowEventLog(thread_store.workflow_event_log_path(thread["thread_id"])).list_events()
+    event = events[-1]
+    assert event["event_type"] == "cycle_gate_completed"
+    assert event["cycle_index"] == 1
+    assert event["next_cycle_index"] == 2
+    assert event["outcome"] == "retry"
+    assert event["procedure_key"] == "review-pass"
+    assert event["procedure_alias"] == "Review"
+    assert event["gate_key"] == "retry-loop"
+    assert event["gate_alias"] == "Retry Gate"
+    assert event["target_phase"] == "review"

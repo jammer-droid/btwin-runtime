@@ -149,9 +149,116 @@ def test_engine_uses_step_alias_and_role_when_available():
     )
 
     assert result.context_core.current_step_label == "review"
+    assert result.context_core.current_step_key == "review"
     assert result.context_core.current_step_alias == "Review Pass"
     assert result.context_core.current_step_role == "reviewer"
     assert result.context_core.next_expected_role == "reviewer"
+
+
+def test_engine_returns_trace_context_for_same_phase_retry():
+    protocol = Protocol(
+        name="aliased-review-loop",
+        phases=[
+            ProtocolPhase(
+                name="review",
+                description="Review the implementation and request changes if needed.",
+                actions=["contribute"],
+                template=[ProtocolSection(section="completed", required=True)],
+                procedure=[
+                    {
+                        "role": "reviewer",
+                        "action": "review",
+                        "alias": "Review Pass",
+                        "key": "review-pass",
+                        "guidance": "Review the current implementation state.",
+                    },
+                    {
+                        "role": "implementer",
+                        "action": "revise",
+                        "alias": "Revision Pass",
+                        "key": "revise-pass",
+                        "guidance": "Implement revisions from review feedback.",
+                    },
+                ],
+            )
+        ],
+        transitions=[
+            ProtocolTransition.model_validate(
+                {"from": "review", "to": "review", "on": "retry", "alias": "Retry Gate", "key": "retry-loop"}
+            )
+        ],
+        outcomes=["retry", "accept"],
+    )
+
+    result = advance_phase_cycle(
+        thread={"thread_id": "thread-1", "topic": "Review loop thread"},
+        protocol=protocol,
+        current_state=PhaseCycleState.start(
+            thread_id="thread-1",
+            phase_name="review",
+            procedure_steps=["review", "revise"],
+        ),
+        outcome="retry",
+    )
+
+    assert result.trace_context.cycle_index == 1
+    assert result.trace_context.next_cycle_index == 2
+    assert result.trace_context.outcome == "retry"
+    assert result.trace_context.procedure_key == "review-pass"
+    assert result.trace_context.procedure_alias == "Review Pass"
+    assert result.trace_context.gate_key == "retry-loop"
+    assert result.trace_context.gate_alias == "Retry Gate"
+    assert result.trace_context.target_phase == "review"
+
+
+def test_engine_returns_trace_context_for_cross_phase_accept():
+    protocol = Protocol(
+        name="review-then-decide",
+        phases=[
+            ProtocolPhase(
+                name="review",
+                description="Review the implementation and request changes if needed.",
+                actions=["contribute"],
+                template=[ProtocolSection(section="completed", required=True)],
+                procedure=[
+                    {
+                        "role": "reviewer",
+                        "action": "review",
+                        "alias": "Review Pass",
+                        "key": "review-pass",
+                        "guidance": "Review the current implementation state.",
+                    }
+                ],
+            ),
+            ProtocolPhase(name="decision", description="Record the decision.", actions=["decide"]),
+        ],
+        transitions=[
+            ProtocolTransition.model_validate(
+                {"from": "review", "to": "decision", "on": "accept", "alias": "Accept Gate", "key": "accept-gate"}
+            )
+        ],
+        outcomes=["retry", "accept"],
+    )
+
+    result = advance_phase_cycle(
+        thread={"thread_id": "thread-1", "topic": "Review loop thread"},
+        protocol=protocol,
+        current_state=PhaseCycleState.start(
+            thread_id="thread-1",
+            phase_name="review",
+            procedure_steps=["review"],
+        ),
+        outcome="accept",
+    )
+
+    assert result.trace_context.cycle_index == 1
+    assert result.trace_context.next_cycle_index == 1
+    assert result.trace_context.outcome == "accept"
+    assert result.trace_context.procedure_key == "review-pass"
+    assert result.trace_context.procedure_alias == "Review Pass"
+    assert result.trace_context.gate_key == "accept-gate"
+    assert result.trace_context.gate_alias == "Accept Gate"
+    assert result.trace_context.target_phase == "decision"
 
 
 def test_context_core_uses_current_step_index_when_action_labels_repeat():
