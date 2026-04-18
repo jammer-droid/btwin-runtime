@@ -62,6 +62,10 @@ class ScenarioFixture:
     outcome: str | None
     target_phase: str | None
     cycle_index_changes: tuple[tuple[int, int], ...]
+    outcome_policy: str | None = None
+    outcome_emitters: tuple[str, ...] = ()
+    outcome_actions: tuple[str, ...] = ()
+    policy_outcomes: tuple[str, ...] = ()
     visual_procedure: tuple[ScenarioVisualExpectation, ...] = ()
     visual_gates: tuple[ScenarioVisualExpectation, ...] = ()
 
@@ -71,11 +75,35 @@ def _review_loop_protocol_definition() -> dict[str, object]:
         "name": "review-loop",
         "description": "Review loop with retry, accept, and close outcomes.",
         "outcomes": ["retry", "accept", "close"],
+        "gates": [
+            {
+                "name": "review-gate",
+                "authoring_only": True,
+                "description": "Review outcome routing.",
+                "routes": [
+                    {"outcome": "retry", "target_phase": "review", "alias": "Retry Gate", "key": "retry-loop"},
+                    {"outcome": "accept", "target_phase": "decision", "alias": "Accept Gate", "key": "accept-gate"},
+                    {"outcome": "close", "target_phase": "decision", "alias": "Close Gate", "key": "close-gate"},
+                ],
+            }
+        ],
+        "outcome_policies": [
+            {
+                "name": "review-outcomes",
+                "authoring_only": True,
+                "description": "Review outcome vocabulary.",
+                "emitters": ["reviewer", "user"],
+                "actions": ["decide"],
+                "outcomes": ["retry", "accept", "close"],
+            }
+        ],
         "phases": [
             {
                 "name": "review",
                 "description": "Review and revise the work.",
                 "actions": ["contribute"],
+                "gate": "review-gate",
+                "outcome_policy": "review-outcomes",
                 "template": [{"section": "completed", "required": True}],
                 "procedure": [
                     {"key": "review-pass", "role": "reviewer", "action": "review", "alias": "Review"},
@@ -87,11 +115,6 @@ def _review_loop_protocol_definition() -> dict[str, object]:
                 "description": "Record the final decision.",
                 "actions": ["decide"],
             },
-        ],
-        "transitions": [
-            {"key": "retry-loop", "from": "review", "to": "review", "on": "retry", "alias": "Retry Gate"},
-            {"key": "accept-gate", "from": "review", "to": "decision", "on": "accept", "alias": "Accept Gate"},
-            {"key": "close-gate", "from": "review", "to": "decision", "on": "close", "alias": "Close Gate"},
         ],
     }
 
@@ -107,6 +130,10 @@ def _fixture(
     outcome: str | None,
     target_phase: str | None,
     cycle_index_changes: tuple[tuple[int, int], ...],
+    outcome_policy: str | None = "review-outcomes",
+    outcome_emitters: tuple[str, ...] = ("reviewer", "user"),
+    outcome_actions: tuple[str, ...] = ("decide",),
+    policy_outcomes: tuple[str, ...] = ("retry", "accept", "close"),
     visual_procedure: tuple[ScenarioVisualExpectation, ...] = (),
     visual_gates: tuple[ScenarioVisualExpectation, ...] = (),
 ) -> ScenarioFixture:
@@ -122,6 +149,10 @@ def _fixture(
         outcome=outcome,
         target_phase=target_phase,
         cycle_index_changes=cycle_index_changes,
+        outcome_policy=outcome_policy,
+        outcome_emitters=outcome_emitters,
+        outcome_actions=outcome_actions,
+        policy_outcomes=policy_outcomes,
         visual_procedure=visual_procedure,
         visual_gates=visual_gates,
     )

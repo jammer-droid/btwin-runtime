@@ -13,6 +13,7 @@ from btwin_core.protocol_store import (
     ProtocolSection,
     ProtocolStore,
     ProtocolTransition,
+    compile_protocol_definition,
 )
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_cli.api_threads import _build_phase_cycle_visual
@@ -372,7 +373,7 @@ def test_api_phase_cycle_visual_uses_step_index_for_repeated_actions():
     ),
 )
 def test_cli_phase_cycle_visual_matches_shared_scenario_matrix(scenario_id: str):
-    protocol = Protocol.model_validate(scenario_protocol_definition(scenario_id))
+    protocol = compile_protocol_definition(scenario_protocol_definition(scenario_id))
     phase = protocol.phases[0]
     state = PhaseCycleState.start(
         thread_id="thread-1",

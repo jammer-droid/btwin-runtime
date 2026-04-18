@@ -363,6 +363,10 @@ assert retry_gate["target_phase"] == retry_scenario.target_phase, retry_gate
 assert retry_gate["procedure_key"] == retry_scenario.procedure_key, retry_gate
 assert retry_gate["cycle_index"] == 2, retry_gate
 assert retry_gate["next_cycle_index"] == 3, retry_gate
+assert retry_gate["outcome_policy"] == retry_scenario.outcome_policy, retry_gate
+assert retry_gate["outcome_emitters"] == list(retry_scenario.outcome_emitters), retry_gate
+assert retry_gate["outcome_actions"] == list(retry_scenario.outcome_actions), retry_gate
+assert retry_gate["policy_outcomes"] == list(retry_scenario.policy_outcomes), retry_gate
 assert mailbox["count"] == 2, mailbox
 assert [report["cycle_index"] for report in mailbox["reports"]] == [2, 1], mailbox
 assert [report["next_cycle_index"] for report in mailbox["reports"]] == [3, 2], mailbox
@@ -422,6 +426,12 @@ print(f"- phase-cycle gate key: {phase_cycle['visual']['gates'][0]['key']}")
 print(
     f"- thread-watch retry trace: outcome={retry_gate['outcome']} gate={retry_gate['gate_key']} "
     f"target={retry_gate['target_phase']} cycle={retry_gate['cycle_index']}->{retry_gate['next_cycle_index']}"
+)
+print(
+    f"- thread-watch retry policy: policy={retry_gate['outcome_policy']} "
+    f"emitters={','.join(retry_gate['outcome_emitters'])} "
+    f"actions={','.join(retry_gate['outcome_actions'])} "
+    f"outcomes={','.join(retry_gate['policy_outcomes'])}"
 )
 print(
     f"- thread-watch blocked stop: reason={blocked_guard['reason']} "

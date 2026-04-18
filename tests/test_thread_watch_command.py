@@ -8,10 +8,18 @@ from btwin_cli.main import app
 from btwin_core.config import BTwinConfig, RuntimeConfig
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.phase_cycle_store import PhaseCycleStore
-from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolSection, ProtocolStore, ProtocolTransition
+from btwin_core.protocol_store import (
+    Protocol,
+    ProtocolPhase,
+    ProtocolSection,
+    ProtocolStore,
+    ProtocolTransition,
+    compile_protocol_definition,
+)
 from btwin_core.runtime_binding_store import RuntimeBindingStore
 from btwin_core.thread_store import ThreadStore
 from btwin_core.workflow_event_log import WorkflowEventLog
+from tests.protocol_scenario_matrix import scenario_protocol_definition
 
 
 runner = CliRunner()
@@ -299,6 +307,10 @@ def test_thread_watch_json_emits_normalized_trace_rows(tmp_path, monkeypatch):
         "reason",
         "summary",
         "source",
+        "outcome_policy",
+        "outcome_emitters",
+        "outcome_actions",
+        "policy_outcomes",
     }
     for row in payload["trace"]:
         assert required_fields.issubset(row)
@@ -319,6 +331,10 @@ def test_thread_watch_json_emits_normalized_trace_rows(tmp_path, monkeypatch):
     assert first["reason"] is None
     assert first["summary"] == "Stop exit check requested."
     assert first["source"] == "codex.hook"
+    assert first["outcome_policy"] is None
+    assert first["outcome_emitters"] == []
+    assert first["outcome_actions"] == []
+    assert first["policy_outcomes"] == []
 
     last = payload["trace"][-1]
     assert last["kind"] == "gate"
@@ -336,6 +352,10 @@ def test_thread_watch_json_emits_normalized_trace_rows(tmp_path, monkeypatch):
     assert last["reason"] is None
     assert last["summary"] == "Phase `context` requested retry; continuing in `context` with active cycle 2."
     assert last["source"] == "btwin.protocol.apply_next"
+    assert last["outcome_policy"] is None
+    assert last["outcome_emitters"] == []
+    assert last["outcome_actions"] == []
+    assert last["policy_outcomes"] == []
 
 
 def test_thread_watch_help_describes_timeline_not_hud():
@@ -450,26 +470,9 @@ def test_thread_watch_json_attached_mode_loads_custom_protocol_from_runtime_api(
             }
         if path == "/api/protocols/custom-review":
             protocol_calls.append(path)
-            return {
-                "name": "custom-review",
-                "phases": [
-                    {
-                        "name": "review",
-                        "actions": ["contribute"],
-                        "template": [{"section": "completed", "required": True}],
-                        "procedure": [
-                            {"role": "reviewer", "action": "review", "alias": "Review", "key": "review-pass"},
-                            {"role": "implementer", "action": "revise", "alias": "Revise", "key": "revise-pass"},
-                        ],
-                    },
-                    {"name": "decision", "actions": ["decide"]},
-                ],
-                "transitions": [
-                    {"from": "review", "to": "review", "on": "retry", "alias": "Retry Gate", "key": "retry-loop"},
-                    {"from": "review", "to": "decision", "on": "accept", "alias": "Accept Gate", "key": "accept-gate"},
-                ],
-                "outcomes": ["retry", "accept"],
-            }
+            payload = scenario_protocol_definition("retry_same_phase")
+            payload["name"] = "custom-review"
+            return payload
         raise AssertionError(f"unexpected path: {path} params={params}")
 
     monkeypatch.setattr(main, "_project_root", lambda: project_root)
@@ -490,6 +493,10 @@ def test_thread_watch_json_attached_mode_loads_custom_protocol_from_runtime_api(
     assert row["gate_alias"] == "Retry Gate"
     assert row["outcome"] == "retry"
     assert row["target_phase"] == "review"
+    assert row["outcome_policy"] == "review-outcomes"
+    assert row["outcome_emitters"] == ["reviewer", "user"]
+    assert row["outcome_actions"] == ["decide"]
+    assert row["policy_outcomes"] == ["retry", "accept", "close"]
 
 
 def test_thread_watch_json_attached_mode_synthesizes_gate_row_without_gate_event_or_mailbox(tmp_path, monkeypatch):
@@ -791,6 +798,8 @@ def test_thread_watch_records_blocked_stop_guard_identity_and_trace_fields(tmp_p
 
 def test_thread_watch_records_apply_next_event_trace_fields(tmp_path, monkeypatch):
     project_root, data_dir, thread_store, thread = _seed_traceable_review_thread(tmp_path)
+    protocol_store = ProtocolStore(project_root / ".btwin" / "protocols")
+    protocol_store.save_protocol(compile_protocol_definition(scenario_protocol_definition("retry_same_phase")))
     thread_store.submit_contribution(
         thread["thread_id"],
         "alice",
@@ -828,3 +837,13 @@ def test_thread_watch_records_apply_next_event_trace_fields(tmp_path, monkeypatc
     assert event["gate_key"] == "retry-loop"
     assert event["gate_alias"] == "Retry Gate"
     assert event["target_phase"] == "review"
+
+    watch = runner.invoke(app, ["thread", "watch", thread["thread_id"], "--json"])
+    assert watch.exit_code == 0, watch.output
+    payload = json.loads(watch.output)
+    row = payload["trace"][-1]
+    assert row["kind"] == "gate"
+    assert row["outcome_policy"] == "review-outcomes"
+    assert row["outcome_emitters"] == ["reviewer", "user"]
+    assert row["outcome_actions"] == ["decide"]
+    assert row["policy_outcomes"] == ["retry", "accept", "close"]

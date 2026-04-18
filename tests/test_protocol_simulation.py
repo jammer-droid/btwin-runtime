@@ -3,7 +3,7 @@ import pytest
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.phase_cycle_engine import advance_phase_cycle, build_phase_cycle_context_core, phase_cycle_procedure_actions
 from btwin_core.protocol_flow import describe_next
-from btwin_core.protocol_store import Protocol
+from btwin_core.protocol_store import Protocol, compile_protocol_definition
 from btwin_core.workflow_constraints import evaluate_workflow_hook
 
 from tests.protocol_scenario_matrix import (
@@ -25,7 +25,7 @@ def _thread(*, thread_id: str, protocol: str, phase: str, topic: str = "Scenario
 
 
 def _protocol(scenario_id: str) -> Protocol:
-    return Protocol.model_validate(scenario_protocol_definition(scenario_id))
+    return compile_protocol_definition(scenario_protocol_definition(scenario_id))
 
 
 def _seed_review_state(protocol: Protocol) -> PhaseCycleState:
@@ -115,6 +115,10 @@ def test_protocol_scenario_matrix_exposes_stable_ids_and_shared_metadata():
     assert retry.outcome == "retry"
     assert retry.target_phase == "review"
     assert retry.cycle_index_changes == ((1, 2), (2, 3))
+    assert retry.outcome_policy == "review-outcomes"
+    assert retry.outcome_emitters == ("reviewer", "user")
+    assert retry.outcome_actions == ("decide",)
+    assert retry.policy_outcomes == ("retry", "accept", "close")
 
     close = get_scenario("close_path")
     assert close.protocol_name == "review-loop"
@@ -125,6 +129,28 @@ def test_protocol_scenario_matrix_exposes_stable_ids_and_shared_metadata():
     assert close.outcome == "close"
     assert close.target_phase == "decision"
     assert close.cycle_index_changes == ((1, 1),)
+    assert close.outcome_policy == "review-outcomes"
+    assert close.outcome_emitters == ("reviewer", "user")
+    assert close.outcome_actions == ("decide",)
+    assert close.policy_outcomes == ("retry", "accept", "close")
+
+
+def test_review_loop_shared_fixture_uses_authoring_dsl_and_compiles_outcome_policy_hints():
+    definition = scenario_protocol_definition("retry_same_phase")
+
+    assert definition["phases"][0]["gate"] == "review-gate"
+    assert definition["phases"][0]["outcome_policy"] == "review-outcomes"
+    assert definition["gates"][0]["name"] == "review-gate"
+    assert definition["outcome_policies"][0]["name"] == "review-outcomes"
+
+    protocol = compile_protocol_definition(definition)
+    phase = protocol.phases[0]
+
+    assert [transition.on for transition in protocol.transitions] == ["retry", "accept", "close"]
+    assert phase.outcome_policy == "review-outcomes"
+    assert phase.outcome_emitters == ["reviewer", "user"]
+    assert phase.outcome_actions == ["decide"]
+    assert phase.policy_outcomes == ["retry", "accept", "close"]
 
 
 @pytest.mark.parametrize("scenario_id", ("happy_path_accept", "close_path"))

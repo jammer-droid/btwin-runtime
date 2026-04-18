@@ -44,6 +44,7 @@ def test_attached_helper_smoke_script_runs_end_to_end(tmp_path):
     assert "phase-cycle step key: review-pass" in result.stdout
     assert "phase-cycle gate key: retry-loop" in result.stdout
     assert "thread-watch retry trace: outcome=retry gate=retry-loop target=review cycle=2->3" in result.stdout
+    assert "thread-watch retry policy: policy=review-outcomes emitters=reviewer,user actions=decide outcomes=retry,accept,close" in result.stdout
     assert "thread-watch blocked stop: reason=missing_contribution baseline=contribution_required" in result.stdout
     assert "thread-watch close trace: outcome=close gate=close-gate target=decision cycle=1->1" in result.stdout
     assert "thread-watch seed trace: cycle=1 procedure=review-pass target=review" in result.stdout

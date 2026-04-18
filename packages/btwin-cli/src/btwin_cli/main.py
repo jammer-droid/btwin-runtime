@@ -388,7 +388,7 @@ def _thread_watch_protocol(
             payload = None
         if isinstance(payload, dict):
             try:
-                return Protocol.model_validate(payload)
+                return compile_protocol_definition(payload)
             except Exception:
                 pass
     return _get_protocol_store().get_protocol(protocol_name)
@@ -539,6 +539,11 @@ def _enrich_thread_watch_gate_row(
         if row.get("outcome") is None:
             row["outcome"] = selected_transition.on
 
+    row["outcome_policy"] = source_phase.outcome_policy
+    row["outcome_emitters"] = list(source_phase.outcome_emitters)
+    row["outcome_actions"] = list(source_phase.outcome_actions)
+    row["policy_outcomes"] = list(source_phase.policy_outcomes)
+
     if row.get("procedure_key") is None or row.get("procedure_alias") is None:
         procedure_row = None
         if source_phase.name == thread.get("current_phase"):
@@ -667,6 +672,10 @@ def _synthetic_thread_watch_gate_row(
             else "Gate row synthesized from phase-cycle state."
         ),
         "source": "btwin.thread_watch.synthetic",
+        "outcome_policy": None,
+        "outcome_emitters": [],
+        "outcome_actions": [],
+        "policy_outcomes": [],
         "agent": None,
         "session_id": None,
         "turn_id": None,
@@ -718,6 +727,10 @@ def _build_thread_watch_trace_rows(
             "reason": event.get("reason"),
             "summary": event.get("summary"),
             "source": event.get("source"),
+            "outcome_policy": None,
+            "outcome_emitters": [],
+            "outcome_actions": [],
+            "policy_outcomes": [],
             "agent": event.get("agent"),
             "session_id": event.get("session_id"),
             "turn_id": event.get("turn_id"),

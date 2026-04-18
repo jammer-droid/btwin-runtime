@@ -546,6 +546,13 @@ def test_provider_smoke_compiled_outcome_policy_hints_visible_on_next_and_apply_
     assert applied["context_core"]["policy_outcomes"] == plan["policy_outcomes"]
     assert applied["context_core"]["current_step_key"] == "review"
 
+    trace_payload = _thread_watch_payload(provider_smoke_env, thread_id, limit=10)
+    gate_row = _latest_trace_row(trace_payload, kind="gate")
+    assert gate_row["outcome_policy"] == plan["outcome_policy"]
+    assert gate_row["outcome_emitters"] == plan["outcome_emitters"]
+    assert gate_row["outcome_actions"] == plan["outcome_actions"]
+    assert gate_row["policy_outcomes"] == plan["policy_outcomes"]
+
 
 def test_provider_smoke_stop_block_uses_shared_scenario_fixture(provider_smoke_env) -> None:
     scenario = get_scenario("blocked_stop_missing_contribution")
