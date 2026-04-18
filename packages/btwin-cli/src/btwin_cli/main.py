@@ -55,7 +55,13 @@ from btwin_core.phase_cycle_engine import (
 )
 from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.protocol_flow import describe_next
-from btwin_core.protocol_store import Protocol, ProtocolPhase, ProtocolStore, load_protocol_yaml
+from btwin_core.protocol_store import (
+    Protocol,
+    ProtocolPhase,
+    ProtocolStore,
+    compile_protocol_definition,
+    load_protocol_yaml,
+)
 from btwin_core.protocol_validator import ProtocolValidator
 from btwin_core.sources import SourceRegistry
 from btwin_core.system_mailbox_store import SystemMailboxStore
@@ -3885,7 +3891,7 @@ def protocol_validate(
     path = Path(file).expanduser()
     try:
         data = load_protocol_yaml(path)
-        protocol = Protocol.model_validate(data)
+        protocol = compile_protocol_definition(data)
     except Exception as exc:
         payload = {"valid": False, "file": str(path), "error": str(exc)}
         _emit_payload(payload, as_json=as_json)
