@@ -1,11 +1,10 @@
 from pathlib import Path
 
 import pytest
-
-from btwin_core.protocol_store import ProtocolStore
 from pydantic import ValidationError
 
 from btwin_core.protocol_store import Protocol, ProtocolGuardSet, ProtocolPhase
+from btwin_core.protocol_store import ProtocolStore
 
 
 def test_protocol_store_parses_interaction_mode(tmp_path: Path):
@@ -55,13 +54,19 @@ def test_protocol_rejects_unknown_guard_set_reference():
 
 def test_protocol_rejects_unknown_guard_name():
     with pytest.raises(ValidationError, match="unsupported guard"):
+        ProtocolGuardSet(
+            name="discussion-guards",
+            guards=["contribution_required", "not_a_real_guard"],
+        )
+
+
+def test_protocol_rejects_duplicate_top_level_guard_set_names():
+    with pytest.raises(ValidationError, match="duplicate guard_set name"):
         Protocol(
             name="debate",
             guard_sets=[
-                ProtocolGuardSet(
-                    name="discussion-guards",
-                    guards=["contribution_required", "not_a_real_guard"],
-                )
+                ProtocolGuardSet(name="discussion-guards", guards=["contribution_required"]),
+                ProtocolGuardSet(name="discussion-guards", guards=["phase_actor_eligibility"]),
             ],
             phases=[
                 ProtocolPhase(
