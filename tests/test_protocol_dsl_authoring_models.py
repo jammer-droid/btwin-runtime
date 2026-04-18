@@ -190,6 +190,30 @@ def test_protocol_rejects_authoring_gate_route_with_ambiguous_canonical_transiti
         )
 
 
+def test_protocol_rejects_authoring_gate_route_without_canonical_transition():
+    with pytest.raises(
+        ValueError,
+        match="gate 'review-gate' route for phase 'review' and outcome 'retry' has no canonical transition",
+    ):
+        Protocol.model_validate(
+            {
+                "name": "review-loop",
+                "phases": [
+                    {"name": "review", "gate": "review-gate"},
+                    {"name": "decision"},
+                ],
+                "gates": [
+                    {
+                        "name": "review-gate",
+                        "routes": [{"outcome": "retry", "target_phase": "decision"}],
+                    }
+                ],
+                "transitions": [{"from": "review", "to": "decision", "on": "accept"}],
+                "outcomes": ["retry", "accept"],
+            }
+        )
+
+
 def test_protocol_keeps_existing_transition_only_yaml_compatible():
     proto = Protocol.model_validate(
         {

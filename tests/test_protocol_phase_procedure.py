@@ -169,7 +169,10 @@ def test_protocol_guard_sets_and_phase_guard_set_round_trip_through_store(tmp_pa
                     ],
                 )
             ],
-            transitions=[ProtocolTransition.model_validate({"from": "review", "to": "review", "on": "retry"})],
+            transitions=[
+                ProtocolTransition.model_validate({"from": "review", "to": "review", "on": "retry"}),
+                ProtocolTransition.model_validate({"from": "review", "to": "decision", "on": "accept"}),
+            ],
             outcomes=["retry", "accept"],
         )
     )
@@ -231,7 +234,10 @@ def test_protocol_authoring_gate_and_outcome_policy_round_trip_through_store(tmp
                 ),
                 ProtocolPhase(name="decision", actions=["decide"]),
             ],
-            transitions=[ProtocolTransition.model_validate({"from": "review", "to": "review", "on": "retry"})],
+            transitions=[
+                ProtocolTransition.model_validate({"from": "review", "to": "review", "on": "retry"}),
+                ProtocolTransition.model_validate({"from": "review", "to": "decision", "on": "accept"}),
+            ],
             outcomes=["retry", "accept"],
         )
     )
