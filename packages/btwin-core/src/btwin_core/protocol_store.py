@@ -232,6 +232,12 @@ class Protocol(BaseModel):
                 continue
             for route in gate.routes:
                 transition_targets = canonical_transitions.get((phase.name, route.outcome))
+                if transition_targets and len(transition_targets) > 1:
+                    raise ValueError(
+                        "gate "
+                        f"'{gate.name}' route for phase '{phase.name}' and outcome "
+                        f"'{route.outcome}' has ambiguous canonical transitions"
+                    )
                 if transition_targets and route.target_phase not in transition_targets:
                     canonical_target = sorted(transition_targets)[0]
                     raise ValueError(
