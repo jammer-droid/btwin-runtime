@@ -1,6 +1,7 @@
-from btwin_core.protocol_flow import describe_next
 import pytest
 
+from btwin_core.phase_cycle_engine import phase_cycle_procedure_actions
+from btwin_core.protocol_flow import describe_next
 from btwin_core.protocol_store import (
     Protocol,
     ProtocolGuardSet,
@@ -12,6 +13,9 @@ from btwin_core.protocol_store import (
 )
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_cli.api_threads import _build_phase_cycle_visual
+from btwin_cli.main import _phase_cycle_visual_payload
+
+from tests.protocol_scenario_matrix import get_scenario, scenario_protocol_definition
 
 
 def test_protocol_phase_can_define_role_agnostic_procedure_steps():
@@ -270,6 +274,34 @@ def test_api_phase_cycle_visual_uses_step_index_for_repeated_actions():
         "label": "Review 2",
         "status": "active",
     }
+
+
+@pytest.mark.parametrize(
+    "scenario_id",
+    (
+        "happy_path_accept",
+        "retry_same_phase",
+        "close_path",
+        "invalid_outcome_mapping",
+    ),
+)
+def test_cli_phase_cycle_visual_matches_shared_scenario_matrix(scenario_id: str):
+    scenario = get_scenario(scenario_id)
+    protocol = Protocol.model_validate(scenario_protocol_definition(scenario_id))
+    phase = protocol.phases[0]
+    state = PhaseCycleState.start(
+        thread_id="thread-1",
+        phase_name=phase.name,
+        procedure_steps=phase_cycle_procedure_actions(phase),
+    ).model_copy(update={"last_gate_outcome": scenario.outcome})
+
+    visual = _phase_cycle_visual_payload(protocol=protocol, phase=phase, state=state)
+
+    assert visual["procedure"] == [
+        *[step.as_dict() for step in scenario.visual_procedure],
+        {"key": "gate", "label": "Gate", "status": "pending"},
+    ]
+    assert visual["gates"] == [gate.as_dict() for gate in scenario.visual_gates]
 
 
 def test_protocol_flow_can_restart_same_phase_for_next_cycle():

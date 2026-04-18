@@ -23,6 +23,14 @@ def advance_phase_cycle(
     current_state: PhaseCycleState,
     outcome: str,
 ) -> PhaseCycleAdvanceResult:
+    valid_outcomes = _valid_outcomes(protocol, current_state.phase_name)
+    if outcome not in valid_outcomes:
+        valid = ", ".join(valid_outcomes) if valid_outcomes else "<none>"
+        raise ValueError(
+            f"unsupported outcome '{outcome}' for phase '{current_state.phase_name}'. "
+            f"Valid outcomes: {valid}"
+        )
+
     next_phase_name = _resolve_next_phase(protocol, current_state.phase_name, outcome)
     if next_phase_name is None:
         next_state = current_state.finish_cycle(gate_outcome=outcome, next_phase=None)
@@ -47,6 +55,12 @@ def advance_phase_cycle(
         last_cycle_outcome=outcome,
     )
     return PhaseCycleAdvanceResult(next_state=next_state, context_core=context_core)
+
+
+def _valid_outcomes(protocol: Protocol, current_phase_name: str) -> list[str]:
+    if protocol.outcomes:
+        return [outcome for outcome in protocol.outcomes if outcome]
+    return [transition.on for transition in protocol.transitions if transition.from_phase == current_phase_name and transition.on]
 
 
 def build_phase_cycle_context_core(

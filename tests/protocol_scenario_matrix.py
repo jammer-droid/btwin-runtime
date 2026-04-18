@@ -18,6 +18,18 @@ class ScenarioTraceCheckpoint:
     cycle_index: int
     next_cycle_index: int | None
 
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "label": self.label,
+            "phase": self.phase,
+            "procedure_key": self.procedure_key,
+            "gate_key": self.gate_key,
+            "outcome": self.outcome,
+            "target_phase": self.target_phase,
+            "cycle_index": self.cycle_index,
+            "next_cycle_index": self.next_cycle_index,
+        }
+
 
 @dataclass(frozen=True)
 class ScenarioVisualExpectation:
@@ -137,6 +149,30 @@ _SCENARIOS: dict[str, ScenarioFixture] = {
         outcome="accept",
         target_phase="decision",
         cycle_index_changes=((1, 1),),
+        visual_procedure=(
+            ScenarioVisualExpectation(key="review-pass", label="Review", status="active"),
+            ScenarioVisualExpectation(key="revise-pass", label="Revise", status="pending"),
+        ),
+        visual_gates=(
+            ScenarioVisualExpectation(
+                key="retry-loop",
+                label="Retry Gate",
+                status="pending",
+                target_phase="review",
+            ),
+            ScenarioVisualExpectation(
+                key="accept-gate",
+                label="Accept Gate",
+                status="completed",
+                target_phase="decision",
+            ),
+            ScenarioVisualExpectation(
+                key="close-gate",
+                label="Close Gate",
+                status="pending",
+                target_phase="decision",
+            ),
+        ),
     ),
     "retry_same_phase": _fixture(
         scenario_id="retry_same_phase",
@@ -186,6 +222,12 @@ _SCENARIOS: dict[str, ScenarioFixture] = {
                 status="pending",
                 target_phase="decision",
             ),
+            ScenarioVisualExpectation(
+                key="close-gate",
+                label="Close Gate",
+                status="pending",
+                target_phase="decision",
+            ),
         ),
     ),
     "blocked_stop_missing_contribution": _fixture(
@@ -231,6 +273,30 @@ _SCENARIOS: dict[str, ScenarioFixture] = {
         outcome="reject",
         target_phase=None,
         cycle_index_changes=(),
+        visual_procedure=(
+            ScenarioVisualExpectation(key="review-pass", label="Review", status="active"),
+            ScenarioVisualExpectation(key="revise-pass", label="Revise", status="pending"),
+        ),
+        visual_gates=(
+            ScenarioVisualExpectation(
+                key="retry-loop",
+                label="Retry Gate",
+                status="pending",
+                target_phase="review",
+            ),
+            ScenarioVisualExpectation(
+                key="accept-gate",
+                label="Accept Gate",
+                status="pending",
+                target_phase="decision",
+            ),
+            ScenarioVisualExpectation(
+                key="close-gate",
+                label="Close Gate",
+                status="pending",
+                target_phase="decision",
+            ),
+        ),
     ),
     "close_path": _fixture(
         scenario_id="close_path",
@@ -253,6 +319,30 @@ _SCENARIOS: dict[str, ScenarioFixture] = {
         outcome="close",
         target_phase="decision",
         cycle_index_changes=((1, 1),),
+        visual_procedure=(
+            ScenarioVisualExpectation(key="review-pass", label="Review", status="active"),
+            ScenarioVisualExpectation(key="revise-pass", label="Revise", status="pending"),
+        ),
+        visual_gates=(
+            ScenarioVisualExpectation(
+                key="retry-loop",
+                label="Retry Gate",
+                status="pending",
+                target_phase="review",
+            ),
+            ScenarioVisualExpectation(
+                key="accept-gate",
+                label="Accept Gate",
+                status="pending",
+                target_phase="decision",
+            ),
+            ScenarioVisualExpectation(
+                key="close-gate",
+                label="Close Gate",
+                status="completed",
+                target_phase="decision",
+            ),
+        ),
     ),
     "attach_seed_first_cycle": _fixture(
         scenario_id="attach_seed_first_cycle",
