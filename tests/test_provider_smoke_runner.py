@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from btwin_core.prototypes.persistent_sessions.harness import run_provider_scenario
+from tests.protocol_scenario_matrix import get_scenario, scenario_protocol_definition
 
 
 pytestmark = pytest.mark.provider_smoke
@@ -373,54 +374,36 @@ def test_provider_smoke_apply_next_reports_missing_contribution_hint(provider_sm
     assert "btwin contribution submit" in payload["hint"]
 
 
-def test_provider_smoke_close_gate_blocks_before_phase_advance(provider_smoke_env) -> None:
+def test_provider_smoke_stop_block_uses_shared_scenario_fixture(provider_smoke_env) -> None:
+    scenario = get_scenario("blocked_stop_missing_contribution")
     state = _setup_provider_smoke_thread(
         provider_smoke_env,
-        protocol_name="provider-smoke-close-gate",
-        protocol_definition={
-            "name": "provider-smoke-close-gate",
-            "phases": [
-                {
-                    "name": "context",
-                    "actions": ["contribute"],
-                    "template": [{"section": "background", "required": True}],
-                },
-                {
-                    "name": "discussion",
-                    "actions": ["discuss"],
-                },
-            ],
-        },
+        protocol_name=scenario.protocol_name,
+        protocol_definition=scenario_protocol_definition("blocked_stop_missing_contribution"),
         participants=("alice",),
     )
 
-    _run_btwin(
+    payload = _run_btwin(
         provider_smoke_env,
-        "contribution",
-        "submit",
+        "workflow",
+        "hook",
+        "--event",
+        "Stop",
         "--thread",
         state["thread_id"],
         "--agent",
         "alice",
-        "--phase",
-        "context",
-        "--content",
-        "## background\nReady for discussion.\n",
-        "--tldr",
-        "context ready",
         "--json",
+        expected_returncode=2,
     )
 
-    response = _api_post(
-        provider_smoke_env,
-        f"/api/threads/{state['thread_id']}/close",
-        {"summary": "done", "decision": "merge"},
-        expected_status=409,
-    )
-
-    detail = response["detail"]
-    assert detail["error"] == "thread_not_closable_from_phase"
-    assert "protocol apply-next" in detail["hint"]
+    assert payload["event"] == "Stop"
+    assert payload["decision"] == "block"
+    assert payload["reason"] == "missing_contribution"
+    assert payload["required_result_recorded"] is False
+    assert scenario.preview_status == "note"
+    assert scenario.live_smoke_required is True
+    assert "baseline runtime guard remains always-on" in payload["overlay"]
 
 
 def test_provider_smoke_contribution_gate_blocks_non_user_decision_actor(provider_smoke_env) -> None:
@@ -597,19 +580,11 @@ def test_provider_smoke_direct_message_gate_blocks_ineligible_target(provider_sm
 
 
 def test_provider_smoke_close_gate_blocks_when_required_contributions_missing(provider_smoke_env) -> None:
+    scenario = get_scenario("close_path")
     state = _setup_provider_smoke_thread(
         provider_smoke_env,
-        protocol_name="provider-smoke-close-missing",
-        protocol_definition={
-            "name": "provider-smoke-close-missing",
-            "phases": [
-                {
-                    "name": "context",
-                    "actions": ["contribute"],
-                    "template": [{"section": "background", "required": True}],
-                }
-            ],
-        },
+        protocol_name=scenario.protocol_name,
+        protocol_definition=scenario_protocol_definition("close_path"),
         participants=("alice",),
     )
 
@@ -769,28 +744,11 @@ def test_provider_smoke_workflow_hook_allows_non_required_actor_in_user_decision
 
 
 def test_attached_scenario_repeats_same_phase_across_multiple_cycles(provider_smoke_env) -> None:
+    scenario = get_scenario("retry_same_phase")
     state = _setup_provider_smoke_thread(
         provider_smoke_env,
-        protocol_name="provider-smoke-repeat-cycle",
-        protocol_definition={
-            "name": "provider-smoke-repeat-cycle",
-            "outcomes": ["retry", "accept"],
-            "phases": [
-                {
-                    "name": "review",
-                    "actions": ["contribute"],
-                    "template": [{"section": "completed", "required": True}],
-                    "procedure": [
-                        {"key": "review-pass", "role": "reviewer", "action": "review", "alias": "Review"},
-                        {"key": "revise-pass", "role": "implementer", "action": "revise", "alias": "Revise"},
-                    ],
-                }
-            ],
-            "transitions": [
-                {"key": "retry-loop", "from": "review", "to": "review", "on": "retry", "alias": "Retry Gate"},
-                {"key": "accept-loop", "from": "review", "to": "review", "on": "accept", "alias": "Accept Gate"},
-            ],
-        },
+        protocol_name=scenario.protocol_name,
+        protocol_definition=scenario_protocol_definition("retry_same_phase"),
         participants=("alice",),
     )
     thread_id = str(state["thread_id"])
@@ -890,11 +848,15 @@ def test_attached_scenario_repeats_same_phase_across_multiple_cycles(provider_sm
         "target_phase": "review",
     }
     assert phase_cycle_payload["visual"]["gates"][1] == {
-        "key": "accept-loop",
+        "key": "accept-gate",
         "label": "Accept Gate",
         "status": "pending",
-        "target_phase": "review",
+        "target_phase": "decision",
     }
+    assert scenario.gate_key == "retry-loop"
+    assert scenario.procedure_key == "review-pass"
+    assert scenario.outcome == "retry"
+    assert scenario.target_phase == "review"
 
     hud_result = _run_btwin_result(provider_smoke_env, "hud", "--thread", thread_id, "--limit", "5")
     assert hud_result.returncode == 0, hud_result.stderr or hud_result.stdout
