@@ -577,28 +577,47 @@ def _synthetic_thread_watch_gate_row(
     state = phase_cycle_payload.get("state")
     if not isinstance(state, dict):
         return None
-    outcome = state.get("last_gate_outcome")
-    if not isinstance(outcome, str) or not outcome.strip():
+    current_phase_name = state.get("phase_name") or thread.get("current_phase")
+    if not isinstance(current_phase_name, str) or not current_phase_name.strip():
         return None
 
-    phase_name = state.get("phase_name") or thread.get("current_phase")
-    if not isinstance(phase_name, str) or not phase_name.strip():
+    outcome = state.get("last_gate_outcome")
+    if not isinstance(outcome, str) or not outcome.strip():
+        outcome = state.get("last_cycle_outcome")
+    if not isinstance(outcome, str) or not outcome.strip():
         return None
 
     cycle_index_value = state.get("cycle_index")
     if not isinstance(cycle_index_value, int) or cycle_index_value < 1:
         return None
 
+    selected_transition = None
+    transition_matches = [
+        transition
+        for transition in protocol.transitions
+        if transition.to == current_phase_name and transition.on == outcome
+    ]
+    if len(transition_matches) == 1:
+        selected_transition = transition_matches[0]
+
+    source_phase_name = selected_transition.from_phase if selected_transition is not None else current_phase_name
     status = state.get("status")
     fallback_cycle_index = None
     fallback_next_cycle_index = None
     if status == "active" and cycle_index_value > 1:
-        fallback_cycle_index = cycle_index_value - 1
+        if selected_transition is not None and selected_transition.to != selected_transition.from_phase:
+            fallback_cycle_index = cycle_index_value
+            fallback_next_cycle_index = cycle_index_value
+        else:
+            fallback_cycle_index = cycle_index_value - 1
+            fallback_next_cycle_index = cycle_index_value
+    elif status == "active" and selected_transition is not None and selected_transition.to != selected_transition.from_phase:
+        fallback_cycle_index = cycle_index_value
         fallback_next_cycle_index = cycle_index_value
 
     cycle_report = _thread_watch_cycle_report(
         {
-            "phase": phase_name,
+            "phase": source_phase_name,
             "cycle_index": fallback_cycle_index,
             "next_cycle_index": fallback_next_cycle_index,
         },
@@ -616,7 +635,7 @@ def _synthetic_thread_watch_gate_row(
             else state.get("last_completed_at")
         ),
         "thread_id": thread.get("thread_id"),
-        "phase": cycle_report.get("phase") if isinstance(cycle_report, dict) else phase_name,
+        "phase": cycle_report.get("phase") if isinstance(cycle_report, dict) else source_phase_name,
         "cycle_index": cycle_report.get("cycle_index") if isinstance(cycle_report, dict) else fallback_cycle_index,
         "next_cycle_index": (
             cycle_report.get("next_cycle_index")
@@ -626,9 +645,13 @@ def _synthetic_thread_watch_gate_row(
         "outcome": outcome,
         "procedure_key": None,
         "procedure_alias": None,
-        "gate_key": None,
-        "gate_alias": None,
-        "target_phase": cycle_report.get("next_phase") if isinstance(cycle_report, dict) else None,
+        "gate_key": selected_transition.visual_key() if selected_transition is not None else None,
+        "gate_alias": selected_transition.visual_label() if selected_transition is not None else None,
+        "target_phase": (
+            cycle_report.get("next_phase")
+            if isinstance(cycle_report, dict)
+            else (selected_transition.to if selected_transition is not None else current_phase_name)
+        ),
         "reason": None,
         "summary": (
             cycle_report.get("summary")

@@ -555,3 +555,105 @@ def test_thread_watch_json_attached_mode_synthesizes_gate_row_without_gate_event
     assert row["gate_alias"] == "Retry Gate"
     assert row["outcome"] == "retry"
     assert row["target_phase"] == "review"
+
+
+def test_thread_watch_json_attached_mode_synthesizes_cross_phase_gate_row_without_gate_event_or_mailbox(
+    tmp_path, monkeypatch
+):
+    project_root = tmp_path / "project"
+    project_data_dir = project_root / ".btwin"
+    shared_data_dir = tmp_path / "shared-btwin"
+    project_root.mkdir()
+
+    WorkflowEventLog(shared_data_dir / "threads" / "thread-1" / "workflow-events.jsonl").append(
+        {
+            "timestamp": "2026-04-15T01:09:23+00:00",
+            "thread_id": "thread-1",
+            "phase": "review",
+            "event_type": "required_result_recorded",
+            "source": "btwin.contribution.submit",
+            "summary": "review contribution recorded",
+        }
+    )
+
+    def fake_api_get(path: str, params: dict | None = None):
+        if path == "/api/threads/thread-1":
+            return {
+                "thread_id": "thread-1",
+                "topic": "Attached accept trace",
+                "protocol": "custom-review",
+                "current_phase": "decision",
+            }
+        if path == "/api/threads/thread-1/status":
+            return {
+                "thread_id": "thread-1",
+                "current_phase": "decision",
+                "agents": [{"name": "alice", "status": "joined"}],
+            }
+        if path == "/api/threads/thread-1/phase-cycle":
+            return {
+                "state": {
+                    "thread_id": "thread-1",
+                    "phase_name": "decision",
+                    "cycle_index": 1,
+                    "procedure_steps": [],
+                    "current_step_label": None,
+                    "last_gate_outcome": None,
+                    "last_cycle_outcome": "accept",
+                    "last_completed_at": "2026-04-15T01:10:02+00:00",
+                    "status": "active",
+                },
+                "visual": {
+                    "procedure": [{"key": "gate", "label": "Gate", "status": "pending"}],
+                    "gates": [],
+                },
+            }
+        if path == "/api/system-mailbox":
+            assert params == {"threadId": "thread-1", "limit": 5}
+            return {"count": 0, "reports": []}
+        if path == "/api/protocols/custom-review":
+            return {
+                "name": "custom-review",
+                "phases": [
+                    {
+                        "name": "review",
+                        "actions": ["contribute"],
+                        "template": [{"section": "completed", "required": True}],
+                        "procedure": [
+                            {"role": "reviewer", "action": "review", "alias": "Review", "key": "review-pass"},
+                            {"role": "implementer", "action": "revise", "alias": "Revise", "key": "revise-pass"},
+                        ],
+                    },
+                    {"name": "decision", "actions": ["decide"]},
+                ],
+                "transitions": [
+                    {"from": "review", "to": "review", "on": "retry", "alias": "Retry Gate", "key": "retry-loop"},
+                    {"from": "review", "to": "decision", "on": "accept", "alias": "Accept Gate", "key": "accept-gate"},
+                ],
+                "outcomes": ["retry", "accept"],
+            }
+        raise AssertionError(f"unexpected path: {path} params={params}")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(project_data_dir))
+    monkeypatch.setattr(main, "_service_data_dir", lambda: shared_data_dir)
+    monkeypatch.setattr(main, "_api_get", fake_api_get)
+
+    result = runner.invoke(app, ["thread", "watch", "thread-1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert [row["kind"] for row in payload["trace"]] == ["result", "gate"]
+
+    row = payload["trace"][-1]
+    assert row["timestamp"] == "2026-04-15T01:10:02+00:00"
+    assert row["source"] == "btwin.thread_watch.synthetic"
+    assert row["phase"] == "review"
+    assert row["cycle_index"] == 1
+    assert row["next_cycle_index"] == 1
+    assert row["procedure_key"] == "review-pass"
+    assert row["procedure_alias"] == "Review"
+    assert row["gate_key"] == "accept-gate"
+    assert row["gate_alias"] == "Accept Gate"
+    assert row["outcome"] == "accept"
+    assert row["target_phase"] == "decision"
