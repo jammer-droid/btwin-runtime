@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -16,6 +17,17 @@ SUPPORTED_PROTOCOL_GUARDS = {
     "direct_target_eligibility",
     "transition_precondition",
 }
+_PROTOCOL_ON_KEY_PATTERN = re.compile(
+    r'^(?P<prefix>\s*(?:-\s+)?)on(?P<suffix>\s*:)',
+    re.MULTILINE,
+)
+
+
+def load_protocol_yaml(path: Path) -> Any:
+    """Load protocol YAML while preserving bare `on:` transition keys."""
+    raw = path.read_text(encoding="utf-8")
+    normalized = _PROTOCOL_ON_KEY_PATTERN.sub(r'\g<prefix>"on"\g<suffix>', raw)
+    return yaml.safe_load(normalized)
 
 
 class ProtocolSection(BaseModel):
@@ -194,7 +206,7 @@ class ProtocolStore:
 
     def _load_file(self, path: Path) -> Protocol | None:
         try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data = load_protocol_yaml(path)
             return Protocol.model_validate(data)
         except (OSError, yaml.YAMLError, ValidationError):
             logger.warning("Failed to load protocol: %s", path)

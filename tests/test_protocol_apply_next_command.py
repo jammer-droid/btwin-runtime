@@ -198,6 +198,71 @@ def test_protocol_next_reports_manual_outcome_needed(tmp_path, monkeypatch):
     assert payload["next_phase"] is None
 
 
+def test_protocol_next_uses_unquoted_on_transitions_from_hand_written_yaml(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    thread_store, thread = _seed_agentless_thread(
+        project_root,
+        "custom-review",
+        participants=["alice"],
+        initial_phase="review",
+    )
+    protocols_dir = project_root / ".btwin" / "protocols"
+    protocols_dir.mkdir(parents=True, exist_ok=True)
+    (protocols_dir / "custom-review.yaml").write_text(
+        """
+name: custom-review
+description: Hand-written custom review protocol.
+phases:
+  - name: review
+    actions: [contribute]
+    template:
+      - section: completed
+        required: true
+  - name: decision
+    actions: [decide]
+transitions:
+  - from: review
+    to: review
+    on: retry
+  - from: review
+    to: decision
+    on: accept
+outcomes: [retry, accept]
+""",
+        encoding="utf-8",
+    )
+    thread_store.submit_contribution(
+        thread["thread_id"],
+        "alice",
+        "review",
+        content="## completed\nNeeds another pass.\n",
+        tldr="review retry",
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    result = runner.invoke(
+        app,
+        [
+            "protocol",
+            "next",
+            "--thread",
+            thread["thread_id"],
+            "--outcome",
+            "retry",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["requested_outcome"] == "retry"
+    assert payload["next_phase"] == "review"
+    assert payload["suggested_action"] == "advance_phase"
+
+
 def test_protocol_next_reports_unsupported_outcome_error(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"

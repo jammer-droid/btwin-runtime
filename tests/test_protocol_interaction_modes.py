@@ -33,6 +33,36 @@ interaction:
     assert proto.interaction.default_actor == "user"
 
 
+def test_protocol_store_preserves_unquoted_on_transition_keys(tmp_path: Path):
+    path = tmp_path / "protocols"
+    path.mkdir()
+    (path / "custom-review.yaml").write_text(
+        """
+name: custom-review
+phases:
+  - name: review
+    actions: [contribute]
+  - name: decision
+    actions: [decide]
+transitions:
+  - from: review
+    to: review
+    on: retry
+  - from: review
+    to: decision
+    on: accept
+outcomes: [retry, accept]
+""",
+        encoding="utf-8",
+    )
+
+    store = ProtocolStore(path)
+    proto = store.get_protocol("custom-review")
+
+    assert proto is not None
+    assert [transition.on for transition in proto.transitions] == ["retry", "accept"]
+
+
 def test_protocol_rejects_unknown_guard_set_reference():
     with pytest.raises(ValidationError, match="guard_set"):
         Protocol.model_validate(
