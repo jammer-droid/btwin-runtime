@@ -20,6 +20,10 @@ def _standalone_config(data_dir: Path) -> BTwinConfig:
     return BTwinConfig(runtime=RuntimeConfig(mode="standalone"), data_dir=data_dir)
 
 
+def _attached_config(data_dir: Path) -> BTwinConfig:
+    return BTwinConfig(runtime=RuntimeConfig(mode="attached"), data_dir=data_dir)
+
+
 def _seed_thread(tmp_path: Path):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"
@@ -318,6 +322,127 @@ def test_thread_watch_json_derives_gate_semantics_from_existing_runtime_state(tm
     assert row["phase"] == "review"
     assert row["cycle_index"] == 1
     assert row["next_cycle_index"] == 2
+    assert row["procedure_key"] == "review-pass"
+    assert row["procedure_alias"] == "Review"
+    assert row["gate_key"] == "retry-loop"
+    assert row["gate_alias"] == "Retry Gate"
+    assert row["outcome"] == "retry"
+    assert row["target_phase"] == "review"
+
+
+def test_thread_watch_json_attached_mode_loads_custom_protocol_from_runtime_api(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_data_dir = project_root / ".btwin"
+    shared_data_dir = tmp_path / "shared-btwin"
+    project_root.mkdir()
+
+    WorkflowEventLog(shared_data_dir / "threads" / "thread-1" / "workflow-events.jsonl").append(
+        {
+            "timestamp": "2026-04-15T01:10:02+00:00",
+            "thread_id": "thread-1",
+            "phase": "review",
+            "event_type": "cycle_gate_completed",
+            "source": "btwin.protocol.apply_next",
+            "cycle_index": 1,
+            "next_cycle_index": 2,
+            "summary": "Phase `review` requested retry; continuing in `review` with active cycle 2.",
+        }
+    )
+
+    protocol_calls = []
+
+    def fake_api_get(path: str, params: dict | None = None):
+        if path == "/api/threads/thread-1":
+            return {
+                "thread_id": "thread-1",
+                "topic": "Attached retry trace",
+                "protocol": "custom-review",
+                "current_phase": "review",
+            }
+        if path == "/api/threads/thread-1/status":
+            return {
+                "thread_id": "thread-1",
+                "current_phase": "review",
+                "agents": [{"name": "alice", "status": "joined"}],
+            }
+        if path == "/api/threads/thread-1/phase-cycle":
+            return {
+                "state": {
+                    "thread_id": "thread-1",
+                    "phase_name": "review",
+                    "cycle_index": 2,
+                    "procedure_steps": ["review", "revise"],
+                    "current_step_label": "review",
+                    "last_gate_outcome": "retry",
+                    "status": "active",
+                },
+                "visual": {
+                    "procedure": [
+                        {"key": "review-pass", "label": "Review", "status": "active"},
+                        {"key": "revise-pass", "label": "Revise", "status": "pending"},
+                        {"key": "gate", "label": "Gate", "status": "pending"},
+                    ],
+                    "gates": [
+                        {"key": "retry-loop", "label": "Retry Gate", "status": "completed", "target_phase": "review"},
+                        {"key": "accept-gate", "label": "Accept Gate", "status": "pending", "target_phase": "decision"},
+                    ],
+                },
+            }
+        if path == "/api/system-mailbox":
+            assert params == {"threadId": "thread-1", "limit": 5}
+            return {
+                "count": 1,
+                "reports": [
+                    {
+                        "thread_id": "thread-1",
+                        "report_type": "cycle_result",
+                        "audience": "monitoring",
+                        "summary": "Phase `review` requested retry; continuing in `review` with active cycle 2.",
+                        "created_at": "2026-04-15T01:10:02+00:00",
+                        "phase": "review",
+                        "protocol": "custom-review",
+                        "next_phase": "review",
+                        "cycle_index": 1,
+                        "next_cycle_index": 2,
+                    }
+                ],
+            }
+        if path == "/api/protocols/custom-review":
+            protocol_calls.append(path)
+            return {
+                "name": "custom-review",
+                "phases": [
+                    {
+                        "name": "review",
+                        "actions": ["contribute"],
+                        "template": [{"section": "completed", "required": True}],
+                        "procedure": [
+                            {"role": "reviewer", "action": "review", "alias": "Review", "key": "review-pass"},
+                            {"role": "implementer", "action": "revise", "alias": "Revise", "key": "revise-pass"},
+                        ],
+                    },
+                    {"name": "decision", "actions": ["decide"]},
+                ],
+                "transitions": [
+                    {"from": "review", "to": "review", "on": "retry", "alias": "Retry Gate", "key": "retry-loop"},
+                    {"from": "review", "to": "decision", "on": "accept", "alias": "Accept Gate", "key": "accept-gate"},
+                ],
+                "outcomes": ["retry", "accept"],
+            }
+        raise AssertionError(f"unexpected path: {path} params={params}")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(project_data_dir))
+    monkeypatch.setattr(main, "_service_data_dir", lambda: shared_data_dir)
+    monkeypatch.setattr(main, "_api_get", fake_api_get)
+
+    result = runner.invoke(app, ["thread", "watch", "thread-1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    row = payload["trace"][-1]
+
+    assert protocol_calls == ["/api/protocols/custom-review"]
     assert row["procedure_key"] == "review-pass"
     assert row["procedure_alias"] == "Review"
     assert row["gate_key"] == "retry-loop"

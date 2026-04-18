@@ -365,10 +365,24 @@ def _thread_watch_kind_for_event(event_type: str) -> str:
     return "phase"
 
 
-def _thread_watch_protocol(thread: dict[str, object]) -> Protocol | None:
+def _thread_watch_protocol(
+    thread: dict[str, object],
+    config: BTwinConfig | None = None,
+) -> Protocol | None:
+    current_config = config or _get_config()
     protocol_name = thread.get("protocol")
     if not isinstance(protocol_name, str) or not protocol_name.strip():
         return None
+    if _use_attached_api(current_config):
+        try:
+            payload = _api_get(f"/api/protocols/{protocol_name}")
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            try:
+                return Protocol.model_validate(payload)
+            except Exception:
+                pass
     return _get_protocol_store().get_protocol(protocol_name)
 
 
@@ -554,7 +568,7 @@ def _build_thread_watch_trace_rows(
 ) -> list[dict[str, object]]:
     thread_id = str(thread.get("thread_id") or "")
     current_config = _get_config()
-    protocol = _thread_watch_protocol(thread)
+    protocol = _thread_watch_protocol(thread, current_config)
     phase_cycle_payload = _phase_cycle_payload_for_thread(thread_id, thread=thread, config=current_config)
     reports = _list_system_mailbox_reports(thread_id=thread_id, limit=max(len(events), 5), config=current_config)
     rows: list[dict[str, object]] = []
