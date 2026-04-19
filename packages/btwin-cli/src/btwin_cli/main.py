@@ -37,7 +37,6 @@ from datetime import datetime, timezone
 import typer
 import yaml
 from rich import box
-from rich.columns import Columns
 from rich.console import Console, Group, RenderableType
 from rich.layout import Layout
 from rich.live import Live
@@ -2573,6 +2572,19 @@ def _hud_panel(
     )
 
 
+def _hud_panel_row(
+    panels: list[RenderableType],
+    *,
+    ratios: list[int] | None = None,
+) -> Table:
+    grid = Table.grid(expand=True)
+    column_ratios = ratios or [1] * len(panels)
+    for ratio in column_ratios[: len(panels)]:
+        grid.add_column(ratio=ratio)
+    grid.add_row(*panels)
+    return grid
+
+
 def _parse_hud_sections(lines: list[str]) -> tuple[list[str], list[tuple[str, list[str]]]]:
     intro: list[str] = []
     sections: list[tuple[str, list[str]]] = []
@@ -2908,22 +2920,20 @@ def _render_hud_validation_focus_renderable(state: _HudNavigatorState, limit: in
             padding=(0, 1),
         ),
         _hud_panel("Validation Cockpit", summary_lines, border_style="bright_blue"),
-        Columns(
+        _hud_panel_row(
             [
                 _hud_panel("Decision", decision_lines, border_style="bright_magenta"),
                 _hud_panel("Validation", validation_lines, border_style="cyan"),
             ],
-            equal=True,
-            expand=True,
+            ratios=[1, 1],
         ),
         _hud_panel("Expected vs Actual", section_map.get("Expected vs Actual", ["-"]), border_style="green"),
-        Columns(
+        _hud_panel_row(
             [
                 _hud_panel("Validation Cases", section_map.get("Validation Cases", ["-"]), border_style="yellow"),
                 _hud_panel("Trace / Reason Excerpt", visible_trace, border_style="bright_yellow"),
             ],
-            equal=True,
-            expand=True,
+            ratios=[5, 7],
         ),
         Panel(
             _hud_renderable_lines(
