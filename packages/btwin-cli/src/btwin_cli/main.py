@@ -1450,7 +1450,7 @@ def _render_thread_detail(
 
     if phase_progression:
         lines.append(f"Phase flow  {phase_progression}")
-    if procedure_progression != "-":
+    if procedure_progression:
         lines.append(f"Procedure flow  {procedure_progression}")
 
     _append_detail_section(lines, "Protocol / Phase")
