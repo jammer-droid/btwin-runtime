@@ -1496,9 +1496,6 @@ def _render_thread_detail(
     else:
         lines.append("No agent sessions")
 
-    _append_detail_section(lines, "Quick Actions")
-    lines.append("[v] validation   [l] live trace   [c] close thread")
-    lines.append("[b] back         [t] threads      [q] quit")
     return "\n".join(lines)
 
 
@@ -2299,6 +2296,129 @@ def _hud_report_label(report: dict[str, object]) -> str:
     return report_type.replace("_", " ")
 
 
+_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+
+def _spinner_frame(animation_phase: int) -> str:
+    return _SPINNER_FRAMES[animation_phase % len(_SPINNER_FRAMES)]
+
+
+_AGENT_WORKING_STATUSES = {
+    "working",
+    "contributing",
+    "active",
+    "running",
+    "busy",
+    "attempt",
+    "attempting",
+}
+_AGENT_WAITING_STATUSES = {
+    "waiting",
+    "blocked",
+    "pending",
+    "idle_quorum",
+}
+_AGENT_IDLE_STATUSES = {
+    "joined",
+    "attached",
+    "ready",
+    "idle",
+    "-",
+    "",
+}
+
+
+def _agent_state_descriptor(
+    status: str,
+    session: dict[str, object] | None,
+) -> tuple[str, str]:
+    """Return (logical_state, transport_summary) for an agent."""
+    transport = _runtime_session_summary(session) or ""
+    if isinstance(session, dict):
+        if session.get("recovery_pending"):
+            return "recovering", transport
+        if session.get("degraded") or session.get("fallback_transport_involved"):
+            return "degraded", transport
+    normalized = (status or "").strip().lower()
+    if normalized in _AGENT_WORKING_STATUSES:
+        return "working", transport
+    if normalized in _AGENT_WAITING_STATUSES:
+        return "waiting", transport
+    if normalized in _AGENT_IDLE_STATUSES:
+        return "idle", transport
+    # unknown status -> treat as informational idle
+    return "idle", transport
+
+
+def _agent_glyph_text(logical_state: str, animation_phase: int) -> Text:
+    if logical_state == "working":
+        return Text(_spinner_frame(animation_phase), style="bold cyan")
+    if logical_state == "waiting":
+        symbol = "◉" if animation_phase % 2 == 0 else "◎"
+        return Text(symbol, style="bold yellow")
+    if logical_state == "degraded":
+        return Text("▲", style="bold red")
+    if logical_state == "recovering":
+        symbol = "↻" if animation_phase % 2 == 0 else "↺"
+        return Text(symbol, style="bold yellow")
+    return Text("○", style="dim")
+
+
+def _render_agent_session_text_rows(
+    agents: object,
+    runtime_sessions: dict[str, dict[str, object]],
+    animation_phase: int,
+) -> list[Text]:
+    rows: list[Text] = []
+    if isinstance(agents, list):
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            agent_name = str(agent.get("name") or "").strip()
+            if not agent_name:
+                continue
+            status = str(agent.get("status") or "-").strip() or "-"
+            session = runtime_sessions.get(agent_name)
+            logical, transport = _agent_state_descriptor(status, session)
+            rows.append(_compose_agent_row(agent_name, logical, status, transport, animation_phase))
+    if rows:
+        return rows
+    for agent_name, session in runtime_sessions.items():
+        if not isinstance(session, dict):
+            continue
+        status = str(session.get("status") or "-").strip() or "-"
+        logical, transport = _agent_state_descriptor(status, session)
+        rows.append(_compose_agent_row(agent_name, logical, status, transport, animation_phase))
+    return rows
+
+
+def _compose_agent_row(
+    agent_name: str,
+    logical_state: str,
+    raw_status: str,
+    transport: str,
+    animation_phase: int,
+) -> Text:
+    glyph = _agent_glyph_text(logical_state, animation_phase)
+    label_style = {
+        "working": "bold cyan",
+        "waiting": "yellow",
+        "degraded": "bold red",
+        "recovering": "yellow",
+        "idle": "dim",
+    }.get(logical_state, "")
+    row = Text()
+    row.append_text(glyph)
+    row.append(" ")
+    row.append(f"{agent_name:<8}", style="bold")
+    row.append(logical_state, style=label_style)
+    if raw_status and raw_status.lower() != logical_state:
+        row.append(f" · {raw_status}", style="dim")
+    if transport:
+        row.append(f"  {transport}", style="dim")
+    return row
+
+
 def _protocol_progress_node(label: str, status: str, *, animation_phase: int) -> str:
     if status == "completed":
         return f"[green]● {escape(label)}[/green]"
@@ -2617,21 +2737,24 @@ def _hud_label_value_text(
     return text
 
 
-def _hud_progress_value_text(value: str) -> Text:
+def _hud_progress_value_text(value: str, animation_phase: int = 0) -> Text:
     text = Text()
     for index, segment in enumerate(value.split(" · ")):
         if index:
             text.append(" · ", style="dim")
         clean_segment = segment.strip()
         if clean_segment.startswith("• "):
-            text.append("• ", style="bold bright_cyan")
+            text.append(f"{_spinner_frame(animation_phase)} ", style="bold cyan")
             text.append(clean_segment[2:], style="bold bright_cyan")
         else:
             text.append(clean_segment, style="dim")
     return text
 
 
-def _hud_thread_pulse_renderables(intro_lines: list[str]) -> list[RenderableType | str]:
+def _hud_thread_pulse_renderables(
+    intro_lines: list[str],
+    animation_phase: int = 0,
+) -> list[RenderableType | str]:
     renderables: list[RenderableType | str] = []
     protocol_prefix = _detail_summary_prefix("Protocol")
     phase_prefix = _detail_summary_prefix("Phase")
@@ -2643,12 +2766,12 @@ def _hud_thread_pulse_renderables(intro_lines: list[str]) -> list[RenderableType
             continue
         if line.startswith(phase_prefix):
             text = _hud_label_value_text("Phase", "", value_style="none")
-            text.append_text(_hud_progress_value_text(line[len(phase_prefix) :]))
+            text.append_text(_hud_progress_value_text(line[len(phase_prefix) :], animation_phase))
             renderables.append(text)
             continue
         if line.startswith(procedure_prefix):
             text = _hud_label_value_text("Procedure", "", value_style="none")
-            text.append_text(_hud_progress_value_text(line[len(procedure_prefix) :]))
+            text.append_text(_hud_progress_value_text(line[len(procedure_prefix) :], animation_phase))
             renderables.append(text)
             continue
         if line.startswith(cycle_prefix):
@@ -2775,6 +2898,7 @@ def _render_hud_threads_renderable(
     state: _HudNavigatorState,
     config: BTwinConfig,
     limit: int,
+    animation_phase: int = 0,
 ) -> RenderableType:
     threads = _list_hud_threads(config)
     state.thread_index = _clamp_index(state.thread_index, len(threads))
@@ -2799,7 +2923,7 @@ def _render_hud_threads_renderable(
         row_style = "bold cyan" if index == state.thread_index else None
         table.add_row(prefix, topic, protocol, phase, style=row_style)
 
-    preview_lines = ["Filter: all"]
+    preview_lines: list[RenderableType | str] = []
     focused = threads[state.thread_index]
     focused_thread_id = focused.get("thread_id")
     if isinstance(focused_thread_id, str):
@@ -2820,6 +2944,18 @@ def _render_hud_threads_renderable(
                 if isinstance(state_payload, dict):
                     cycle_index = state_payload.get("cycle_index")
                     step_label = state_payload.get("current_step_label")
+            phase_progression = _detail_phase_progression(thread)
+            procedure_progression = None
+            if isinstance(phase_cycle_payload, dict):
+                phase_definition = _thread_watch_protocol_phase(
+                    _get_protocol_store().get_protocol(str(thread.get("protocol") or "")) if thread.get("protocol") else None,
+                    phase,
+                )
+                procedure_progression = _detail_procedure_progression(
+                    phase_cycle_payload,
+                    phase_definition,
+                    step_label,
+                )
             primary_row = _detail_primary_trace_row(trace_rows)
             gate_label = ""
             if isinstance(primary_row, dict):
@@ -2828,49 +2964,65 @@ def _render_hud_threads_renderable(
                 agent_name: session
                 for agent_name, session in _runtime_sessions_for_thread(focused_thread_id, config)
             }
-            agent_parts: list[str] = []
-            agents = status_summary.get("agents", [])
-            if isinstance(agents, list):
-                for agent in agents:
-                    if not isinstance(agent, dict):
-                        continue
-                    agent_name = str(agent.get("name") or "").strip()
-                    if not agent_name:
-                        continue
-                    status = str(agent.get("status") or "-").strip() or "-"
-                    runtime_summary = _runtime_session_summary(runtime_sessions.get(agent_name))
-                    if runtime_summary:
-                        agent_parts.append(f"{agent_name}={status}({runtime_summary})")
-                    else:
-                        agent_parts.append(f"{agent_name}={status}")
+
+            heading = Text()
+            heading.append(str(thread.get("topic") or focused_thread_id), style="bold")
+            heading.append("  ")
+            heading.append(str(thread.get("protocol") or "-"), style="dim")
+            preview_lines.append(heading)
+
+            if phase_progression:
+                phase_text = Text()
+                phase_text.append("phase  ", style="bold")
+                phase_text.append_text(
+                    _hud_progress_value_text(phase_progression.replace(" - ", " · "), animation_phase)
+                )
+                preview_lines.append(phase_text)
+            else:
+                phase_text = Text()
+                phase_text.append("phase  ", style="bold")
+                phase_text.append(phase)
+                if isinstance(cycle_index, int):
+                    phase_text.append(f"  cycle {cycle_index}", style="dim")
+                preview_lines.append(phase_text)
+
+            if procedure_progression:
+                proc_text = Text()
+                proc_text.append("step   ", style="bold")
+                proc_text.append_text(
+                    _hud_progress_value_text(procedure_progression.replace(" - ", " · "), animation_phase)
+                )
+                preview_lines.append(proc_text)
+
+            if gate_label:
+                gate_text = Text()
+                gate_text.append("gate   ", style="bold")
+                gate_text.append(gate_label, style="magenta")
+                preview_lines.append(gate_text)
+
+            agent_rows = _render_agent_session_text_rows(
+                status_summary.get("agents", []),
+                runtime_sessions,
+                animation_phase,
+            )
+            if agent_rows:
+                preview_lines.append(Text(""))
+                preview_lines.extend(agent_rows)
+
             latest_summary = ""
             if trace_rows and isinstance(trace_rows[-1], dict):
                 latest_summary = str(trace_rows[-1].get("summary") or "").strip()
-
-            preview_lines.extend(
-                [
-                    "",
-                    f"{thread.get('topic') or focused_thread_id} · {thread.get('protocol') or '-'}",
-                    f"thread_id: {focused_thread_id}",
-                ]
-            )
-            phase_line = f"phase: {phase}"
-            if isinstance(cycle_index, int):
-                phase_line += f" (cycle {cycle_index})"
-            if isinstance(step_label, str) and step_label.strip():
-                phase_line += f" · step={step_label}"
-            preview_lines.append(phase_line)
-            if gate_label:
-                preview_lines.append(f"gate: {gate_label}")
-            if agent_parts:
-                preview_lines.append(f"agents: {'  '.join(agent_parts)}")
             if latest_summary:
-                preview_lines.append(f"last: {latest_summary}")
+                preview_lines.append(Text(""))
+                last_text = Text()
+                last_text.append("last   ", style="bold")
+                last_text.append(_truncate_hud_text(latest_summary, limit=60), style="dim")
+                preview_lines.append(last_text)
 
     body = Layout(name="threads-body")
     body.split_row(
         Layout(_hud_panel("Threads / Sessions", [_hud_renderable_line("Filter: all"), Text(""), table], border_style="cyan"), name="threads-list", ratio=3),
-        Layout(_hud_panel("Selected Workflow", preview_lines, border_style="magenta"), name="threads-preview", ratio=2),
+        Layout(_hud_panel("Selected Workflow", preview_lines or ["No selection"], border_style="magenta"), name="threads-preview", ratio=2),
     )
     return _render_hud_shell_renderable(
         "Threads / Sessions",
@@ -2880,7 +3032,11 @@ def _render_hud_threads_renderable(
     )
 
 
-def _render_hud_thread_detail_renderable(state: _HudNavigatorState, limit: int) -> RenderableType:
+def _render_hud_thread_detail_renderable(
+    state: _HudNavigatorState,
+    limit: int,
+    animation_phase: int = 0,
+) -> RenderableType:
     if state.selected_thread_id is None:
         return _render_hud_shell_renderable(
             "Thread Detail",
@@ -2922,20 +3078,44 @@ def _render_hud_thread_detail_renderable(state: _HudNavigatorState, limit: int) 
         window_size = max(_hud_thread_view_window_size() - 6, 5)
         visible_activity = activity_lines[state.thread_log_offset : state.thread_log_offset + window_size] or activity_lines[-window_size:]
 
+    runtime_sessions = {
+        agent_name: session
+        for agent_name, session in _runtime_sessions_for_thread(state.selected_thread_id, config)
+    }
+    agent_rows: list[RenderableType | str] = list(
+        _render_agent_session_text_rows(
+            status_summary.get("agents", []),
+            runtime_sessions,
+            animation_phase,
+        )
+    )
+    if not agent_rows:
+        agent_rows = ["No agent sessions"]
+
     body = Layout(name="thread-detail-body")
     body.split_column(
         Layout(
-            _hud_panel(protocol_title, _hud_thread_pulse_renderables(intro_lines), border_style="bright_blue"),
+            _hud_panel(
+                protocol_title,
+                _hud_thread_pulse_renderables(intro_lines, animation_phase),
+                border_style="bright_blue",
+            ),
             name="thread-summary",
             size=max(len(intro_lines) + 2, 8),
         ),
-        Layout(_hud_panel("Recent Activity", visible_activity, border_style="bright_yellow"), name="thread-activity", ratio=4),
-        Layout(name="thread-support-row", ratio=2),
-        Layout(_hud_panel("Quick Actions", section_map.get("Quick Actions", ["[b] back  [q] quit"]), border_style="bright_black"), name="thread-actions", size=6),
+        Layout(name="thread-body-row", ratio=1),
     )
-    body["thread-support-row"].split_row(
-        Layout(_hud_panel("Agent Sessions", section_map.get("Agent Sessions", ["No agent sessions"])), name="thread-sessions", ratio=1),
-        Layout(_hud_panel("Protocol Notes", ["Validation moved to [v] focus", "Use live trace for raw event inspection"], border_style="bright_black"), name="thread-notes", ratio=1),
+    body["thread-body-row"].split_row(
+        Layout(
+            _hud_panel("Recent Activity", visible_activity, border_style="bright_yellow"),
+            name="thread-activity",
+            ratio=3,
+        ),
+        Layout(
+            _hud_panel("Agent Sessions", agent_rows, border_style="cyan"),
+            name="thread-sessions",
+            ratio=2,
+        ),
     )
     return _render_hud_shell_renderable(
         "Thread Detail",
@@ -3179,11 +3359,13 @@ def _render_hud_navigator_renderable(
     state: _HudNavigatorState,
     config: BTwinConfig,
     limit: int,
+    animation_phase: int | None = None,
 ) -> RenderableType:
+    phase = animation_phase if animation_phase is not None else int(time.time() * 2)
     if state.screen == "threads":
-        return _render_hud_threads_renderable(state, config, limit)
+        return _render_hud_threads_renderable(state, config, limit, phase)
     if state.screen == "thread":
-        return _render_hud_thread_detail_renderable(state, limit)
+        return _render_hud_thread_detail_renderable(state, limit, phase)
     if state.screen == "validation":
         return _render_hud_validation_focus_renderable(state, limit)
     if state.screen == "live":
@@ -3652,6 +3834,7 @@ def _apply_hud_key(
 def _run_hud_navigator(limit: int, interval: float) -> None:
     config = _get_config()
     state = _HudNavigatorState()
+    animation_tick = min(interval, 0.2)
     try:
         with _HudRawInput(), Live(
             _render_hud_navigator_renderable(state, config, limit),
@@ -3661,7 +3844,7 @@ def _run_hud_navigator(limit: int, interval: float) -> None:
         ) as live:
             while True:
                 live.update(_render_hud_navigator_renderable(state, config, limit), refresh=True)
-                key = _read_hud_key(interval)
+                key = _read_hud_key(animation_tick)
                 if _apply_hud_key(state, key, config):
                     return
     except KeyboardInterrupt:

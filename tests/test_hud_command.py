@@ -2141,11 +2141,10 @@ def test_hud_thread_detail_renders_status_policy_activity_and_hints(monkeypatch,
     assert "BLOCKED" in rendered
     assert "Collect Feedback" in rendered
     assert "Recent Activity" in rendered
-    assert "Quick Actions" in rendered
-    assert "[l] live trace" in rendered
+    assert "Quick Actions" not in rendered
+    assert "Protocol Notes" not in rendered
     assert "Exit blocked" in rendered
     assert "LGTM with small nits" in rendered
-    assert "[v] validation" in rendered
 
 
 def test_hud_thread_detail_omits_procedure_flow_when_procedure_data_missing(monkeypatch, tmp_path):
@@ -2571,10 +2570,10 @@ def test_hud_thread_detail_renders_cockpit_sections_in_stable_order(monkeypatch,
 
     assert lines[0] == "B-TWIN HUD :: Thread Detail :: mode=attached"
     assert index_of("Topic") < index_of("Protocol") < index_of("Phase") < index_of("Status")
-    assert index_of("Status") < index_of("Recent Activity") < index_of("Agent Sessions") < index_of("Quick Actions")
+    assert index_of("Status") < index_of("Recent Activity") < index_of("Agent Sessions")
     assert lines[index_of("Recent Activity") + 1] == "---------------"
     assert lines[index_of("Agent Sessions") + 1] == "--------------"
-    assert lines[index_of("Quick Actions") + 1] == "-------------"
+    assert "Quick Actions" not in rendered
     assert "Protocol / Phase" not in rendered
     assert "Gate / Guard Focus" not in rendered
     assert "thread-1" not in lines[1]
