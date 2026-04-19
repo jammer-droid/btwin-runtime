@@ -232,6 +232,19 @@ btwin init
 And in `~/.codex/config.toml` you should see a `mcp_servers.btwin` entry that
 launches `btwin mcp-proxy`.
 
+### MCP Reconnect Troubleshooting
+
+If `btwin serve-api` is running but an existing Codex session still shows
+`Transport closed` or cannot call B-TWIN MCP tools, restart Codex in a fresh
+session first. Existing Codex sessions can keep a stale MCP transport alive
+even after `btwin init`, service restarts, or local config changes.
+
+If the problem only happens in one repository, also check for a project-local
+`.codex/config.toml` that overrides `mcp_servers.btwin`. A repo-local Codex
+config takes precedence over the global `~/.codex/config.toml`, so a stale
+project override can make Codex launch a different `btwin mcp-proxy` command
+than the one you expect from the global setup.
+
 ## Local Development Setup
 
 If you already have a repo clone with `uv sync` and only want a manual,
