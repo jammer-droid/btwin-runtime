@@ -1206,6 +1206,79 @@ def _detail_primary_validation_reason(validation: dict[str, object]) -> str:
     return "validation warning"
 
 
+def _detail_progress_label(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    if any(char.isupper() for char in text) or " " in text:
+        return text
+    return text.replace("-", " ").replace("_", " ").title()
+
+
+def _detail_progression_line(items: list[tuple[str, bool]]) -> str:
+    if not items:
+        return "-"
+    parts: list[str] = []
+    for label, is_current in items:
+        clean_label = str(label or "").strip()
+        if not clean_label:
+            continue
+        parts.append(f"[{clean_label}]" if is_current else clean_label)
+    return " - ".join(parts) if parts else "-"
+
+
+def _detail_phase_progression(thread: dict[str, object]) -> str | None:
+    protocol_name = str(thread.get("protocol") or "").strip()
+    if not protocol_name:
+        return None
+    protocol = _get_protocol_store().get_protocol(protocol_name)
+    if protocol is None or not getattr(protocol, "phases", None):
+        return None
+    current_phase = str(thread.get("current_phase") or "").strip()
+    items = [
+        (_detail_progress_label(getattr(phase, "name", "")), getattr(phase, "name", "") == current_phase)
+        for phase in protocol.phases
+    ]
+    rendered = _detail_progression_line(items)
+    return rendered if rendered != "-" else None
+
+
+def _detail_procedure_progression(
+    phase_cycle_payload: dict[str, object] | None,
+    phase_definition: ProtocolPhase | None,
+    step_label: object,
+) -> str | None:
+    procedure_items: list[tuple[str, bool]] = []
+    visual = phase_cycle_payload.get("visual") if isinstance(phase_cycle_payload, dict) else None
+    procedure_nodes = visual.get("procedure") if isinstance(visual, dict) else None
+    if isinstance(procedure_nodes, list) and procedure_nodes:
+        for node in procedure_nodes:
+            if not isinstance(node, dict):
+                continue
+            label = str(node.get("label") or node.get("key") or "").strip()
+            if not label:
+                continue
+            status = str(node.get("status") or "").strip().lower()
+            procedure_items.append((label, status == "active"))
+
+    if phase_definition is not None and phase_definition.procedure and len(procedure_items) <= 1:
+        current_step = str(step_label or "").strip()
+        procedure_items = []
+        for step in phase_definition.procedure:
+            label = step.visual_label()
+            if not label:
+                continue
+            step_keys = {
+                step.visual_key(),
+                step.action,
+                label,
+            }
+            procedure_items.append((label, current_step in {key for key in step_keys if key}))
+
+    rendered = _detail_progression_line(procedure_items)
+    return rendered if rendered != "-" else None
+
+
 def _render_thread_detail(
     thread: dict[str, object],
     status_summary: dict[str, object],
@@ -1216,7 +1289,9 @@ def _render_thread_detail(
     thread_id = str(thread.get("thread_id", ""))
     topic = str(thread.get("topic") or thread_id)
     protocol = str(thread.get("protocol") or "-")
+    protocol_definition = _get_protocol_store().get_protocol(protocol) if protocol and protocol != "-" else None
     phase = str(thread.get("current_phase") or "-")
+    phase_definition = _thread_watch_protocol_phase(protocol_definition, phase)
     state = phase_cycle_payload.get("state") if isinstance(phase_cycle_payload, dict) else {}
     compiled = _detail_compiled_policy(phase_cycle_payload, trace_rows)
     status_text, next_hint = _detail_status_summary(trace_rows, phase_cycle_payload)
@@ -1366,23 +1441,17 @@ def _render_thread_detail(
     if isinstance(primary_row, dict):
         current_guard = str(primary_row.get("baseline_guard") or primary_row.get("reason") or "").strip()
 
-    procedure_path_items: list[str] = []
-    if isinstance(phase_cycle_payload, dict):
-        visual = phase_cycle_payload.get("visual")
-        procedure_nodes = visual.get("procedure") if isinstance(visual, dict) else None
-        if isinstance(procedure_nodes, list):
-            for node in procedure_nodes:
-                if not isinstance(node, dict):
-                    continue
-                label = str(node.get("label") or node.get("key") or "").strip()
-                if not label:
-                    continue
-                status = str(node.get("status") or "").strip()
-                if status == "active":
-                    label = f"{label} [now]"
-                elif status == "completed":
-                    label = f"{label} [done]"
-                procedure_path_items.append(label)
+    phase_progression = _detail_phase_progression(thread)
+    procedure_progression = _detail_procedure_progression(
+        phase_cycle_payload,
+        phase_definition,
+        step_label,
+    )
+
+    if phase_progression:
+        lines.append(f"Phase flow  {phase_progression}")
+    if procedure_progression != "-":
+        lines.append(f"Procedure flow  {procedure_progression}")
 
     _append_detail_section(lines, "Protocol / Phase")
     lines.append(f"phase: {phase}")
@@ -1397,8 +1466,6 @@ def _render_thread_detail(
         lines.append(cycle_status)
     if isinstance(step_label, str) and step_label.strip():
         lines.append(f"step: {step_label}")
-    if procedure_path_items:
-        _append_detail_bullets(lines, "procedure_path", procedure_path_items)
 
     _append_detail_section(lines, "Gate / Guard Focus")
     lines.append(f"status: {status_text}")

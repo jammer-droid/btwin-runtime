@@ -1517,6 +1517,36 @@ def test_hud_thread_detail_renderable_shows_validation_panel(monkeypatch, tmp_pa
     monkeypatch.setattr(main, "_workflow_event_log", lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})())
     monkeypatch.setattr(
         main,
+        "_get_protocol_store",
+        lambda: type(
+            "FakeProtocolStore",
+            (),
+            {
+                "get_protocol": lambda self, name: Protocol(
+                    name="review-loop",
+                    phases=[
+                        ProtocolPhase(name="context"),
+                        ProtocolPhase(
+                            name="review",
+                            procedure=[
+                                {"role": "facilitator", "action": "announce", "alias": "Announce"},
+                                {
+                                    "role": "reviewer",
+                                    "action": "collect-feedback",
+                                    "alias": "Collect Feedback",
+                                    "key": "collect-feedback",
+                                },
+                                {"role": "facilitator", "action": "resolve", "alias": "Resolve"},
+                            ],
+                        ),
+                        ProtocolPhase(name="decision"),
+                    ],
+                )
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        main,
         "_thread_watch_payload",
         lambda thread, status, events: {
             "phase_cycle": {
@@ -1536,6 +1566,8 @@ def test_hud_thread_detail_renderable_shows_validation_panel(monkeypatch, tmp_pa
 
     rendered = _renderable_to_text(renderable)
     assert "Thread Detail" in rendered
+    assert "Context - [Review] - Decision" in rendered
+    assert "Announce - [Collect Feedback] - Resolve" in rendered
     assert "Protocol / Phase" in rendered
     assert "Gate / Guard Focus" in rendered
     assert "Recent Activity" in rendered
@@ -1941,6 +1973,36 @@ def test_hud_thread_detail_renders_status_policy_activity_and_hints(monkeypatch,
     )
     monkeypatch.setattr(
         main,
+        "_get_protocol_store",
+        lambda: type(
+            "FakeProtocolStore",
+            (),
+            {
+                "get_protocol": lambda self, name: Protocol(
+                    name="review-loop",
+                    phases=[
+                        ProtocolPhase(name="context"),
+                        ProtocolPhase(
+                            name="review",
+                            procedure=[
+                                {"role": "facilitator", "action": "announce", "alias": "Announce"},
+                                {
+                                    "role": "reviewer",
+                                    "action": "collect-feedback",
+                                    "alias": "Collect Feedback",
+                                    "key": "collect-feedback",
+                                },
+                                {"role": "facilitator", "action": "resolve", "alias": "Resolve"},
+                            ],
+                        ),
+                        ProtocolPhase(name="decision"),
+                    ],
+                )
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        main,
         "_thread_watch_payload",
         lambda thread, status, events: {
             "phase_cycle": {
@@ -2011,13 +2073,14 @@ def test_hud_thread_detail_renders_status_policy_activity_and_hints(monkeypatch,
     assert "Status    BLOCKED" in rendered
     assert "Compiled  policy=review-outcomes; outcomes=retry, accept, close; gate=Retry Gate" in rendered
     assert "Next action  submit contribution" in rendered
+    assert "Phase flow  Context - [Review] - Decision" in rendered
+    assert "Procedure flow  Announce - [Collect Feedback] - Resolve" in rendered
     assert "Protocol / Phase" in rendered
     assert "Gate / Guard Focus" in rendered
     assert "Agent Sessions" in rendered
     assert "cycle: 3" in rendered
     assert "step: collect-feedback" in rendered
-    assert "procedure_path:" in rendered
-    assert "  - Announce" in rendered
+    assert "Procedure flow  Announce - [Collect Feedback] - Resolve" in rendered
     assert "guard: contribution_required" in rendered
     assert "gate: Retry Gate" in rendered
     assert "jun  waiting" in rendered
