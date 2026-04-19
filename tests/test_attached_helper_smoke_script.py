@@ -49,10 +49,10 @@ def test_attached_helper_smoke_script_runs_end_to_end(tmp_path):
     assert "thread-watch close trace: outcome=close gate=close-gate target=decision cycle=1->1" in result.stdout
     assert "thread-watch seed trace: cycle=1 procedure=review-pass target=review" in result.stdout
     assert "mailbox reports: 2" in result.stdout
-    assert "hud cycle feed visible: True" in result.stdout
-    assert "hud protocol progress visible: True" in result.stdout
+    assert "hud recent activity visible: True" in result.stdout
+    assert "hud phase progression visible: True" in result.stdout
     assert "hud procedure visible: True" in result.stdout
-    assert "hud gate visuals visible: True" in result.stdout
+    assert "hud agent session visible: True" in result.stdout
     assert "runtime clear: False" in result.stdout
     assert "mailbox reports after clear: 2" in result.stdout
     assert "agent inbox: pending=0 diagnostics=True" in result.stdout

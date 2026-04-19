@@ -1044,10 +1044,7 @@ def _detail_validation_snapshot(
     elif "WARN" in statuses:
         verdict = "WARN"
 
-    deduped_reasons: list[str] = []
-    for reason in reasons:
-        if reason and reason not in deduped_reasons:
-            deduped_reasons.append(reason)
+    deduped_reasons = _dedupe_validation_reasons(reasons)
 
     return {
         "verdict": verdict,
@@ -1206,6 +1203,36 @@ def _detail_primary_validation_reason(validation: dict[str, object]) -> str:
     return "validation warning"
 
 
+def _dedupe_validation_reasons(reasons: list[str]) -> list[str]:
+    has_specific_missing_reason = any(
+        isinstance(reason, str)
+        and " missing " in reason.lower()
+        and "missing contribution for current phase" not in reason.lower()
+        for reason in reasons
+    )
+    has_trace_gap_reason = any(
+        isinstance(reason, str) and reason.strip().lower() == "no recent workflow trace"
+        for reason in reasons
+    )
+
+    deduped_reasons: list[str] = []
+    seen: set[str] = set()
+    for reason in reasons:
+        text = str(reason or "").strip()
+        if not text:
+            continue
+        lowered = " ".join(text.lower().rstrip(".").split())
+        if lowered == "missing contribution for current phase" and has_specific_missing_reason:
+            continue
+        if lowered == "no recent workflow events" and has_trace_gap_reason:
+            continue
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        deduped_reasons.append(text)
+    return deduped_reasons
+
+
 _VALIDATION_CHECK_DEFINITIONS: dict[str, tuple[str, str]] = {
     "protocol_match": ("Protocol match", "thread has known protocol + phase"),
     "trajectory_match": ("Trajectory match", "recent workflow trace exists"),
@@ -1308,6 +1335,7 @@ def _validation_compliance_rows(
                     "verdict": str(status).upper(),
                 }
             )
+    case_rows: list[dict[str, str]] = []
     for case_line in validation_cases:
         if ":" not in case_line:
             continue
@@ -1315,7 +1343,7 @@ def _validation_compliance_rows(
         key = raw_name.strip()
         display, expected = _VALIDATION_CASE_DEFINITIONS.get(key, (key, "-"))
         actual, verdict = _case_expected_actual(key, raw_value.strip())
-        rows.append(
+        case_rows.append(
             {
                 "group": "case",
                 "key": key,
@@ -1325,6 +1353,9 @@ def _validation_compliance_rows(
                 "verdict": verdict,
             }
         )
+    verdict_rank = {"FAIL": 0, "WARN": 1, "PASS": 2, "SKIP": 3}
+    case_rows.sort(key=lambda row: verdict_rank.get(row["verdict"], 4))
+    rows.extend(case_rows)
     return rows
 
 
@@ -1674,49 +1705,9 @@ def _render_validation_focus(
     protocol = str(thread.get("protocol") or "-")
     phase = str(thread.get("current_phase") or "-")
     state = phase_cycle_payload.get("state") if isinstance(phase_cycle_payload, dict) else {}
-    compiled = _detail_compiled_policy(phase_cycle_payload, trace_rows)
     status_text, next_hint = _detail_status_summary(trace_rows, phase_cycle_payload)
-    primary_row = _detail_primary_trace_row(trace_rows)
     cycle_index = state.get("cycle_index") if isinstance(state, dict) else None
     step_label = state.get("current_step_label") if isinstance(state, dict) else None
-
-    procedure_summary = None
-    current_procedure = None
-    current_gate = None
-    if isinstance(phase_cycle_payload, dict):
-        visual = phase_cycle_payload.get("visual")
-        if isinstance(visual, dict):
-            procedure_nodes = visual.get("procedure")
-            if isinstance(procedure_nodes, list) and procedure_nodes:
-                procedure_summary = " -> ".join(
-                    str(node.get("label", node.get("key", "")))
-                    for node in procedure_nodes
-                    if isinstance(node, dict)
-                )
-                for node in procedure_nodes:
-                    if not isinstance(node, dict):
-                        continue
-                    label = str(node.get("label") or node.get("key") or "").strip()
-                    if not label:
-                        continue
-                    if node.get("status") == "active" or (
-                        isinstance(step_label, str) and step_label and node.get("key") == step_label
-                    ):
-                        current_procedure = label
-                        break
-            gate_nodes = visual.get("gates")
-            if isinstance(gate_nodes, list) and gate_nodes:
-                for node in gate_nodes:
-                    if not isinstance(node, dict):
-                        continue
-                    label = str(node.get("label") or node.get("key") or "").strip()
-                    if not label:
-                        continue
-                    if node.get("status") == "active":
-                        current_gate = label
-                        break
-    if current_gate is None and isinstance(primary_row, dict):
-        current_gate = str(primary_row.get("gate_alias") or primary_row.get("gate_key") or "").strip() or None
 
     runtime_sessions = {
         agent_name: session
@@ -1732,41 +1723,13 @@ def _render_validation_focus(
     )
     validation_cases = _detail_validation_cases(thread, trace_rows, protocol_plan)
     primary_reason = _detail_primary_validation_reason(validation)
+    compliance_rows = _validation_compliance_rows(validation, validation_cases, runtime_sessions, trace_rows)
     next_action_token = str(validation["next_expected_action"] or "").strip()
     next_action_display = (
         _humanize_hud_action(next_action_token)
         if next_action_token and next_action_token != "none"
         else next_hint
     )
-
-    expected_bits: list[str] = []
-    outcome_policy = compiled.get("outcome_policy")
-    policy_outcomes = compiled.get("policy_outcomes")
-    if outcome_policy:
-        expected_bits.append(f"policy={outcome_policy}")
-    if isinstance(policy_outcomes, list) and policy_outcomes:
-        expected_bits.append(f"outcomes={', '.join(str(item) for item in policy_outcomes)}")
-    if isinstance(current_procedure, str) and current_procedure:
-        expected_bits.append(f"procedure={current_procedure}")
-    elif isinstance(procedure_summary, str) and procedure_summary:
-        expected_bits.append(f"procedure={procedure_summary}")
-    if isinstance(cycle_index, int):
-        expected_bits.append(f"cycle={cycle_index}")
-    if next_action_display:
-        expected_bits.append(f"next={next_action_display}")
-
-    actual_bits: list[str] = [status_text]
-    if isinstance(primary_row, dict):
-        primary_headline = _workflow_event_heading(primary_row)[1]
-        if primary_headline:
-            actual_bits.append(primary_headline)
-        primary_summary = str(primary_row.get("summary") or "").strip()
-        if primary_summary:
-            actual_bits.append(primary_summary)
-    elif trace_rows:
-        latest_summary = str(trace_rows[-1].get("summary") or "").strip()
-        if latest_summary:
-            actual_bits.append(latest_summary)
 
     lines = [
         f"Topic     {topic}",
@@ -1780,54 +1743,22 @@ def _render_validation_focus(
         f"Next action  {next_action_display}",
     ]
 
-    _append_detail_section(lines, "Why this verdict")
+    _append_detail_section(lines, "Rule Compliance")
     lines.append(f"verdict: {validation['verdict']}")
     lines.append(f"primary_reason: {primary_reason}")
-    for check_name, check_status in validation["checks"]:
-        lines.append(f"{check_name}: {check_status}")
     lines.append(f"next expected action: {validation['next_expected_action']}")
+    for row in compliance_rows:
+        lines.append(f"{row['name']}: {row['verdict']}")
+        lines.append(f"  expected: {row['expected']}")
+        lines.append(f"  actual: {row['actual']}")
 
-    _append_detail_section(lines, "Expected vs Actual")
-    if expected_bits:
-        _append_detail_bullets(lines, "expected", expected_bits)
-    else:
-        lines.append("expected: protocol / thread context only")
-    if actual_bits:
-        _append_detail_bullets(lines, "actual", actual_bits)
-    else:
-        lines.append("actual: no recent workflow activity")
-
-    _append_detail_section(lines, "Validation Cases")
-    lines.extend(validation_cases)
-
-    _append_detail_section(lines, "Trace / Reason Excerpt")
-    if trace_rows:
-        excerpt_rows: list[dict[str, object]] = []
-        if isinstance(primary_row, dict):
-            excerpt_rows.append(primary_row)
-        for row in reversed(trace_rows[-5:]):
-            if row is primary_row:
-                continue
-            if isinstance(row, dict):
-                excerpt_rows.append(row)
-        for row in excerpt_rows[:3]:
-            timestamp = str(row.get("timestamp", ""))
-            time_label = timestamp[11:19] if "T" in timestamp and len(timestamp) >= 19 else timestamp
-            _lane, headline, _headline_style = _workflow_event_heading(row)
-            lines.append(f"{time_label}  {headline}")
-            summary = str(row.get("summary") or "").strip()
-            if summary:
-                lines.append(f"summary: {_truncate_hud_text(summary)}")
-            reason = str(row.get("reason") or "").strip()
-            if reason:
-                lines.append(f"reason: {reason}")
-            if isinstance(current_gate, str) and current_gate:
-                lines.append(f"gate: {current_gate}")
-    elif validation["reasons"]:
-        for reason in validation["reasons"]:
-            lines.append(f"reason: {reason}")
-    else:
-        lines.append("No validation trace excerpts")
+    reasons = validation.get("reasons")
+    if validation["verdict"] != "PASS" and isinstance(reasons, list) and reasons:
+        _append_detail_section(lines, "Reasons")
+        for reason in reasons:
+            text = str(reason or "").strip()
+            if text:
+                lines.append(f"- {text}")
 
     return "\n".join(lines)
 
@@ -2710,6 +2641,79 @@ class _HudNavigatorState:
     thread_log_offset: int = 0
 
 
+def _hud_snapshot_identity(state: _HudNavigatorState) -> tuple[object, ...]:
+    if state.screen == "threads":
+        return (state.screen, state.thread_index)
+    return (state.screen, state.selected_thread_id)
+
+
+def _snapshot_hud_navigator_screen(
+    state: _HudNavigatorState,
+    config: BTwinConfig,
+    limit: int,
+) -> dict[str, object]:
+    snapshot: dict[str, object] = {
+        "screen": state.screen,
+        "thread_index": state.thread_index,
+        "selected_thread_id": state.selected_thread_id,
+    }
+
+    if state.screen == "threads":
+        threads = _list_hud_threads(config)
+        snapshot["threads"] = threads
+        thread_index = _clamp_index(state.thread_index, len(threads))
+        snapshot["thread_index"] = thread_index
+        if threads:
+            focused = threads[thread_index]
+            focused_thread_id = focused.get("thread_id")
+            if isinstance(focused_thread_id, str):
+                thread, status_summary, lookup_error = _try_load_thread_snapshot(focused_thread_id, config)
+                snapshot["focused_thread_id"] = focused_thread_id
+                snapshot["thread"] = thread
+                snapshot["status_summary"] = status_summary
+                snapshot["lookup_error"] = lookup_error
+                if lookup_error is None and isinstance(thread, dict) and isinstance(status_summary, dict):
+                    snapshot["trace_payload"] = _thread_watch_payload(
+                        thread,
+                        status_summary,
+                        _workflow_event_log(focused_thread_id).list_events(limit=min(limit, 5)),
+                    )
+                    snapshot["runtime_sessions"] = {
+                        agent_name: session
+                        for agent_name, session in _runtime_sessions_for_thread(focused_thread_id, config)
+                    }
+        return snapshot
+
+    if state.selected_thread_id is None:
+        return snapshot
+
+    thread, status_summary, lookup_error = _try_load_thread_snapshot(state.selected_thread_id, config)
+    snapshot["thread"] = thread
+    snapshot["status_summary"] = status_summary
+    snapshot["lookup_error"] = lookup_error
+    if lookup_error is not None or not isinstance(thread, dict) or not isinstance(status_summary, dict):
+        return snapshot
+
+    snapshot["trace_payload"] = _thread_watch_payload(
+        thread,
+        status_summary,
+        _workflow_event_log(state.selected_thread_id).list_events(limit=limit),
+    )
+    snapshot["runtime_sessions"] = {
+        agent_name: session
+        for agent_name, session in _runtime_sessions_for_thread(state.selected_thread_id, config)
+    }
+    if state.screen == "validation":
+        snapshot["protocol_plan"] = _try_protocol_next_snapshot(state.selected_thread_id, config)
+    elif state.screen == "live":
+        snapshot["mailbox_reports"] = _list_system_mailbox_reports(
+            thread_id=state.selected_thread_id,
+            limit=limit,
+            config=config,
+        )
+    return snapshot
+
+
 _HUD_SCREEN_HEADER_LINES = 2
 _HUD_SCREEN_FOOTER_LINES = 3
 
@@ -3037,8 +3041,11 @@ def _render_hud_threads_renderable(
     config: BTwinConfig,
     limit: int,
     animation_phase: int = 0,
+    snapshot: dict[str, object] | None = None,
 ) -> RenderableType:
-    threads = _list_hud_threads(config)
+    threads = snapshot.get("threads") if isinstance(snapshot, dict) else None
+    if not isinstance(threads, list):
+        threads = _list_hud_threads(config)
     state.thread_index = _clamp_index(state.thread_index, len(threads))
     if not threads:
         return _render_hud_shell_renderable(
@@ -3065,13 +3072,19 @@ def _render_hud_threads_renderable(
     focused = threads[state.thread_index]
     focused_thread_id = focused.get("thread_id")
     if isinstance(focused_thread_id, str):
-        thread, status_summary, lookup_error = _try_load_thread_snapshot(focused_thread_id, config)
+        thread = snapshot.get("thread") if isinstance(snapshot, dict) and snapshot.get("focused_thread_id") == focused_thread_id else None
+        status_summary = snapshot.get("status_summary") if isinstance(snapshot, dict) and snapshot.get("focused_thread_id") == focused_thread_id else None
+        lookup_error = snapshot.get("lookup_error") if isinstance(snapshot, dict) and snapshot.get("focused_thread_id") == focused_thread_id else None
+        if thread is None or status_summary is None:
+            thread, status_summary, lookup_error = _try_load_thread_snapshot(focused_thread_id, config)
         if lookup_error is None and isinstance(thread, dict) and isinstance(status_summary, dict):
-            trace_payload = _thread_watch_payload(
-                thread,
-                status_summary,
-                _workflow_event_log(focused_thread_id).list_events(limit=min(limit, 5)),
-            )
+            trace_payload = snapshot.get("trace_payload") if isinstance(snapshot, dict) and snapshot.get("focused_thread_id") == focused_thread_id else None
+            if not isinstance(trace_payload, dict):
+                trace_payload = _thread_watch_payload(
+                    thread,
+                    status_summary,
+                    _workflow_event_log(focused_thread_id).list_events(limit=min(limit, 5)),
+                )
             trace_rows = trace_payload.get("trace", []) if isinstance(trace_payload, dict) else []
             phase_cycle_payload = trace_payload.get("phase_cycle") if isinstance(trace_payload, dict) else None
             phase = str(thread.get("current_phase") or "-")
@@ -3098,10 +3111,12 @@ def _render_hud_threads_renderable(
             gate_label = ""
             if isinstance(primary_row, dict):
                 gate_label = str(primary_row.get("gate_alias") or primary_row.get("gate_key") or "").strip()
-            runtime_sessions = {
-                agent_name: session
-                for agent_name, session in _runtime_sessions_for_thread(focused_thread_id, config)
-            }
+            runtime_sessions = snapshot.get("runtime_sessions") if isinstance(snapshot, dict) and snapshot.get("focused_thread_id") == focused_thread_id else None
+            if not isinstance(runtime_sessions, dict):
+                runtime_sessions = {
+                    agent_name: session
+                    for agent_name, session in _runtime_sessions_for_thread(focused_thread_id, config)
+                }
 
             heading = Text()
             heading.append(str(thread.get("topic") or focused_thread_id), style="bold")
@@ -3174,6 +3189,7 @@ def _render_hud_thread_detail_renderable(
     state: _HudNavigatorState,
     limit: int,
     animation_phase: int = 0,
+    snapshot: dict[str, object] | None = None,
 ) -> RenderableType:
     if state.selected_thread_id is None:
         return _render_hud_shell_renderable(
@@ -3182,7 +3198,11 @@ def _render_hud_thread_detail_renderable(
             "t threads  q quit",
         )
     config = _get_config()
-    thread, status_summary, lookup_error = _try_load_thread_snapshot(state.selected_thread_id, config)
+    thread = snapshot.get("thread") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    status_summary = snapshot.get("status_summary") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    lookup_error = snapshot.get("lookup_error") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    if thread is None or status_summary is None:
+        thread, status_summary, lookup_error = _try_load_thread_snapshot(state.selected_thread_id, config)
     if lookup_error is not None:
         return _render_hud_shell_renderable(
             "Thread Detail",
@@ -3195,11 +3215,13 @@ def _render_hud_thread_detail_renderable(
             config=config,
         )
 
-    trace_payload = _thread_watch_payload(
-        thread,
-        status_summary,
-        _workflow_event_log(state.selected_thread_id).list_events(limit=limit),
-    )
+    trace_payload = snapshot.get("trace_payload") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    if not isinstance(trace_payload, dict):
+        trace_payload = _thread_watch_payload(
+            thread,
+            status_summary,
+            _workflow_event_log(state.selected_thread_id).list_events(limit=limit),
+        )
     detail_lines = _render_thread_detail(
         thread,
         status_summary,
@@ -3216,10 +3238,12 @@ def _render_hud_thread_detail_renderable(
         window_size = max(_hud_thread_view_window_size() - 6, 5)
         visible_activity = activity_lines[state.thread_log_offset : state.thread_log_offset + window_size] or activity_lines[-window_size:]
 
-    runtime_sessions = {
-        agent_name: session
-        for agent_name, session in _runtime_sessions_for_thread(state.selected_thread_id, config)
-    }
+    runtime_sessions = snapshot.get("runtime_sessions") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    if not isinstance(runtime_sessions, dict):
+        runtime_sessions = {
+            agent_name: session
+            for agent_name, session in _runtime_sessions_for_thread(state.selected_thread_id, config)
+        }
     agent_rows: list[RenderableType | str] = list(
         _render_agent_session_text_rows(
             status_summary.get("agents", []),
@@ -3263,7 +3287,11 @@ def _render_hud_thread_detail_renderable(
     )
 
 
-def _render_hud_validation_focus_renderable(state: _HudNavigatorState, limit: int) -> RenderableType:
+def _render_hud_validation_focus_renderable(
+    state: _HudNavigatorState,
+    limit: int,
+    snapshot: dict[str, object] | None = None,
+) -> RenderableType:
     if state.selected_thread_id is None:
         return _render_hud_shell_renderable(
             "Validation Focus",
@@ -3271,7 +3299,11 @@ def _render_hud_validation_focus_renderable(state: _HudNavigatorState, limit: in
             "d detail  t threads  q quit",
         )
     config = _get_config()
-    thread, status_summary, lookup_error = _try_load_thread_snapshot(state.selected_thread_id, config)
+    thread = snapshot.get("thread") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    status_summary = snapshot.get("status_summary") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    lookup_error = snapshot.get("lookup_error") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    if thread is None or status_summary is None:
+        thread, status_summary, lookup_error = _try_load_thread_snapshot(state.selected_thread_id, config)
     if lookup_error is not None:
         return _render_hud_shell_renderable(
             "Validation Focus",
@@ -3284,18 +3316,24 @@ def _render_hud_validation_focus_renderable(state: _HudNavigatorState, limit: in
             config=config,
         )
 
-    trace_payload = _thread_watch_payload(
-        thread,
-        status_summary,
-        _workflow_event_log(state.selected_thread_id).list_events(limit=limit),
-    )
+    trace_payload = snapshot.get("trace_payload") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    if not isinstance(trace_payload, dict):
+        trace_payload = _thread_watch_payload(
+            thread,
+            status_summary,
+            _workflow_event_log(state.selected_thread_id).list_events(limit=limit),
+        )
     phase_cycle_payload = trace_payload.get("phase_cycle") if isinstance(trace_payload, dict) else None
     trace_rows = trace_payload.get("trace", []) if isinstance(trace_payload, dict) else []
-    runtime_sessions = {
-        agent_name: session
-        for agent_name, session in _runtime_sessions_for_thread(state.selected_thread_id, config)
-    }
-    protocol_plan = _try_protocol_next_snapshot(state.selected_thread_id, config)
+    runtime_sessions = snapshot.get("runtime_sessions") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    if not isinstance(runtime_sessions, dict):
+        runtime_sessions = {
+            agent_name: session
+            for agent_name, session in _runtime_sessions_for_thread(state.selected_thread_id, config)
+        }
+    protocol_plan = snapshot.get("protocol_plan") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    if not isinstance(protocol_plan, dict):
+        protocol_plan = _try_protocol_next_snapshot(state.selected_thread_id, config)
     validation = _detail_validation_snapshot(
         thread,
         phase_cycle_payload,
@@ -3414,25 +3452,51 @@ def _render_hud_validation_focus_renderable(state: _HudNavigatorState, limit: in
     )
 
 
-def _render_hud_live_trace_renderable(state: _HudNavigatorState, limit: int) -> RenderableType:
+_KIND_STYLE = {
+    "gate": "magenta",
+    "outcome": "yellow",
+    "phase": "cyan",
+    "attempt": "bright_cyan",
+    "result": "white",
+    "guard": "red",
+    "error": "red",
+    "runtime": "blue",
+    "message": "white",
+}
+
+
+def _kind_style(kind: str) -> str:
+    return _KIND_STYLE.get(kind.strip().lower(), "")
+
+
+def _render_hud_live_trace_renderable(
+    state: _HudNavigatorState,
+    limit: int,
+    animation_phase: int = 0,
+    snapshot: dict[str, object] | None = None,
+) -> RenderableType:
     if state.selected_thread_id is None:
         return _render_hud_shell_renderable(
-            "Live Trace / Diagnostics",
-            _hud_panel("Live Trace / Diagnostics", ["No thread selected."], border_style="yellow"),
-            "d detail  t threads  q quit",
+            "Live Trace",
+            _hud_panel("Live Trace", ["No thread selected."], border_style="yellow"),
+            "[T] threads  [D] detail  [:] cmd",
         )
 
     config = _get_config()
-    thread, status_summary, lookup_error = _try_load_thread_snapshot(state.selected_thread_id, config)
+    thread = snapshot.get("thread") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    status_summary = snapshot.get("status_summary") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    lookup_error = snapshot.get("lookup_error") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    if thread is None or status_summary is None:
+        thread, status_summary, lookup_error = _try_load_thread_snapshot(state.selected_thread_id, config)
     if lookup_error is not None:
         return _render_hud_shell_renderable(
-            "Live Trace / Diagnostics",
+            "Live Trace",
             _hud_panel(
-                "Live Trace / Diagnostics",
+                "Live Trace",
                 [f"Thread   {state.selected_thread_id}", f"Status   {lookup_error}"],
                 border_style="red",
             ),
-            "d detail  t threads  q quit",
+            "[T] threads  [D] detail",
             config=config,
         )
 
@@ -3442,96 +3506,116 @@ def _render_hud_live_trace_renderable(state: _HudNavigatorState, limit: int) -> 
         _workflow_event_log(state.selected_thread_id).list_events(limit=limit),
     )
     trace_rows = trace_payload["trace"]
-    runtime_sessions = {
-        agent_name: session
-        for agent_name, session in _runtime_sessions_for_thread(state.selected_thread_id, config)
-    }
-    mailbox_reports = _list_system_mailbox_reports(thread_id=state.selected_thread_id, limit=limit, config=config)
     display_rows = [row for row in reversed(trace_rows) if isinstance(row, dict)]
-    table_window = max(_hud_thread_view_window_size() - 6, 5)
+    total_rows = len(display_rows)
+    table_window = max(_hud_thread_view_window_size() - 10, 5)
     visible_rows = display_rows[state.thread_log_offset : state.thread_log_offset + table_window]
     selected_row = visible_rows[0] if visible_rows else (display_rows[0] if display_rows else None)
 
-    trace_table = Table(box=box.SIMPLE_HEAD, expand=True, show_header=True, header_style="bold")
+    # Header strip: LIVE spinner + row count + thread context
+    header_row = Text()
+    header_row.append(f"{_spinner_frame(animation_phase)} ", style="bold green")
+    header_row.append("LIVE", style="bold green")
+    header_row.append(f"   rows {total_rows}", style="dim")
+    if total_rows > table_window:
+        start = state.thread_log_offset + 1
+        end = min(state.thread_log_offset + len(visible_rows), total_rows)
+        header_row.append(f"   window {start}-{end}", style="dim")
+    header_row.append("   ")
+    header_row.append(str(thread.get("topic") or state.selected_thread_id), style="bold")
+    header_row.append("  ")
+    header_row.append(str(thread.get("protocol") or "-"), style="dim")
+    header_row.append("  phase=", style="dim")
+    header_row.append(str(thread.get("current_phase") or "-"), style="cyan")
+
+    # Trace table
+    trace_table = Table(box=box.SIMPLE_HEAD, expand=True, show_header=True, header_style="bold", pad_edge=False)
+    trace_table.add_column("", width=1, no_wrap=True)
     trace_table.add_column("TIME", width=8, no_wrap=True)
     trace_table.add_column("KIND", width=10, no_wrap=True)
     trace_table.add_column("PHASE", width=10, no_wrap=True)
     trace_table.add_column("ACTOR", width=12, no_wrap=True)
-    trace_table.add_column("PAYLOAD", ratio=1)
+    trace_table.add_column("PAYLOAD", ratio=1, no_wrap=False)
     for row in visible_rows:
         timestamp = str(row.get("timestamp") or "")
         time_label = timestamp[11:19] if "T" in timestamp and len(timestamp) >= 19 else timestamp or "--:--:--"
+        kind_raw = str(row.get("kind") or "-")
+        kind_cell = Text(kind_raw, style=_kind_style(kind_raw))
+        marker = Text("▸", style="bold cyan") if row is selected_row else Text(" ")
         trace_table.add_row(
-            time_label,
-            str(row.get("kind") or "-"),
-            str(row.get("phase") or "-"),
-            _hud_live_trace_actor(row),
-            _hud_live_trace_payload_text(row),
+            marker,
+            Text(time_label, style="dim"),
+            kind_cell,
+            Text(str(row.get("phase") or "-"), style="dim" if str(row.get("phase") or "-") == "-" else ""),
+            Text(_hud_live_trace_actor(row)),
+            Text(_hud_live_trace_payload_text(row)),
         )
 
-    inspector_lines = []
+    # Row inspector — semantic fields, no raw JSON dump
+    inspector_renderables: list[RenderableType | str] = []
     if isinstance(selected_row, dict):
-        inspector_lines.append(f"kind: {selected_row.get('kind') or '-'}")
-        compiled_items = [
-            ("outcome_policy", selected_row.get("outcome_policy")),
-            (
-                "outcome_emitters",
-                ", ".join(str(item) for item in selected_row.get("outcome_emitters", []))
-                if isinstance(selected_row.get("outcome_emitters"), list)
-                else None,
-            ),
-            (
-                "policy_outcomes",
-                ", ".join(str(item) for item in selected_row.get("policy_outcomes", []))
-                if isinstance(selected_row.get("policy_outcomes"), list)
-                else None,
-            ),
-        ]
-        for key, value in compiled_items:
-            if value:
-                inspector_lines.append(f"{key}: {value}")
-        raw_payload = {
-            key: value
-            for key, value in selected_row.items()
-            if key in {"agent", "baseline_guard", "gate_key", "kind", "outcome", "phase", "reason", "summary", "target_phase", "timestamp"}
-            and value not in (None, "", [])
-        }
-        inspector_lines.append(f"raw: {json.dumps(raw_payload, sort_keys=True)}")
-    else:
-        inspector_lines.append("No trace rows")
+        inspector_timestamp = str(selected_row.get("timestamp") or "")
+        inspector_time = inspector_timestamp[11:19] if "T" in inspector_timestamp and len(inspector_timestamp) >= 19 else inspector_timestamp or "--:--:--"
+        inspector_kind = str(selected_row.get("kind") or "-")
+        title_row = Text()
+        title_row.append(inspector_kind, style=f"bold {_kind_style(inspector_kind)}" or "bold")
+        title_row.append(f"   {inspector_time}", style="dim")
+        inspector_renderables.append(title_row)
 
-    session_parts: list[str] = []
-    agents = status_summary.get("agents", [])
-    if isinstance(agents, list):
-        for agent in agents:
-            if not isinstance(agent, dict):
-                continue
-            agent_name = str(agent.get("name") or "").strip()
-            if not agent_name:
-                continue
-            status = str(agent.get("status") or "-").strip() or "-"
-            runtime_summary = _runtime_session_summary(runtime_sessions.get(agent_name))
-            if runtime_summary:
-                session_parts.append(f"{agent_name}={status}({runtime_summary})")
-            else:
-                session_parts.append(f"{agent_name}={status}")
-    session_lines = [f"Sessions  {'  '.join(session_parts)}" if session_parts else "Sessions  none"]
-    if mailbox_reports:
-        session_lines.append(f"Mailbox   {len(mailbox_reports)}")
+        def _add_field(label: str, value: object, value_style: str = "") -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            line = Text()
+            line.append(f"{label:<9}", style="bold")
+            line.append(text, style=value_style)
+            inspector_renderables.append(line)
+
+        actor_val = _hud_live_trace_actor(selected_row)
+        if actor_val and actor_val != "-":
+            _add_field("actor", actor_val)
+        _add_field("phase", selected_row.get("phase"), "cyan")
+        _add_field("outcome", selected_row.get("outcome"), "yellow")
+        target_phase = str(selected_row.get("target_phase") or "").strip()
+        if target_phase:
+            _add_field("target", target_phase, "cyan")
+        gate_label = str(selected_row.get("gate_alias") or selected_row.get("gate_key") or "").strip()
+        if gate_label:
+            _add_field("gate", gate_label, "magenta")
+        guard = str(selected_row.get("baseline_guard") or "").strip()
+        if guard:
+            _add_field("guard", guard, "red")
+        reason = str(selected_row.get("reason") or "").strip()
+        if reason and reason != selected_row.get("summary"):
+            _add_field("reason", reason)
+        summary = str(selected_row.get("summary") or "").strip()
+        if summary:
+            _add_field("summary", summary)
+    else:
+        inspector_renderables.append(Text("No trace rows", style="dim"))
 
     body = Layout(name="live-trace-body")
-    body.split_row(
-        Layout(_hud_panel("Live Trace / Diagnostics", [Text(""), trace_table], border_style="cyan"), name="live-trace-main", ratio=3),
-        Layout(name="live-trace-side", ratio=2),
-    )
-    body["live-trace-side"].split_column(
-        Layout(_hud_panel("Row Inspector", inspector_lines, border_style="magenta"), name="live-inspector", ratio=2),
-        Layout(_hud_panel("Sessions", session_lines, border_style="yellow"), name="live-sessions", ratio=1),
+    body.split_column(
+        Layout(
+            _hud_panel("Live", [header_row], border_style="bright_blue"),
+            name="live-header",
+            size=3,
+        ),
+        Layout(
+            _hud_panel("Events", [trace_table], border_style="cyan"),
+            name="live-trace-main",
+            ratio=3,
+        ),
+        Layout(
+            _hud_panel("Row detail", inspector_renderables, border_style="magenta"),
+            name="live-inspector",
+            size=min(len(inspector_renderables) + 2, 10),
+        ),
     )
     return _render_hud_shell_renderable(
-        "Live Trace / Diagnostics",
+        "Live Trace",
         body,
-        "up/down scroll  pgup/pgdn page  home/end jump",
+        "j/k select  J latest  [D] detail  [T] threads  [:] cmd",
         config=config,
     )
 
@@ -3541,16 +3625,17 @@ def _render_hud_navigator_renderable(
     config: BTwinConfig,
     limit: int,
     animation_phase: int | None = None,
+    snapshot: dict[str, object] | None = None,
 ) -> RenderableType:
     phase = animation_phase if animation_phase is not None else int(time.time() * 2)
     if state.screen == "threads":
-        return _render_hud_threads_renderable(state, config, limit, phase)
+        return _render_hud_threads_renderable(state, config, limit, phase, snapshot=snapshot)
     if state.screen == "thread":
-        return _render_hud_thread_detail_renderable(state, limit, phase)
+        return _render_hud_thread_detail_renderable(state, limit, phase, snapshot=snapshot)
     if state.screen == "validation":
-        return _render_hud_validation_focus_renderable(state, limit)
+        return _render_hud_validation_focus_renderable(state, limit, snapshot=snapshot)
     if state.screen == "live":
-        return _render_hud_live_trace_renderable(state, limit)
+        return _render_hud_live_trace_renderable(state, limit, phase, snapshot=snapshot)
     return _render_hud_menu_renderable(state)
 
 
@@ -4016,15 +4101,45 @@ def _run_hud_navigator(limit: int, interval: float) -> None:
     config = _get_config()
     state = _HudNavigatorState()
     animation_tick = min(interval, 0.2)
+    refresh_interval = max(interval, 0.01)
+    initial_now = time.monotonic()
+    snapshot = _snapshot_hud_navigator_screen(state, config, limit)
+    snapshot_key = _hud_snapshot_identity(state)
+    last_refresh_at = initial_now
     try:
         with _HudRawInput(), Live(
-            _render_hud_navigator_renderable(state, config, limit),
+            _render_hud_navigator_renderable(
+                state,
+                config,
+                limit,
+                animation_phase=int(initial_now * 5),
+                snapshot=snapshot,
+            ),
             console=console,
             auto_refresh=False,
             screen=True,
         ) as live:
             while True:
-                live.update(_render_hud_navigator_renderable(state, config, limit), refresh=True)
+                now = time.monotonic()
+                current_snapshot_key = _hud_snapshot_identity(state)
+                if (
+                    snapshot is None
+                    or current_snapshot_key != snapshot_key
+                    or (now - last_refresh_at) >= refresh_interval
+                ):
+                    snapshot = _snapshot_hud_navigator_screen(state, config, limit)
+                    snapshot_key = current_snapshot_key
+                    last_refresh_at = now
+                live.update(
+                    _render_hud_navigator_renderable(
+                        state,
+                        config,
+                        limit,
+                        animation_phase=int(now * 5),
+                        snapshot=snapshot,
+                    ),
+                    refresh=True,
+                )
                 key = _read_hud_key(animation_tick)
                 if _apply_hud_key(state, key, config):
                     return

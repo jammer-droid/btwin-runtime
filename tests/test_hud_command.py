@@ -1672,7 +1672,22 @@ def test_hud_validation_focus_uses_protocol_next_for_validation_gap(monkeypatch,
         ),
     )
     monkeypatch.setattr(main, "_workflow_event_log", lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})())
-    monkeypatch.setattr(main, "_thread_watch_payload", lambda thread, status, events: {"phase_cycle": {"state": {"cycle_index": 1, "current_step_label": "gate"}}, "trace": []})
+    monkeypatch.setattr(
+        main,
+        "_thread_watch_payload",
+        lambda thread, status, events: {
+            "phase_cycle": {"state": {"cycle_index": 1, "current_step_label": "gate"}},
+            "trace": [
+                {
+                    "timestamp": "2026-04-19T12:04:28Z",
+                    "kind": "gate",
+                    "phase": "analysis",
+                    "reason": "missing_contribution",
+                    "summary": "Missing contribution for current phase.",
+                }
+            ],
+        },
+    )
     monkeypatch.setattr(main, "_runtime_sessions_for_thread", lambda thread_id, current_config: [])
     monkeypatch.setattr(
         main,
@@ -1689,10 +1704,42 @@ def test_hud_validation_focus_uses_protocol_next_for_validation_gap(monkeypatch,
 
     assert "Validation verdict  WARN" in rendered
     assert "Primary reason  jun missing scope, findings" in rendered
-    assert "required_contribution: WARN" in rendered
+    assert "Rule Compliance" in rendered
+    assert "Required contribution: WARN" in rendered
     assert "primary_reason: jun missing scope, findings" in rendered
     assert "next expected action: submit_contribution" in rendered
     assert "Next action  submit contribution" in rendered
+    assert "Reasons" in rendered
+    assert "- jun missing scope, findings" in rendered
+    assert "Why this verdict" not in rendered
+    assert "Validation Cases" not in rendered
+    assert "Trace / Reason Excerpt" not in rendered
+
+
+def test_validation_compliance_rows_prioritize_active_cases_above_skips():
+    validation = {
+        "checks": [("protocol_match", "PASS")],
+        "reasons": [],
+        "verdict": "PASS",
+        "next_expected_action": "none",
+    }
+    validation_cases = [
+        "happy_path_accept: not triggered",
+        "retry_same_phase: PASS",
+        "missing_contribution_blocked: not triggered",
+        "close_requires_summary: ready",
+    ]
+
+    rows = main._validation_compliance_rows(validation, validation_cases, runtime_sessions={}, trace_rows=[])
+
+    case_rows = [row for row in rows if row["group"] == "case"]
+
+    assert [row["key"] for row in case_rows] == [
+        "retry_same_phase",
+        "happy_path_accept",
+        "missing_contribution_blocked",
+        "close_requires_summary",
+    ]
 
 
 def test_run_hud_navigator_uses_renderable_builder(monkeypatch, tmp_path):
@@ -1719,11 +1766,62 @@ def test_run_hud_navigator_uses_renderable_builder(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "Live", FakeLive)
     monkeypatch.setattr(main, "_HudRawInput", lambda: type("C", (), {"__enter__": lambda self: self, "__exit__": lambda self, exc_type, exc, tb: False})())
     monkeypatch.setattr(main, "_read_hud_key", lambda interval: "quit")
-    monkeypatch.setattr(main, "_render_hud_navigator_renderable", lambda state, current_config, limit: {"kind": "rich-hud"})
+    monkeypatch.setattr(
+        main,
+        "_render_hud_navigator_renderable",
+        lambda state, current_config, limit, animation_phase=None, snapshot=None: {"kind": "rich-hud"},
+    )
 
     main._run_hud_navigator(limit=5, interval=0.01)
 
     assert updates == [{"kind": "rich-hud"}, {"kind": "rich-hud"}]
+
+
+def test_run_hud_navigator_reuses_snapshot_between_animation_frames(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    config = _attached_config(data_dir)
+    render_snapshots: list[object] = []
+    snapshot_calls: list[str] = []
+
+    class FakeLive:
+        def __init__(self, initial, console=None, auto_refresh=False, screen=False):
+            render_snapshots.append(initial.get("snapshot"))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def update(self, renderable, refresh=False):
+            render_snapshots.append(renderable.get("snapshot"))
+
+    keys = iter([None, "quit"])
+    monotonic_values = iter([0.0, 0.05, 0.10])
+
+    monkeypatch.setattr(main, "_get_config", lambda: config)
+    monkeypatch.setattr(main, "Live", FakeLive)
+    monkeypatch.setattr(main, "_HudRawInput", lambda: type("C", (), {"__enter__": lambda self: self, "__exit__": lambda self, exc_type, exc, tb: False})())
+    monkeypatch.setattr(main, "_read_hud_key", lambda interval: next(keys))
+    monkeypatch.setattr(main.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(
+        main,
+        "_snapshot_hud_navigator_screen",
+        lambda state, current_config, limit: snapshot_calls.append(state.screen) or {"id": len(snapshot_calls)},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main,
+        "_render_hud_navigator_renderable",
+        lambda state, current_config, limit, animation_phase=None, snapshot=None: {"kind": "rich-hud", "snapshot": snapshot},
+    )
+
+    main._run_hud_navigator(limit=5, interval=1.0)
+
+    assert snapshot_calls == ["menu"]
+    assert render_snapshots == [{"id": 1}, {"id": 1}, {"id": 1}]
 
 
 def test_apply_hud_key_opens_validation_from_thread(monkeypatch, tmp_path):

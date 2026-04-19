@@ -392,15 +392,13 @@ assert close_gate["target_phase"] == close_scenario.target_phase, close_gate
 assert close_gate["procedure_key"] == close_scenario.procedure_key, close_gate
 assert close_gate["cycle_index"] == 1, close_gate
 assert close_gate["next_cycle_index"] == 1, close_gate
-assert "Cycle Feed" in hud, hud
-assert "cycle report" in hud, hud
-assert "Protocol Progress" in hud, hud
-assert "Procedure" in hud, hud
-assert "Gates" in hud, hud
-assert "Review" in hud, hud
-assert "Revise" in hud, hud
-assert "Retry Gate" in hud, hud
-assert "Accept Gate" in hud, hud
+assert "Recent Activity" in hud, hud
+assert "Agent Sessions" in hud, hud
+assert "Phase      • Review · Decision" in hud, hud
+assert "Procedure  • Review · Revise · Gate" in hud, hud
+assert "Status     READY · gate Retry Gate · next record outcome" in hud, hud
+assert "Retry Gate completed" in hud, hud
+assert "alice contributed exec" in hud, hud
 assert cleared["cleared"] is True, cleared
 assert current_after_clear["bound"] is False, current_after_clear
 assert current_after_clear["binding"] is None, current_after_clear
@@ -447,10 +445,10 @@ print(
     f"target={seed_watch_phase_cycle['visual']['gates'][0]['target_phase']}"
 )
 print(f"- mailbox reports: {mailbox['count']}")
-print(f"- hud cycle feed visible: {'Cycle Feed' in hud and 'cycle report' in hud}")
-print(f"- hud protocol progress visible: {'Protocol Progress' in hud}")
-print(f"- hud procedure visible: {'Procedure' in hud}")
-print(f"- hud gate visuals visible: {'Gates' in hud and 'Retry Gate' in hud and 'Accept Gate' in hud}")
+print(f"- hud recent activity visible: {'Recent Activity' in hud and 'Retry Gate completed' in hud}")
+print(f"- hud phase progression visible: {'Phase      • Review · Decision' in hud}")
+print(f"- hud procedure visible: {'Procedure  • Review · Revise · Gate' in hud}")
+print(f"- hud agent session visible: {'Agent Sessions' in hud and 'alice contributed exec' in hud}")
 print(f"- runtime clear: {current_after_clear['bound']}")
 print(f"- mailbox reports after clear: {mailbox_after_clear['count']}")
 print(f"- agent inbox: pending={inbox['pending_message_count']} diagnostics={bool(inbox.get('attached_runtime_diagnostics'))}")
