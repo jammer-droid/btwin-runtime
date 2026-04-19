@@ -894,6 +894,231 @@ def _render_hud_thread_snapshot(
     return lines
 
 
+def _detail_primary_trace_row(trace_rows: list[dict[str, object]]) -> dict[str, object] | None:
+    for row in reversed(trace_rows):
+        if not isinstance(row, dict):
+            continue
+        if row.get("decision") == "block" or row.get("reason") or row.get("baseline_guard"):
+            return row
+    for row in reversed(trace_rows):
+        if isinstance(row, dict):
+            return row
+    return None
+
+
+def _detail_compiled_policy(
+    phase_cycle_payload: dict[str, object] | None,
+    trace_rows: list[dict[str, object]],
+) -> dict[str, object]:
+    context_core = phase_cycle_payload.get("context_core") if isinstance(phase_cycle_payload, dict) else None
+    if isinstance(context_core, dict):
+        return context_core
+    primary_row = _detail_primary_trace_row(trace_rows)
+    if isinstance(primary_row, dict):
+        return primary_row
+    return {}
+
+
+def _detail_status_summary(
+    trace_rows: list[dict[str, object]],
+    phase_cycle_payload: dict[str, object] | None,
+) -> tuple[str, str]:
+    primary_row = _detail_primary_trace_row(trace_rows)
+    if isinstance(primary_row, dict):
+        reason = str(primary_row.get("reason") or "").strip()
+        summary = str(primary_row.get("summary") or "").strip()
+        if primary_row.get("decision") == "block" or primary_row.get("baseline_guard"):
+            hint = "submit contribution" if reason == "missing_contribution" else "inspect live trace"
+            detail = summary or reason.replace("_", " ") or "guard blocked"
+            return f"BLOCKED · {detail}", hint
+        if primary_row.get("kind") == "gate":
+            target_phase = str(primary_row.get("target_phase") or "").strip()
+            outcome = str(primary_row.get("outcome") or "").strip()
+            detail = summary or "gate evaluated"
+            hint = f"watch phase {target_phase}" if target_phase else "inspect live trace"
+            if outcome:
+                detail = f"{detail} ({outcome})"
+            return f"READY · {detail}", hint
+        if summary:
+            return f"ACTIVE · {summary}", "inspect live trace"
+
+    state = phase_cycle_payload.get("state") if isinstance(phase_cycle_payload, dict) else None
+    if isinstance(state, dict):
+        current_step = str(state.get("current_step_label") or "").strip()
+        if current_step:
+            return f"WAITING · current step {current_step}", "inspect protocol progress"
+    return "WAITING · no recent protocol activity", "inspect live trace"
+
+
+def _render_thread_detail(
+    thread: dict[str, object],
+    status_summary: dict[str, object],
+    phase_cycle_payload: dict[str, object] | None,
+    trace_rows: list[dict[str, object]],
+) -> str:
+    config = _get_config()
+    thread_id = str(thread.get("thread_id", ""))
+    topic = str(thread.get("topic") or thread_id)
+    protocol = str(thread.get("protocol") or "-")
+    phase = str(thread.get("current_phase") or "-")
+    state = phase_cycle_payload.get("state") if isinstance(phase_cycle_payload, dict) else {}
+    compiled = _detail_compiled_policy(phase_cycle_payload, trace_rows)
+    status_text, next_hint = _detail_status_summary(trace_rows, phase_cycle_payload)
+
+    cycle_index = state.get("cycle_index") if isinstance(state, dict) else None
+    step_label = state.get("current_step_label") if isinstance(state, dict) else None
+
+    procedure_summary = None
+    gates_summary = None
+    completed_cycles = None
+    if isinstance(phase_cycle_payload, dict):
+        visual = phase_cycle_payload.get("visual")
+        if isinstance(state, dict):
+            completed_cycles = _phase_cycle_completed_count(state)
+        if isinstance(visual, dict):
+            procedure_nodes = visual.get("procedure")
+            if isinstance(procedure_nodes, list) and procedure_nodes:
+                procedure_summary = " -> ".join(
+                    str(node.get("label", node.get("key", "")))
+                    for node in procedure_nodes
+                    if isinstance(node, dict)
+                )
+            gate_nodes = visual.get("gates")
+            if isinstance(gate_nodes, list) and gate_nodes:
+                gates_summary = " -> ".join(
+                    str(node.get("label", node.get("key", "")))
+                    for node in gate_nodes
+                    if isinstance(node, dict)
+                )
+
+    lines = [
+        f"Topic     {topic}",
+        f"Protocol  {protocol}  phase={phase}"
+        + (f"  cycle={cycle_index}" if isinstance(cycle_index, int) else "")
+        + (f"  step={step_label}" if isinstance(step_label, str) and step_label.strip() else ""),
+        f"Status    {status_text}  · next: {next_hint}",
+        "Protocol / Phase",
+    ]
+
+    progress_bits: list[str] = []
+    if isinstance(cycle_index, int):
+        progress_bits.append(f"cycle={cycle_index}")
+    if isinstance(completed_cycles, int):
+        progress_bits.append(f"completed={completed_cycles}")
+    if isinstance(step_label, str) and step_label.strip():
+        progress_bits.append(f"active_step={step_label}")
+    if progress_bits:
+        lines.append("  ".join(progress_bits))
+    if procedure_summary:
+        lines.append(f"procedure: {procedure_summary}")
+    elif gates_summary:
+        lines.append("Protocol progress unavailable")
+
+    lines.append("Outcome / Policy")
+    outcome_policy = compiled.get("outcome_policy")
+    emitters = compiled.get("outcome_emitters")
+    policy_outcomes = compiled.get("policy_outcomes")
+    outcome_actions = compiled.get("outcome_actions")
+    primary_row = _detail_primary_trace_row(trace_rows)
+    policy_line = []
+    if outcome_policy:
+        policy_line.append(f"policy={outcome_policy}")
+    if isinstance(emitters, list) and emitters:
+        policy_line.append(f"emitters={', '.join(str(item) for item in emitters)}")
+    if policy_line:
+        lines.append("  ".join(policy_line))
+    route_line = []
+    if isinstance(policy_outcomes, list) and policy_outcomes:
+        route_line.append(f"outcomes={', '.join(str(item) for item in policy_outcomes)}")
+    if isinstance(outcome_actions, list) and outcome_actions:
+        route_line.append(f"actions={', '.join(str(item) for item in outcome_actions)}")
+    if isinstance(primary_row, dict):
+        gate_label = primary_row.get("gate_alias") or primary_row.get("gate_key")
+        if gate_label:
+            route_line.append(f"gate={gate_label}")
+        target_phase = primary_row.get("target_phase")
+        if target_phase:
+            route_line.append(f"target={target_phase}")
+    if route_line:
+        lines.append("  ".join(route_line))
+
+    lines.append("Agent Sessions")
+    runtime_sessions = {
+        agent_name: session
+        for agent_name, session in _runtime_sessions_for_thread(thread_id, config)
+    }
+    agents = status_summary.get("agents", [])
+    if isinstance(agents, list) and agents:
+        agent_parts: list[str] = []
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            agent_name = str(agent.get("name") or "")
+            if not agent_name:
+                continue
+            session_summary = _runtime_session_summary(runtime_sessions.get(agent_name))
+            line = f"{agent_name}={agent.get('status')}"
+            if session_summary:
+                line += f" ({session_summary})"
+            agent_parts.append(line)
+        if agent_parts:
+            lines.append("  ".join(agent_parts))
+    else:
+        lines.append("No active agent session summary")
+
+    lines.append("Recent Activity")
+    if trace_rows:
+        activity_rows: list[dict[str, object]] = []
+        if isinstance(primary_row, dict):
+            activity_rows.append(primary_row)
+        for row in reversed(trace_rows[-5:]):
+            if row is primary_row:
+                continue
+            if isinstance(row, dict):
+                activity_rows.append(row)
+        for row in activity_rows[:3]:
+            timestamp = str(row.get("timestamp", ""))
+            time_label = timestamp[11:19] if "T" in timestamp and len(timestamp) >= 19 else timestamp
+            _lane, headline, _headline_style = _workflow_event_heading(row)
+            lines.append(f"{time_label}  {headline}")
+            summary = row.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                lines.append(f"summary: {_truncate_hud_text(summary)}")
+    else:
+        lines.append("No recent workflow events")
+
+    lines.extend(["Quick Hints", f"status: {status_text}", f"next: {next_hint}"])
+    return "\n".join(lines)
+
+
+def _render_hud_thread_detail_screen(thread_id: str | None, limit: int) -> str:
+    if thread_id is None:
+        return _render_hud(thread_id, limit)
+    config = _get_config()
+    thread, status_summary, lookup_error = _try_load_thread_snapshot(thread_id, config)
+    if lookup_error is not None:
+        return _render_hud(thread_id, limit)
+    trace_payload = _thread_watch_payload(
+        thread,
+        status_summary,
+        _workflow_event_log(thread_id).list_events(limit=limit),
+    )
+    return "\n".join(
+        [
+            "B-TWIN HUD",
+            "",
+            "Thread Detail",
+            "",
+            _render_thread_detail(
+                thread,
+                status_summary,
+                trace_payload.get("phase_cycle") if isinstance(trace_payload, dict) else None,
+                trace_payload.get("trace", []) if isinstance(trace_payload, dict) else [],
+            ),
+        ]
+    )
+
+
 def _render_trace_row_lines(row: dict[str, object]) -> list[str]:
     timestamp = str(row.get("timestamp", ""))
     time_label = timestamp[11:19] if "T" in timestamp and len(timestamp) >= 19 else timestamp
@@ -1659,7 +1884,30 @@ def _render_hud_thread_live(state: _HudNavigatorState, limit: int) -> str:
     if state.selected_thread_id is None:
         lines.extend(["No thread selected.", "", "Controls  t threads  q quit"])
         return "\n".join(lines)
-    body_lines = _render_hud(state.selected_thread_id, limit).splitlines()[1:]
+    config = _get_config()
+    thread, status_summary, lookup_error = _try_load_thread_snapshot(state.selected_thread_id, config)
+    if lookup_error is not None:
+        lines.extend(
+            [
+                f"Thread   {state.selected_thread_id}",
+                f"Status   {lookup_error}",
+                "",
+                "Controls  t threads  q quit",
+            ]
+        )
+        return "\n".join(lines)
+
+    trace_payload = _thread_watch_payload(
+        thread,
+        status_summary,
+        _workflow_event_log(state.selected_thread_id).list_events(limit=limit),
+    )
+    body_lines = _render_thread_detail(
+        thread,
+        status_summary,
+        trace_payload.get("phase_cycle") if isinstance(trace_payload, dict) else None,
+        trace_payload.get("trace", []) if isinstance(trace_payload, dict) else [],
+    ).splitlines()
     window_size = _hud_thread_view_window_size()
     max_offset = max(0, len(body_lines) - window_size)
     state.thread_log_offset = _clamp_index(state.thread_log_offset, max_offset + 1 if max_offset else 1)
@@ -6267,7 +6515,7 @@ def hud(
         selected_thread_id = _prompt_hud_thread_selection(config)
 
     def render_once() -> str:
-        return _render_hud(selected_thread_id, limit)
+        return _render_hud_thread_detail_screen(selected_thread_id, limit)
 
     if stream:
         _run_hud_stream(selected_thread_id, interval)
