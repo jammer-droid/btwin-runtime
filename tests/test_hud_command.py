@@ -1582,7 +1582,9 @@ def test_hud_validation_renderable_shows_validation_sections(monkeypatch, tmp_pa
 
     rendered = _renderable_to_text(renderable)
     assert "Validation Focus" in rendered
-    assert "Validation" in rendered
+    assert "Validation verdict" in rendered
+    assert "Primary reason" in rendered
+    assert "Why this verdict" in rendered
     assert "Expected vs Actual" in rendered
     assert "Validation Cases" in rendered
     assert "Trace / Reason Excerpt" in rendered
@@ -1621,8 +1623,10 @@ def test_hud_validation_focus_uses_protocol_next_for_validation_gap(monkeypatch,
 
     rendered = main._render_hud_validation_focus_screen("thread-1", limit=5)
 
+    assert "Validation verdict  WARN" in rendered
+    assert "Primary reason  jun missing scope, findings" in rendered
     assert "required_contribution: WARN" in rendered
-    assert "jun missing scope, findings" in rendered
+    assert "primary_reason: jun missing scope, findings" in rendered
     assert "next expected action: submit_contribution" in rendered
     assert "Next action  submit contribution" in rendered
 
@@ -2344,10 +2348,12 @@ def test_hud_validation_focus_warns_on_session_recovery(monkeypatch, tmp_path):
 
     rendered = _renderable_to_text(main._render_hud_navigator_renderable(state, config, limit=5))
 
-    assert "Validation" in rendered
+    assert "Validation verdict  WARN" in rendered
+    assert "Why this verdict" in rendered
     assert "verdict: WARN" in rendered
     assert "session_health: WARN" in rendered
-    assert "reason: runtime session recovery pending" in rendered
+    assert "Primary reason  runtime session recovery pending" in rendered
+    assert "primary_reason: runtime session recovery pending" in rendered
     assert "next expected action: none" in rendered
 
 
@@ -2442,7 +2448,9 @@ def test_hud_validation_focus_section_contract(monkeypatch, tmp_path):
     def index_of(prefix: str) -> int:
         return next(i for i, line in enumerate(lines) if line.startswith(prefix))
 
-    assert index_of("Validation") < index_of("Expected vs Actual") < index_of("Validation Cases") < index_of("Trace / Reason Excerpt")
+    assert index_of("Why this verdict") < index_of("Expected vs Actual") < index_of("Validation Cases") < index_of("Trace / Reason Excerpt")
+    assert "Validation verdict  PASS" in rendered
+    assert "Primary reason  all checks aligned" in rendered
     assert "verdict: PASS" in rendered
     assert "protocol_match: PASS" in rendered
     assert "trajectory_match: PASS" in rendered
@@ -2450,7 +2458,7 @@ def test_hud_validation_focus_section_contract(monkeypatch, tmp_path):
     assert "required_contribution: PASS" in rendered
     assert "trace_completeness: PASS" in rendered
     assert "missing_contribution_blocked: not triggered" in rendered
-    assert "reason:" not in rendered
+    assert "primary_reason: all checks aligned" in rendered
     assert "next expected action: record_outcome" in rendered
 
 

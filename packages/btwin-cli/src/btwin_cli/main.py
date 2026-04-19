@@ -1185,6 +1185,27 @@ def _humanize_hud_action(action: object) -> str:
     return str(action or "").strip().replace("_", " ")
 
 
+def _detail_primary_validation_reason(validation: dict[str, object]) -> str:
+    generic_reasons = {
+        "no recent workflow trace",
+        "no recent workflow events",
+    }
+    reasons = validation.get("reasons")
+    if isinstance(reasons, list):
+        for reason in reasons:
+            text = str(reason or "").strip()
+            if text and text not in generic_reasons:
+                return text
+        for reason in reasons:
+            text = str(reason or "").strip()
+            if text:
+                return text
+    verdict = str(validation.get("verdict") or "").strip().upper()
+    if verdict == "PASS":
+        return "all checks aligned"
+    return "validation warning"
+
+
 def _render_thread_detail(
     thread: dict[str, object],
     status_summary: dict[str, object],
@@ -1270,6 +1291,7 @@ def _render_thread_detail(
         protocol_plan,
     )
     validation_cases = _detail_validation_cases(thread, trace_rows, protocol_plan)
+    primary_reason = _detail_primary_validation_reason(validation)
     next_action_token = str(validation["next_expected_action"] or "").strip()
     next_action_display = (
         _humanize_hud_action(next_action_token)
@@ -1527,6 +1549,7 @@ def _render_validation_focus(
         protocol_plan,
     )
     validation_cases = _detail_validation_cases(thread, trace_rows, protocol_plan)
+    primary_reason = _detail_primary_validation_reason(validation)
     next_action_token = str(validation["next_expected_action"] or "").strip()
     next_action_display = (
         _humanize_hud_action(next_action_token)
@@ -1571,16 +1594,15 @@ def _render_validation_focus(
         + (f"  step={step_label}" if isinstance(step_label, str) and step_label.strip() else ""),
         f"Status    {status_text}",
         f"Validation verdict  {validation['verdict']}",
+        f"Primary reason  {primary_reason}",
         f"Next action  {next_action_display}",
     ]
 
-    _append_detail_section(lines, "Validation")
+    _append_detail_section(lines, "Why this verdict")
     lines.append(f"verdict: {validation['verdict']}")
+    lines.append(f"primary_reason: {primary_reason}")
     for check_name, check_status in validation["checks"]:
         lines.append(f"{check_name}: {check_status}")
-    if validation["verdict"] != "PASS":
-        reason_text = "; ".join(str(reason) for reason in validation["reasons"]) or "validation warning"
-        lines.append(f"reason: {reason_text}")
     lines.append(f"next expected action: {validation['next_expected_action']}")
 
     _append_detail_section(lines, "Expected vs Actual")
