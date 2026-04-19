@@ -1423,6 +1423,107 @@ def _truncate_hud_text(value: str, limit: int = 120) -> str:
     return text[: limit - 3] + "..."
 
 
+def _hud_live_trace_actor(row: dict[str, object]) -> str:
+    agent = str(row.get("agent") or "").strip()
+    if agent:
+        return f"@{agent}"
+    return "system"
+
+
+def _hud_live_trace_payload_text(row: dict[str, object]) -> str:
+    summary = str(row.get("summary") or "").strip()
+    if summary:
+        return _truncate_hud_text(summary, limit=44)
+    outcome = str(row.get("outcome") or "").strip()
+    if outcome:
+        return f"outcome={outcome}"
+    reason = str(row.get("reason") or "").strip()
+    if reason:
+        return f"reason={reason}"
+    baseline_guard = str(row.get("baseline_guard") or "").strip()
+    if baseline_guard:
+        return f"baseline_guard={baseline_guard}"
+    target_phase = str(row.get("target_phase") or "").strip()
+    if target_phase:
+        return f"target={target_phase}"
+    return "-"
+
+
+def _render_hud_live_trace_body(
+    thread: dict[str, object],
+    status_summary: dict[str, object],
+    trace_rows: list[dict[str, object]],
+    runtime_sessions: dict[str, dict[str, object]],
+    mailbox_count: int,
+) -> list[str]:
+    protocol = str(thread.get("protocol") or "-")
+    phase = str(thread.get("current_phase") or "-")
+    lines = [
+        f"Stream    LIVE  rows={len(trace_rows)}  filter=all",
+        f"Focus     {protocol}  phase={phase}",
+        "",
+        "TIME      KIND      PHASE     ACTOR     PAYLOAD",
+    ]
+
+    display_rows = [row for row in reversed(trace_rows) if isinstance(row, dict)]
+    for row in display_rows:
+        timestamp = str(row.get("timestamp") or "")
+        time_label = timestamp[11:19] if "T" in timestamp and len(timestamp) >= 19 else timestamp or "--:--:--"
+        kind = str(row.get("kind") or "-").strip() or "-"
+        row_phase = str(row.get("phase") or "-").strip() or "-"
+        actor = _hud_live_trace_actor(row)
+        payload = _hud_live_trace_payload_text(row)
+        lines.append(f"{time_label}  {kind:<9} {row_phase:<9} {actor:<9} {payload}")
+
+    selected_row = display_rows[0] if display_rows else None
+    _append_detail_section(lines, "Row Inspector")
+    if isinstance(selected_row, dict):
+        lines.append(f"kind: {selected_row.get('kind') or '-'}")
+        lines.append("compiled:")
+        compiled_items = [
+            ("outcome_policy", selected_row.get("outcome_policy")),
+            ("outcome_emitters", ", ".join(str(item) for item in selected_row.get("outcome_emitters", [])) if isinstance(selected_row.get("outcome_emitters"), list) else None),
+            ("policy_outcomes", ", ".join(str(item) for item in selected_row.get("policy_outcomes", [])) if isinstance(selected_row.get("policy_outcomes"), list) else None),
+        ]
+        compiled_lines = 0
+        for key, value in compiled_items:
+            if value:
+                lines.append(f"  {key}: {value}")
+                compiled_lines += 1
+        if compiled_lines == 0:
+            lines.append("  -")
+        raw_payload = {
+            key: value
+            for key, value in selected_row.items()
+            if key in {"agent", "baseline_guard", "gate_key", "kind", "outcome", "phase", "reason", "summary", "target_phase", "timestamp"}
+            and value not in (None, "", [])
+        }
+        lines.append(f"raw: {json.dumps(raw_payload, sort_keys=True)}")
+    else:
+        lines.append("No trace rows")
+
+    session_parts: list[str] = []
+    agents = status_summary.get("agents", [])
+    if isinstance(agents, list):
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            agent_name = str(agent.get("name") or "").strip()
+            if not agent_name:
+                continue
+            status = str(agent.get("status") or "-").strip() or "-"
+            runtime_summary = _runtime_session_summary(runtime_sessions.get(agent_name))
+            if runtime_summary:
+                session_parts.append(f"{agent_name}={status}({runtime_summary})")
+            else:
+                session_parts.append(f"{agent_name}={status}")
+    footer = f"Sessions  {'  '.join(session_parts)}" if session_parts else "Sessions  none"
+    if mailbox_count:
+        footer += f"  mailbox={mailbox_count}"
+    lines.extend(["", footer])
+    return lines
+
+
 def _style_hud_line(text: str, style: str | None = None) -> str:
     escaped_text = escape(text)
     if not style:
@@ -2185,7 +2286,18 @@ def _render_hud_live_trace(state: _HudNavigatorState, limit: int) -> str:
         status_summary,
         _workflow_event_log(state.selected_thread_id).list_events(limit=limit),
     )
-    body_lines = _render_thread_watch(thread, status_summary, trace_payload["trace"]).splitlines()[1:]
+    runtime_sessions = {
+        agent_name: session
+        for agent_name, session in _runtime_sessions_for_thread(state.selected_thread_id, config)
+    }
+    mailbox_reports = _list_system_mailbox_reports(thread_id=state.selected_thread_id, limit=limit, config=config)
+    body_lines = _render_hud_live_trace_body(
+        thread,
+        status_summary,
+        trace_payload["trace"],
+        runtime_sessions,
+        len(mailbox_reports),
+    )
     window_size = _hud_thread_view_window_size()
     max_offset = max(0, len(body_lines) - window_size)
     state.thread_log_offset = _clamp_index(state.thread_log_offset, max_offset + 1 if max_offset else 1)

@@ -1376,16 +1376,15 @@ def test_hud_live_trace_view_renders_diagnostics_title(monkeypatch, tmp_path):
         lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})(),
     )
     monkeypatch.setattr(main, "_thread_watch_payload", lambda thread, status, events: {"trace": []})
-    monkeypatch.setattr(
-        main,
-        "_render_thread_watch",
-        lambda thread, status, trace: "Thread Watch\nTrace body",
-    )
+    monkeypatch.setattr(main, "_runtime_sessions_for_thread", lambda thread_id, current_config: [])
+    monkeypatch.setattr(main, "_list_system_mailbox_reports", lambda **kwargs: [])
 
     rendered = main._render_hud_navigator(state, config, limit=5)
 
     assert "Live Trace / Diagnostics" in rendered
-    assert "Trace body" in rendered
+    assert "Stream    LIVE  rows=0  filter=all" in rendered
+    assert "Row Inspector" in rendered
+    assert "No trace rows" in rendered
 
 
 def test_hud_live_trace_view_surfaces_guard_and_gate_rows(monkeypatch, tmp_path):
@@ -1444,13 +1443,99 @@ def test_hud_live_trace_view_surfaces_guard_and_gate_rows(monkeypatch, tmp_path)
             ]
         },
     )
+    monkeypatch.setattr(main, "_runtime_sessions_for_thread", lambda thread_id, current_config: [])
+    monkeypatch.setattr(main, "_list_system_mailbox_reports", lambda **kwargs: [])
 
     rendered = main._render_hud_navigator(state, config, limit=5)
 
-    assert "Exit blocked" in rendered
-    assert "baseline guard: contribution_required" in rendered
-    assert "Retry Gate completed" in rendered
-    assert "gate: Retry Gate [retry-loop]" in rendered
+    assert "04:07:27  gate" in rendered
+    assert "04:07:26  guard" in rendered
+    assert "Retry loop completed." in rendered
+    assert "Missing contribution for current phase." in rendered
+    assert "Row Inspector" in rendered
+    assert "kind: gate" in rendered
+    assert '"gate_key": "retry-loop"' in rendered
+
+
+def test_hud_live_trace_view_uses_wireframe_sections_and_inspector(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    config = _attached_config(data_dir)
+    state = main._HudNavigatorState(screen="live", selected_thread_id="thread-1")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: config)
+    monkeypatch.setattr(
+        main,
+        "_try_load_thread_snapshot",
+        lambda thread_id, current_config: (
+            {
+                "thread_id": thread_id,
+                "topic": "Design Review",
+                "protocol": "review-loop",
+                "current_phase": "review",
+            },
+            {"agents": [{"name": "jun", "status": "waiting"}, {"name": "ari", "status": "joined"}]},
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_workflow_event_log",
+        lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_thread_watch_payload",
+        lambda thread, status, events: {
+            "trace": [
+                {
+                    "timestamp": "2026-04-19T12:03:55Z",
+                    "kind": "gate",
+                    "phase": "review",
+                    "gate_alias": "Retry Gate",
+                    "gate_key": "retry-loop",
+                    "target_phase": "review",
+                    "outcome": "retry",
+                    "summary": "Retry loop completed.",
+                    "outcome_policy": "review-outcomes",
+                    "outcome_emitters": ["reviewer", "author"],
+                    "policy_outcomes": ["retry", "accept", "close"],
+                },
+                {
+                    "timestamp": "2026-04-19T12:04:28Z",
+                    "kind": "result",
+                    "phase": "review",
+                    "agent": "jun",
+                    "summary": "LGTM with small nits",
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_runtime_sessions_for_thread",
+        lambda thread_id, current_config: [
+            ("jun", {"transport_mode": "live_process_transport", "status": "waiting"}),
+            ("ari", {"transport_mode": "live_process_transport", "status": "done"}),
+        ],
+    )
+    monkeypatch.setattr(main, "_list_system_mailbox_reports", lambda **kwargs: [])
+    monkeypatch.setattr(main, "_hud_thread_view_window_size", lambda: 200)
+
+    rendered = main._render_hud_navigator(state, config, limit=5)
+
+    assert "Live Trace / Diagnostics" in rendered
+    assert "Stream    LIVE  rows=2  filter=all" in rendered
+    assert "Focus     review-loop  phase=review" in rendered
+    assert "TIME      KIND" in rendered
+    assert "12:04:28  result" in rendered
+    assert "12:03:55  gate" in rendered
+    assert "Row Inspector" in rendered
+    assert "kind: result" in rendered
+    assert 'raw: {"agent": "jun", "kind": "result"' in rendered
+    assert "Sessions  jun=waiting(app-server)  ari=joined(app-server)" in rendered
 
 
 def test_hud_thread_detail_renders_status_policy_activity_and_hints(monkeypatch, tmp_path):
