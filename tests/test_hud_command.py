@@ -1283,11 +1283,12 @@ def test_hud_thread_view_scrolls_logs(monkeypatch, tmp_path):
         "_render_hud_thread_detail_screen",
         lambda thread_id, limit: "\n".join(
             [
-                "B-TWIN HUD",
-                "",
-                "Thread Detail",
+                "B-TWIN HUD :: Thread Detail :: mode=attached",
                 "",
                 *[f"line {i}" for i in range(12)],
+                "",
+                "Hint      up/down scroll  pgup/pgdn page  home/end jump",
+                "Nav       [T]hreads  [D]etail  [L]ive  [:] cmd  [q] quit",
             ]
         ),
     )
@@ -1430,6 +1431,28 @@ def test_hud_threads_view_uses_wireframe_list_and_selected_preview(monkeypatch, 
     assert "gate: Retry Gate" in rendered
     assert "agents: jun=waiting(app-server)  ari=joined(app-server)" in rendered
     assert "last: Retry loop completed." in rendered
+
+
+def test_hud_threads_view_uses_shared_tui_chrome(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    config = _attached_config(data_dir)
+    state = main._HudNavigatorState(screen="threads", thread_index=0)
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(
+        main,
+        "_list_hud_threads",
+        lambda current_config: [{"thread_id": "thread-1", "topic": "Design Review", "protocol": "review-loop", "current_phase": "review"}],
+    )
+    monkeypatch.setattr(main, "_try_load_thread_snapshot", lambda thread_id, current_config: (None, None, "missing"))
+
+    rendered = main._render_hud_threads(state, config, limit=5)
+
+    assert rendered.splitlines()[0] == "B-TWIN HUD :: Threads / Sessions :: mode=attached"
+    assert "Hint      up/down select  enter open  d detail  l live  c close" in rendered
+    assert "Nav       [T]hreads  [D]etail  [L]ive  [:] cmd  [q] quit" in rendered
 
 
 def test_hud_live_trace_view_renders_diagnostics_title(monkeypatch, tmp_path):
@@ -1621,6 +1644,42 @@ def test_hud_live_trace_view_uses_wireframe_sections_and_inspector(monkeypatch, 
     assert "kind: result" in rendered
     assert 'raw: {"agent": "jun", "kind": "result"' in rendered
     assert "Sessions  jun=waiting(app-server)  ari=joined(app-server)" in rendered
+
+
+def test_hud_thread_detail_view_uses_shared_tui_chrome(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    config = _attached_config(data_dir)
+    state = main._HudNavigatorState(screen="thread", selected_thread_id="thread-1")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(
+        main,
+        "_try_load_thread_snapshot",
+        lambda thread_id, current_config: ({"thread_id": thread_id}, {}, None),
+    )
+    monkeypatch.setattr(
+        main,
+        "_render_hud_thread_detail_screen",
+        lambda thread_id, limit: "\n".join(
+            [
+                "B-TWIN HUD :: Thread Detail :: mode=attached",
+                "",
+                "Topic     Design Review",
+                "",
+                "Hint      up/down scroll  pgup/pgdn page  home/end jump",
+                "Nav       [T]hreads  [D]etail  [L]ive  [:] cmd  [q] quit",
+            ]
+        ),
+    )
+    monkeypatch.setattr(main, "_hud_thread_view_window_size", lambda: 20)
+
+    rendered = main._render_hud_navigator(state, config, limit=5)
+
+    assert rendered.splitlines()[0] == "B-TWIN HUD :: Thread Detail :: mode=attached"
+    assert "Hint      up/down scroll  pgup/pgdn page  home/end jump" in rendered
+    assert "Nav       [T]hreads  [D]etail  [L]ive  [:] cmd  [q] quit" in rendered
 
 
 def test_hud_thread_detail_renders_status_policy_activity_and_hints(monkeypatch, tmp_path):
@@ -1871,7 +1930,20 @@ def test_hud_thread_detail_navigator_uses_same_render_path(monkeypatch, tmp_path
     monkeypatch.setattr(main, "_hud_is_interactive", lambda: False)
     monkeypatch.setattr(main, "_try_load_thread_snapshot", lambda thread_id, current_config: ({}, {}, None))
     monkeypatch.setattr(main, "_workflow_event_log", lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})())
-    monkeypatch.setattr(main, "_render_hud_thread_detail_screen", lambda thread_id, limit: f"Thread Detail\nshared:{thread_id}:{limit}")
+    monkeypatch.setattr(
+        main,
+        "_render_hud_thread_detail_screen",
+        lambda thread_id, limit: "\n".join(
+            [
+                "B-TWIN HUD :: Thread Detail :: mode=attached",
+                "",
+                f"shared:{thread_id}:{limit}",
+                "",
+                "Hint      up/down scroll  pgup/pgdn page  home/end jump",
+                "Nav       [T]hreads  [D]etail  [L]ive  [:] cmd  [q] quit",
+            ]
+        ),
+    )
 
     rendered = main._render_hud_navigator(state, config, limit=5)
 
@@ -1981,7 +2053,7 @@ def test_hud_thread_detail_renders_cockpit_sections_in_stable_order(monkeypatch,
     def index_of(prefix: str) -> int:
         return next(i for i, line in enumerate(lines) if line.startswith(prefix))
 
-    assert lines[0] == "B-TWIN HUD"
+    assert lines[0] == "B-TWIN HUD :: Thread Detail :: mode=attached"
     assert index_of("Topic") < index_of("Protocol") < index_of("Phase") < index_of("Next action")
     assert index_of("Protocol / Phase") < index_of("Gate & Outcome Policy") < index_of("Agent Sessions")
     assert index_of("Agent Sessions") < index_of("Validation") < index_of("Expected vs Actual") < index_of("Recent Activity") < index_of("Quick Actions")
@@ -2194,11 +2266,12 @@ def test_hud_thread_scroll_bounds_use_detail_renderer_body(monkeypatch, tmp_path
         "_render_hud_thread_detail_screen",
         lambda thread_id, limit: "\n".join(
             [
-                "B-TWIN HUD",
-                "",
-                "Thread Detail",
+                "B-TWIN HUD :: Thread Detail :: mode=standalone",
                 "",
                 *[f"line {i}" for i in range(12)],
+                "",
+                "Hint      up/down scroll  pgup/pgdn page  home/end jump",
+                "Nav       [T]hreads  [D]etail  [L]ive  [:] cmd  [q] quit",
             ]
         ),
     )

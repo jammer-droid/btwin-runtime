@@ -1335,19 +1335,16 @@ def _render_hud_thread_detail_screen(thread_id: str | None, limit: int) -> str:
         status_summary,
         _workflow_event_log(thread_id).list_events(limit=limit),
     )
-    return "\n".join(
-        [
-            "B-TWIN HUD",
-            "",
-            "Thread Detail",
-            "",
-            _render_thread_detail(
-                thread,
-                status_summary,
-                trace_payload.get("phase_cycle") if isinstance(trace_payload, dict) else None,
-                trace_payload.get("trace", []) if isinstance(trace_payload, dict) else [],
-            ),
-        ]
+    return _render_hud_screen(
+        "Thread Detail",
+        _render_thread_detail(
+            thread,
+            status_summary,
+            trace_payload.get("phase_cycle") if isinstance(trace_payload, dict) else None,
+            trace_payload.get("trace", []) if isinstance(trace_payload, dict) else [],
+        ).splitlines(),
+        "up/down scroll  pgup/pgdn page  home/end jump",
+        config=config,
     )
 
 
@@ -2073,6 +2070,10 @@ class _HudNavigatorState:
     thread_log_offset: int = 0
 
 
+_HUD_SCREEN_HEADER_LINES = 2
+_HUD_SCREEN_FOOTER_LINES = 3
+
+
 def _hud_is_interactive() -> bool:
     stdin = typer.get_text_stream("stdin")
     stdout = typer.get_text_stream("stdout")
@@ -2173,21 +2174,43 @@ def _close_hud_thread(thread_id: str, config: BTwinConfig) -> None:
 
 def _render_hud_menu(state: _HudNavigatorState) -> str:
     items = _hud_menu_items()
-    lines = ["B-TWIN HUD", "", "Menu", ""]
+    lines = ["Menu"]
     for index, item in enumerate(items):
         prefix = ">" if index == state.menu_index else " "
         lines.append(f"{prefix} {escape(f'[{item}]')}")
-    lines.extend(["", "Controls  up/down move  enter select  t threads  q quit"])
+    return _render_hud_screen(
+        "Menu",
+        lines,
+        "up/down move  enter select",
+    )
+
+
+def _render_hud_screen(title: str, body_lines: list[str], hint_line: str, config: BTwinConfig | None = None) -> str:
+    current_config = config or _get_config()
+    lines = [f"B-TWIN HUD :: {title} :: mode={current_config.runtime.mode}", ""]
+    lines.extend(body_lines)
+    lines.extend(
+        [
+            "",
+            f"Hint      {hint_line}",
+            "Nav       [T]hreads  [D]etail  [L]ive  [:] cmd  [q] quit",
+        ]
+    )
     return "\n".join(lines)
 
 
 def _render_hud_threads(state: _HudNavigatorState, config: BTwinConfig, limit: int) -> str:
     threads = _list_hud_threads(config)
     state.thread_index = _clamp_index(state.thread_index, len(threads))
-    lines = ["B-TWIN HUD", "", "Threads / Sessions", ""]
+    lines: list[str] = []
     if not threads:
-        lines.extend(["  [dim]No active threads[/dim]", "", "Controls  b back  t threads  q quit"])
-        return "\n".join(lines)
+        lines.extend(["  [dim]No active threads[/dim]"])
+        return _render_hud_screen(
+            "Threads / Sessions",
+            lines,
+            "up/down select  enter open",
+            config=config,
+        )
 
     lines.append("Filter: all")
     lines.append("")
@@ -2259,8 +2282,12 @@ def _render_hud_threads(state: _HudNavigatorState, config: BTwinConfig, limit: i
                 lines.append(f"agents: {'  '.join(agent_parts)}")
             if latest_summary:
                 lines.append(f"last: {latest_summary}")
-    lines.extend(["", "Controls  up/down move  enter open  d detail  l live  c close  b back  q quit"])
-    return "\n".join(lines)
+    return _render_hud_screen(
+        "Threads / Sessions",
+        lines,
+        "up/down select  enter open  d detail  l live  c close",
+        config=config,
+    )
 
 
 def _hud_thread_view_window_size() -> int:
@@ -2271,73 +2298,67 @@ def _hud_thread_view_window_size() -> int:
 
 
 def _render_hud_thread_detail_lookup_error(thread_id: str, lookup_error: str) -> str:
-    return "\n".join(
+    return _render_hud_screen(
+        "Thread Detail",
         [
-            "B-TWIN HUD",
-            "",
-            "Thread Detail",
-            "",
             f"Thread   {thread_id}",
             f"Status   {lookup_error}",
-            "",
-            "Controls  t threads  q quit",
-        ]
+        ],
+        "t threads  q quit",
     )
 
 
 def _render_hud_thread_detail_body_lines(thread_id: str, limit: int) -> list[str]:
     screen_lines = _render_hud_thread_detail_screen(thread_id, limit).splitlines()
-    return screen_lines[4:] if len(screen_lines) >= 4 else []
+    return (
+        screen_lines[_HUD_SCREEN_HEADER_LINES:-_HUD_SCREEN_FOOTER_LINES]
+        if len(screen_lines) >= (_HUD_SCREEN_HEADER_LINES + _HUD_SCREEN_FOOTER_LINES)
+        else []
+    )
 
 
 def _render_hud_thread_live(state: _HudNavigatorState, limit: int) -> str:
     if state.selected_thread_id is None:
-        lines = ["B-TWIN HUD", "", "Thread Detail", "", "No thread selected.", "", "Controls  t threads  q quit"]
-        return "\n".join(lines)
+        return _render_hud_screen("Thread Detail", ["No thread selected."], "t threads  q quit")
     config = _get_config()
     thread, status_summary, lookup_error = _try_load_thread_snapshot(state.selected_thread_id, config)
     if lookup_error is not None:
         return _render_hud_thread_detail_lookup_error(state.selected_thread_id, lookup_error)
 
-    screen_lines = _render_hud_thread_detail_screen(state.selected_thread_id, limit).splitlines()
-    body_lines = screen_lines[4:] if len(screen_lines) >= 4 else []
+    body_lines = _render_hud_thread_detail_body_lines(state.selected_thread_id, limit)
     window_size = _hud_thread_view_window_size()
     max_offset = max(0, len(body_lines) - window_size)
     state.thread_log_offset = _clamp_index(state.thread_log_offset, max_offset + 1 if max_offset else 1)
     visible = body_lines[state.thread_log_offset : state.thread_log_offset + window_size]
-    lines = list(screen_lines[:4])
-    lines.extend(visible)
+    lines = list(visible)
     if body_lines:
         start = state.thread_log_offset + 1
         end = min(state.thread_log_offset + len(visible), len(body_lines))
         lines.extend(["", f"Scroll  {start}-{end} of {len(body_lines)}"])
-    lines.extend(
-        [
-            "",
-            "Controls  up/down scroll  pgup/pgdn page  home/end jump  l live  c close  b back  t threads  q quit",
-        ]
+    return _render_hud_screen(
+        "Thread Detail",
+        lines,
+        "up/down scroll  pgup/pgdn page  home/end jump",
+        config=config,
     )
-    return "\n".join(lines)
 
 
 def _render_hud_live_trace(state: _HudNavigatorState, limit: int) -> str:
-    lines = ["B-TWIN HUD", "", "Live Trace / Diagnostics", ""]
     if state.selected_thread_id is None:
-        lines.extend(["No thread selected.", "", "Controls  d detail  t threads  q quit"])
-        return "\n".join(lines)
+        return _render_hud_screen("Live Trace / Diagnostics", ["No thread selected."], "d detail  t threads  q quit")
 
     config = _get_config()
     thread, status_summary, lookup_error = _try_load_thread_snapshot(state.selected_thread_id, config)
     if lookup_error is not None:
-        lines.extend(
+        return _render_hud_screen(
+            "Live Trace / Diagnostics",
             [
                 f"Thread   {state.selected_thread_id}",
                 f"Status   {lookup_error}",
-                "",
-                "Controls  d detail  t threads  q quit",
-            ]
+            ],
+            "d detail  t threads  q quit",
+            config=config,
         )
-        return "\n".join(lines)
 
     trace_payload = _thread_watch_payload(
         thread,
@@ -2360,18 +2381,17 @@ def _render_hud_live_trace(state: _HudNavigatorState, limit: int) -> str:
     max_offset = max(0, len(body_lines) - window_size)
     state.thread_log_offset = _clamp_index(state.thread_log_offset, max_offset + 1 if max_offset else 1)
     visible = body_lines[state.thread_log_offset : state.thread_log_offset + window_size]
-    lines.extend(visible)
+    lines = list(visible)
     if body_lines:
         start = state.thread_log_offset + 1
         end = min(state.thread_log_offset + len(visible), len(body_lines))
         lines.extend(["", f"Scroll  {start}-{end} of {len(body_lines)}"])
-    lines.extend(
-        [
-            "",
-            "Controls  up/down scroll  pgup/pgdn page  home/end jump  d detail  c close  b back  t threads  q quit",
-        ]
+    return _render_hud_screen(
+        "Live Trace / Diagnostics",
+        lines,
+        "up/down scroll  pgup/pgdn page  home/end jump",
+        config=config,
     )
-    return "\n".join(lines)
 
 
 def _render_hud_navigator(state: _HudNavigatorState, config: BTwinConfig, limit: int) -> str:
