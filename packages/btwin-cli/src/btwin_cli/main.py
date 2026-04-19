@@ -1223,8 +1223,20 @@ def _detail_progression_line(items: list[tuple[str, bool]]) -> str:
         clean_label = str(label or "").strip()
         if not clean_label:
             continue
-        parts.append(f"[{clean_label}]" if is_current else clean_label)
+        parts.append(f"• {clean_label}" if is_current else clean_label)
     return " - ".join(parts) if parts else "-"
+
+
+_THREAD_DETAIL_LABEL_WIDTH = 9
+_THREAD_DETAIL_LABEL_GAP = "  "
+
+
+def _detail_summary_prefix(label: str) -> str:
+    return f"{label:<{_THREAD_DETAIL_LABEL_WIDTH}}{_THREAD_DETAIL_LABEL_GAP}"
+
+
+def _detail_summary_line(label: str, value: str) -> str:
+    return f"{_detail_summary_prefix(label)}{value}"
 
 
 def _detail_phase_progression(thread: dict[str, object]) -> str | None:
@@ -1274,9 +1286,40 @@ def _detail_procedure_progression(
                 label,
             }
             procedure_items.append((label, current_step in {key for key in step_keys if key}))
+        if procedure_items and not any(is_current for _, is_current in procedure_items) and not current_step:
+            label, _ = procedure_items[0]
+            procedure_items[0] = (label, True)
+    if len(procedure_items) == 1 and not any(is_current for _, is_current in procedure_items):
+        label, _ = procedure_items[0]
+        procedure_items[0] = (label, True)
 
     rendered = _detail_progression_line(procedure_items)
     return rendered if rendered != "-" else None
+
+
+def _detail_status_line(
+    status_text: str,
+    current_gate: str | None,
+    current_guard: str,
+    next_action_display: str,
+) -> str:
+    status_headline = status_text.split("·", 1)[0].strip() or status_text.strip() or "-"
+    bits = [status_headline]
+    if current_gate:
+        bits.append(f"gate {current_gate}")
+    if current_guard:
+        bits.append(f"guard {current_guard}")
+    if next_action_display:
+        bits.append(f"next {next_action_display}")
+    return " · ".join(bits)
+
+
+def _detail_cycle_line(cycle_index: object, completed_cycles: object) -> str | None:
+    if not isinstance(cycle_index, int):
+        return None
+    if isinstance(completed_cycles, int) and completed_cycles > 0:
+        return f"{cycle_index} (completed {completed_cycles})"
+    return str(cycle_index)
 
 
 def _render_thread_detail(
@@ -1389,52 +1432,9 @@ def _render_thread_detail(
             actor_parts.append(actor_part)
     agent_session_rows = _render_detail_agent_session_rows(agents, runtime_sessions)
 
-    expected_bits: list[str] = []
-    outcome_policy = compiled.get("outcome_policy")
-    policy_outcomes = compiled.get("policy_outcomes")
-    if outcome_policy:
-        expected_bits.append(f"policy={outcome_policy}")
-    if isinstance(policy_outcomes, list) and policy_outcomes:
-        expected_bits.append(f"outcomes={', '.join(str(item) for item in policy_outcomes)}")
-    if isinstance(current_procedure, str) and current_procedure:
-        expected_bits.append(f"procedure={current_procedure}")
-    elif isinstance(procedure_summary, str) and procedure_summary:
-        expected_bits.append(f"procedure={procedure_summary}")
-    if isinstance(cycle_index, int):
-        expected_bits.append(f"cycle={cycle_index}")
-    if next_action_display:
-        expected_bits.append(f"next={next_action_display}")
-
-    compiled_bits: list[str] = []
-    if outcome_policy:
-        compiled_bits.append(f"policy={outcome_policy}")
-    if isinstance(policy_outcomes, list) and policy_outcomes:
-        compiled_bits.append(f"outcomes={', '.join(str(item) for item in policy_outcomes)}")
-    if isinstance(current_gate, str) and current_gate:
-        compiled_bits.append(f"gate={current_gate}")
-
-    actual_bits: list[str] = [status_text]
-    if isinstance(primary_row, dict):
-        primary_headline = _workflow_event_heading(primary_row)[1]
-        if primary_headline:
-            actual_bits.append(primary_headline)
-        primary_summary = str(primary_row.get("summary") or "").strip()
-        if primary_summary:
-            actual_bits.append(primary_summary)
-    elif trace_rows:
-        latest_summary = str(trace_rows[-1].get("summary") or "").strip()
-        if latest_summary:
-            actual_bits.append(latest_summary)
-
     lines = [
-        f"Topic     {topic}",
-        f"Protocol  {protocol}",
-        f"Phase     {phase}"
-        + (f"  cycle={cycle_index}" if isinstance(cycle_index, int) else "")
-        + (f"  step={step_label}" if isinstance(step_label, str) and step_label.strip() else ""),
-        f"Status    {status_text}",
-        f"Compiled  {'; '.join(compiled_bits) if compiled_bits else '-'}",
-        f"Next action  {next_action_display}",
+        _detail_summary_line("Topic", topic),
+        _detail_summary_line("Protocol", protocol),
     ]
 
     current_guard = ""
@@ -1449,45 +1449,25 @@ def _render_thread_detail(
     )
 
     if phase_progression:
-        lines.append(f"Phase flow  {phase_progression}")
+        lines.append(_detail_summary_line("Phase", phase_progression.replace(" - ", " · ")))
+    else:
+        lines.append(_detail_summary_line("Phase", phase))
     if procedure_progression:
-        lines.append(f"Procedure flow  {procedure_progression}")
-
-    _append_detail_section(lines, "Protocol / Phase")
-    lines.append(f"phase: {phase}")
-    if isinstance(current_procedure, str) and current_procedure:
-        lines.append(f"procedure: {current_procedure}")
+        lines.append(_detail_summary_line("Procedure", procedure_progression.replace(" - ", " · ")))
+    elif isinstance(current_procedure, str) and current_procedure:
+        lines.append(_detail_summary_line("Procedure", f"• {current_procedure}"))
     elif isinstance(procedure_summary, str) and procedure_summary:
-        lines.append(f"procedure: {procedure_summary}")
-    if isinstance(cycle_index, int):
-        cycle_status = f"cycle: {cycle_index}"
-        if isinstance(completed_cycles, int):
-            cycle_status += f" (completed {completed_cycles})"
-        lines.append(cycle_status)
-    if isinstance(step_label, str) and step_label.strip():
-        lines.append(f"step: {step_label}")
+        lines.append(_detail_summary_line("Procedure", procedure_summary.replace(" -> ", " · ")))
 
-    _append_detail_section(lines, "Gate / Guard Focus")
-    lines.append(f"status: {status_text}")
-    if current_guard:
-        lines.append(f"guard: {current_guard}")
-    if isinstance(current_gate, str) and current_gate:
-        lines.append(f"gate: {current_gate}")
-    elif isinstance(gates_summary, str) and gates_summary:
-        lines.append(f"gate: {gates_summary}")
-    if outcome_policy:
-        lines.append(f"policy: {outcome_policy}")
-    if outcome_policy:
-        lines.append(f"validation: {validation['verdict']} (press [v])")
-    outcome_emitters = compiled.get("outcome_emitters")
-    if isinstance(outcome_emitters, list) and outcome_emitters:
-        lines.append(f"outcome_emitters: {', '.join(str(item) for item in outcome_emitters)}")
-    outcome_actions = compiled.get("outcome_actions")
-    if isinstance(outcome_actions, list) and outcome_actions:
-        lines.append(f"outcome_actions: {', '.join(str(item) for item in outcome_actions)}")
-    if isinstance(policy_outcomes, list) and policy_outcomes:
-        lines.append(f"policy_outcomes: {', '.join(str(item) for item in policy_outcomes)}")
-    lines.append(f"gate_hint: {next_action_display}")
+    cycle_line = _detail_cycle_line(cycle_index, completed_cycles)
+    if cycle_line:
+        lines.append(_detail_summary_line("Cycle", cycle_line))
+    lines.append(
+        _detail_summary_line(
+            "Status",
+            _detail_status_line(status_text, current_gate, current_guard, next_action_display),
+        )
+    )
 
     _append_detail_section(lines, "Recent Activity")
     if trace_rows:
@@ -2624,6 +2604,63 @@ def _hud_renderable_lines(lines: list[RenderableType | str]) -> RenderableType:
     return Group(*(_hud_renderable_item(line) for line in lines))
 
 
+def _hud_label_value_text(
+    label: str,
+    value: str,
+    *,
+    label_style: str = "bold",
+    value_style: str = "none",
+) -> Text:
+    text = Text()
+    text.append(_detail_summary_prefix(label), style=label_style)
+    text.append(value, style=value_style)
+    return text
+
+
+def _hud_progress_value_text(value: str) -> Text:
+    text = Text()
+    for index, segment in enumerate(value.split(" · ")):
+        if index:
+            text.append(" · ", style="dim")
+        clean_segment = segment.strip()
+        if clean_segment.startswith("• "):
+            text.append("• ", style="bold bright_cyan")
+            text.append(clean_segment[2:], style="bold bright_cyan")
+        else:
+            text.append(clean_segment, style="dim")
+    return text
+
+
+def _hud_thread_pulse_renderables(intro_lines: list[str]) -> list[RenderableType | str]:
+    renderables: list[RenderableType | str] = []
+    protocol_prefix = _detail_summary_prefix("Protocol")
+    phase_prefix = _detail_summary_prefix("Phase")
+    procedure_prefix = _detail_summary_prefix("Procedure")
+    cycle_prefix = _detail_summary_prefix("Cycle")
+    status_prefix = _detail_summary_prefix("Status")
+    for line in intro_lines:
+        if line.startswith(protocol_prefix):
+            continue
+        if line.startswith(phase_prefix):
+            text = _hud_label_value_text("Phase", "", value_style="none")
+            text.append_text(_hud_progress_value_text(line[len(phase_prefix) :]))
+            renderables.append(text)
+            continue
+        if line.startswith(procedure_prefix):
+            text = _hud_label_value_text("Procedure", "", value_style="none")
+            text.append_text(_hud_progress_value_text(line[len(procedure_prefix) :]))
+            renderables.append(text)
+            continue
+        if line.startswith(cycle_prefix):
+            renderables.append(_hud_label_value_text("Cycle", line[len(cycle_prefix) :], value_style="dim"))
+            continue
+        if line.startswith(status_prefix):
+            renderables.append(_hud_label_value_text("Status", line[len(status_prefix) :], value_style="bold"))
+            continue
+        renderables.append(_hud_renderable_line(line))
+    return renderables
+
+
 def _hud_panel(
     title: str,
     lines: list[RenderableType | str],
@@ -2877,6 +2914,7 @@ def _render_hud_thread_detail_renderable(state: _HudNavigatorState, limit: int) 
     ).splitlines()
     intro_lines, sections = _parse_hud_sections(detail_lines)
     section_map = {title: lines for title, lines in sections}
+    protocol_title = str(thread.get("protocol") or "Thread Detail")
 
     activity_lines = section_map.get("Recent Activity", ["No recent workflow events"])
     visible_activity = activity_lines
@@ -2886,15 +2924,14 @@ def _render_hud_thread_detail_renderable(state: _HudNavigatorState, limit: int) 
 
     body = Layout(name="thread-detail-body")
     body.split_column(
-        Layout(_hud_panel("Thread Pulse", intro_lines, border_style="bright_blue"), name="thread-summary", size=max(len(intro_lines) + 2, 8)),
-        Layout(name="thread-focus-row", ratio=2),
-        Layout(_hud_panel("Recent Activity", visible_activity, border_style="bright_yellow"), name="thread-activity", ratio=3),
+        Layout(
+            _hud_panel(protocol_title, _hud_thread_pulse_renderables(intro_lines), border_style="bright_blue"),
+            name="thread-summary",
+            size=max(len(intro_lines) + 2, 8),
+        ),
+        Layout(_hud_panel("Recent Activity", visible_activity, border_style="bright_yellow"), name="thread-activity", ratio=4),
         Layout(name="thread-support-row", ratio=2),
         Layout(_hud_panel("Quick Actions", section_map.get("Quick Actions", ["[b] back  [q] quit"]), border_style="bright_black"), name="thread-actions", size=6),
-    )
-    body["thread-focus-row"].split_row(
-        Layout(_hud_panel("Protocol / Phase", section_map.get("Protocol / Phase", ["-"]), border_style="cyan"), name="thread-protocol", ratio=1),
-        Layout(_hud_panel("Gate / Guard Focus", section_map.get("Gate / Guard Focus", ["-"]), border_style="bright_magenta"), name="thread-gate", ratio=1),
     )
     body["thread-support-row"].split_row(
         Layout(_hud_panel("Agent Sessions", section_map.get("Agent Sessions", ["No agent sessions"])), name="thread-sessions", ratio=1),

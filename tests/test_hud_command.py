@@ -1402,6 +1402,36 @@ def test_hud_threads_view_uses_wireframe_list_and_selected_preview(monkeypatch, 
     )
     monkeypatch.setattr(
         main,
+        "_get_protocol_store",
+        lambda: type(
+            "FakeProtocolStore",
+            (),
+            {
+                "get_protocol": lambda self, name: Protocol(
+                    name="review-loop",
+                    phases=[
+                        ProtocolPhase(name="context"),
+                        ProtocolPhase(
+                            name="review",
+                            procedure=[
+                                {"role": "facilitator", "action": "announce", "alias": "Announce"},
+                                {
+                                    "role": "reviewer",
+                                    "action": "collect-feedback",
+                                    "alias": "Collect Feedback",
+                                    "key": "collect-feedback",
+                                },
+                                {"role": "facilitator", "action": "resolve", "alias": "Resolve"},
+                            ],
+                        ),
+                        ProtocolPhase(name="decision"),
+                    ],
+                )
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        main,
         "_thread_watch_payload",
         lambda thread, status, events: {
             "trace": [
@@ -1566,10 +1596,11 @@ def test_hud_thread_detail_renderable_shows_validation_panel(monkeypatch, tmp_pa
 
     rendered = _renderable_to_text(renderable)
     assert "Thread Detail" in rendered
-    assert "Context - [Review] - Decision" in rendered
-    assert "Announce - [Collect Feedback] - Resolve" in rendered
-    assert "Protocol / Phase" in rendered
-    assert "Gate / Guard Focus" in rendered
+    assert "review-loop" in rendered
+    assert "Context" in rendered and "Review" in rendered and "Decision" in rendered
+    assert "Announce" in rendered and "Collect Feedback" in rendered and "Resolve" in rendered
+    assert "Protocol / Phase" not in rendered
+    assert "Gate / Guard Focus" not in rendered
     assert "Recent Activity" in rendered
     assert "Validation" not in rendered
 
@@ -1778,6 +1809,36 @@ def test_hud_live_trace_view_surfaces_guard_and_gate_rows(monkeypatch, tmp_path)
         main,
         "_workflow_event_log",
         lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_get_protocol_store",
+        lambda: type(
+            "FakeProtocolStore",
+            (),
+            {
+                "get_protocol": lambda self, name: Protocol(
+                    name="review-loop",
+                    phases=[
+                        ProtocolPhase(name="context"),
+                        ProtocolPhase(
+                            name="review",
+                            procedure=[
+                                {"role": "facilitator", "action": "announce", "alias": "Announce"},
+                                {
+                                    "role": "reviewer",
+                                    "action": "collect-feedback",
+                                    "alias": "Collect Feedback",
+                                    "key": "collect-feedback",
+                                },
+                                {"role": "facilitator", "action": "resolve", "alias": "Resolve"},
+                            ],
+                        ),
+                        ProtocolPhase(name="decision"),
+                    ],
+                )
+            },
+        )(),
     )
     monkeypatch.setattr(
         main,
@@ -2068,21 +2129,14 @@ def test_hud_thread_detail_renders_status_policy_activity_and_hints(monkeypatch,
 
     assert "Thread Detail" in rendered
     assert "Design Review" in rendered
-    assert "review-loop" in rendered
-    assert "Phase     review" in rendered
-    assert "Status    BLOCKED" in rendered
-    assert "Compiled  policy=review-outcomes; outcomes=retry, accept, close; gate=Retry Gate" in rendered
-    assert "Next action  submit contribution" in rendered
-    assert "Phase flow  Context - [Review] - Decision" in rendered
-    assert "Procedure flow  Announce - [Collect Feedback] - Resolve" in rendered
-    assert "Protocol / Phase" in rendered
-    assert "Gate / Guard Focus" in rendered
+    assert "Protocol   review-loop" in rendered
+    assert "Phase      Context · • Review · Decision" in rendered
+    assert "Procedure  Announce · • Collect Feedback · Resolve" in rendered
+    assert "Cycle      3" in rendered
+    assert "Status     BLOCKED · gate Retry Gate · guard contribution_required · next submit contribution" in rendered
+    assert "Protocol / Phase" not in rendered
+    assert "Gate / Guard Focus" not in rendered
     assert "Agent Sessions" in rendered
-    assert "cycle: 3" in rendered
-    assert "step: collect-feedback" in rendered
-    assert "Procedure flow  Announce - [Collect Feedback] - Resolve" in rendered
-    assert "guard: contribution_required" in rendered
-    assert "gate: Retry Gate" in rendered
     assert "jun  waiting" in rendered
     assert "BLOCKED" in rendered
     assert "Collect Feedback" in rendered
@@ -2161,9 +2215,92 @@ def test_hud_thread_detail_omits_procedure_flow_when_procedure_data_missing(monk
 
     rendered = main._render_hud_navigator(state, config, limit=5)
 
-    assert "Phase flow  Context - [Review] - Decision" in rendered
-    assert "Procedure flow" not in rendered
-    assert "Procedure flow  None" not in rendered
+    assert "Phase      Context · • Review · Decision" in rendered
+    assert "Procedure  " not in rendered
+    assert "Procedure  None" not in rendered
+
+
+def test_hud_thread_detail_marks_first_procedure_step_when_runtime_step_missing(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    config = _attached_config(data_dir)
+    state = main._HudNavigatorState(screen="thread", selected_thread_id="thread-1")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: config)
+    monkeypatch.setattr(
+        main,
+        "_try_load_thread_snapshot",
+        lambda thread_id, current_config: (
+            {
+                "thread_id": thread_id,
+                "topic": "Procedure Demo",
+                "protocol": "procedure-demo",
+                "current_phase": "review",
+            },
+            {"agents": [{"name": "jun", "status": "waiting"}]},
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_get_protocol_store",
+        lambda: type(
+            "FakeProtocolStore",
+            (),
+            {
+                "get_protocol": lambda self, name: Protocol(
+                    name="procedure-demo",
+                    phases=[
+                        ProtocolPhase(name="context"),
+                        ProtocolPhase(
+                            name="review",
+                            procedure=[
+                                {"role": "reviewer", "action": "inspect", "alias": "Inspect", "key": "inspect"},
+                                {"role": "reviewer", "action": "revise", "alias": "Revise", "key": "revise"},
+                                {"role": "reviewer", "action": "confirm", "alias": "Confirm", "key": "confirm"},
+                            ],
+                        ),
+                        ProtocolPhase(name="decision"),
+                    ],
+                )
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_workflow_event_log",
+        lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_thread_watch_payload",
+        lambda thread, status, events: {
+            "phase_cycle": {
+                "synthetic": True,
+                "state": {
+                    "cycle_index": 1,
+                    "current_step_label": None,
+                    "status": "active",
+                },
+                "visual": {
+                    "procedure": [
+                        {"key": "gate", "label": "Gate", "status": "pending"},
+                    ],
+                },
+            },
+            "trace": [],
+        },
+    )
+    monkeypatch.setattr(main, "_runtime_sessions_for_thread", lambda thread_id, config: [])
+    monkeypatch.setattr(main, "_render_thread_runtime_diagnostics", lambda thread_id, config: [])
+    monkeypatch.setattr(main, "_hud_thread_view_window_size", lambda: 200)
+
+    rendered = main._render_hud_navigator(state, config, limit=5)
+
+    assert "Phase      Context · • Review · Decision" in rendered
+    assert "Procedure  • Inspect · Revise · Confirm" in rendered
 
 
 def test_hud_thread_detail_shows_agent_sessions_and_runtime_summary(monkeypatch, tmp_path):
@@ -2335,6 +2472,36 @@ def test_hud_thread_detail_renders_cockpit_sections_in_stable_order(monkeypatch,
     )
     monkeypatch.setattr(
         main,
+        "_get_protocol_store",
+        lambda: type(
+            "FakeProtocolStore",
+            (),
+            {
+                "get_protocol": lambda self, name: Protocol(
+                    name="review-loop",
+                    phases=[
+                        ProtocolPhase(name="context"),
+                        ProtocolPhase(
+                            name="review",
+                            procedure=[
+                                {"role": "facilitator", "action": "announce", "alias": "Announce"},
+                                {
+                                    "role": "reviewer",
+                                    "action": "collect-feedback",
+                                    "alias": "Collect Feedback",
+                                    "key": "collect-feedback",
+                                },
+                                {"role": "facilitator", "action": "resolve", "alias": "Resolve"},
+                            ],
+                        ),
+                        ProtocolPhase(name="decision"),
+                    ],
+                )
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        main,
         "_thread_watch_payload",
         lambda thread, status, events: {
             "phase_cycle": {
@@ -2403,15 +2570,13 @@ def test_hud_thread_detail_renders_cockpit_sections_in_stable_order(monkeypatch,
         return next(i for i, line in enumerate(lines) if prefix in line)
 
     assert lines[0] == "B-TWIN HUD :: Thread Detail :: mode=attached"
-    assert index_of("Topic") < index_of("Protocol") < index_of("Phase") < index_of("Next action")
-    assert index_of("Protocol / Phase") < index_of("Gate / Guard Focus") < index_of("Recent Activity")
-    assert index_of("Recent Activity") < index_of("Agent Sessions") < index_of("Quick Actions")
+    assert index_of("Topic") < index_of("Protocol") < index_of("Phase") < index_of("Status")
+    assert index_of("Status") < index_of("Recent Activity") < index_of("Agent Sessions") < index_of("Quick Actions")
     assert lines[index_of("Recent Activity") + 1] == "---------------"
-    assert lines[index_of("Protocol / Phase") + 1] == "----------------"
-    assert lines[index_of("Gate / Guard Focus") + 1] == "------------------"
     assert lines[index_of("Agent Sessions") + 1] == "--------------"
     assert lines[index_of("Quick Actions") + 1] == "-------------"
-    assert any(line.startswith("guard:") for line in lines[index_of("Gate / Guard Focus") : index_of("Recent Activity")])
+    assert "Protocol / Phase" not in rendered
+    assert "Gate / Guard Focus" not in rendered
     assert "thread-1" not in lines[1]
     assert "binding=" not in rendered
 
