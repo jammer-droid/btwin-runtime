@@ -397,7 +397,7 @@ assert "Agent Sessions" in hud, hud
 assert "Verdict     PASS" in hud, hud
 assert "Primary     all checks aligned" in hud, hud
 assert "Phase       • Review · Decision" in hud, hud
-assert "Procedure   • Review · Revise · Gate  (cycle 3)" in hud, hud
+assert "Procedure   • Review · Revise · Review Gate  (cycle 3)" in hud, hud
 assert "Next        record outcome" in hud, hud
 assert "Retry Gate completed" in hud, hud
 assert "alice contributed exec" in hud, hud
@@ -450,7 +450,7 @@ print(f"- mailbox reports: {mailbox['count']}")
 print(f"- hud recent activity visible: {'Recent Activity' in hud and 'Retry Gate completed' in hud}")
 print(f"- hud verdict visible: {'Verdict     PASS' in hud and 'Primary     all checks aligned' in hud}")
 print(f"- hud phase progression visible: {'Phase       • Review · Decision' in hud}")
-print(f"- hud procedure visible: {'Procedure   • Review · Revise · Gate  (cycle 3)' in hud}")
+print(f"- hud procedure visible: {'Procedure   • Review · Revise · Review Gate  (cycle 3)' in hud}")
 print(f"- hud next visible: {'Next        record outcome' in hud}")
 print(f"- hud agent session visible: {'Agent Sessions' in hud and 'alice contributed exec' in hud}")
 print(f"- runtime clear: {current_after_clear['bound']}")

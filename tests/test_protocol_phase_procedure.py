@@ -27,7 +27,7 @@ def _expected_phase_cycle_visual_payload(scenario_id: str) -> dict[str, object]:
     return {
         "procedure": [
             *[step.as_dict() for step in scenario.visual_procedure],
-            {"key": "gate", "label": "Gate", "status": "pending"},
+            {"key": "gate", "label": "Review Gate", "status": "pending"},
         ],
         "gates": [gate.as_dict() for gate in scenario.visual_gates],
         "guards": [],
