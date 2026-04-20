@@ -178,6 +178,10 @@ def test_delegate_start_creates_running_delegation_state(tmp_path):
     assert payload["expected_output"] == "review contribution"
     assert "reason_blocked" not in payload
 
+    inbox_response = client.get(f"/api/threads/{thread['thread_id']}/inbox", params={"agent": "alice"})
+    assert inbox_response.status_code == 200
+    assert inbox_response.json()["pending_count"] == 1
+
     second_response = client.post(f"/api/threads/{thread['thread_id']}/delegate/start")
     assert second_response.status_code == 200
     second_payload = second_response.json()
@@ -187,6 +191,10 @@ def test_delegate_start_creates_running_delegation_state(tmp_path):
     assert second_payload["resolved_agent"] == payload["resolved_agent"]
     assert second_payload["required_action"] == payload["required_action"]
     assert second_payload["expected_output"] == payload["expected_output"]
+
+    second_inbox_response = client.get(f"/api/threads/{thread['thread_id']}/inbox", params={"agent": "alice"})
+    assert second_inbox_response.status_code == 200
+    assert second_inbox_response.json()["pending_count"] == 1
 
     status_response = client.get(f"/api/threads/{thread['thread_id']}/delegate/status")
     assert status_response.status_code == 200
@@ -243,6 +251,48 @@ def test_delegate_status_returns_blocked_reason_when_target_role_missing(tmp_pat
     status_response = client.get(f"/api/threads/{thread['thread_id']}/delegate/status")
     assert status_response.status_code == 200
     assert status_response.json()["reason_blocked"] == "missing_target_role"
+
+
+def test_delegate_start_rejects_closed_thread(tmp_path):
+    thread_store = ThreadStore(tmp_path / "threads")
+    protocol_store = ProtocolStore(tmp_path / "protocols")
+    event_bus = EventBus()
+    protocol_store.save_protocol(
+        compile_protocol_definition(
+            {
+                "name": "delegate-review",
+                "phases": [
+                    {
+                        "name": "review",
+                        "actions": ["contribute"],
+                        "procedure": [
+                            {"role": "reviewer", "action": "review", "alias": "Review"},
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+
+    thread = thread_store.create_thread(
+        topic="Closed delegate thread",
+        protocol="delegate-review",
+        participants=["alice"],
+        initial_phase="review",
+    )
+    thread_store.close_thread(thread["thread_id"], summary="done")
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(create_threads_router(thread_store, protocol_store, event_bus))
+    client = TestClient(app)
+
+    response = client.post(f"/api/threads/{thread['thread_id']}/delegate/start")
+    assert response.status_code == 404
+
+    status_response = client.get(f"/api/threads/{thread['thread_id']}/delegate/status")
+    assert status_response.status_code == 404
 
 
 def test_threads_router_exposes_system_mailbox_reports(tmp_path):

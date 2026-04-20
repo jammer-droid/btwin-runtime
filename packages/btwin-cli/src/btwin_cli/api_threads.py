@@ -238,6 +238,97 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _delegate_dispatch_client_message_id(
+    *,
+    thread_id: str,
+    phase_cycle_state: PhaseCycleState,
+    assignment: DelegationAssignment,
+) -> str:
+    return ":".join(
+        [
+            "delegate",
+            "start",
+            thread_id,
+            str(phase_cycle_state.cycle_index),
+            phase_cycle_state.phase_name or "",
+            assignment.target_role or "",
+            assignment.resolved_agent or "",
+            assignment.required_action or "",
+        ]
+    )
+
+
+def _delegate_dispatch_content(
+    *,
+    assignment: DelegationAssignment,
+    phase_cycle_state: PhaseCycleState,
+) -> tuple[str, str]:
+    target_role = assignment.target_role or "unassigned"
+    resolved_agent = assignment.resolved_agent or "unassigned"
+    required_action = assignment.required_action or "continue"
+    expected_output = assignment.expected_output or "n/a"
+    content = (
+        "## Delegation Start\n\n"
+        f"Role: {target_role}\n\n"
+        f"Agent: @{resolved_agent}\n\n"
+        f"Phase: {phase_cycle_state.phase_name}\n\n"
+        f"Action: {required_action}\n\n"
+        f"Expected output: {expected_output}\n"
+    )
+    tldr = f"delegate {phase_cycle_state.phase_name} -> {resolved_agent}"
+    return content, tldr
+
+
+def _delegate_dispatch_exists(
+    thread_store: ThreadStore,
+    *,
+    thread_id: str,
+    client_message_id: str,
+) -> bool:
+    return any(
+        message.get("client_message_id") == client_message_id
+        for message in thread_store.list_messages(thread_id)
+    )
+
+
+def _dispatch_delegate_assignment(
+    thread_store: ThreadStore,
+    *,
+    thread_id: str,
+    assignment: DelegationAssignment,
+    phase_cycle_state: PhaseCycleState,
+) -> None:
+    if assignment.status != "running" or not assignment.resolved_agent:
+        return
+
+    client_message_id = _delegate_dispatch_client_message_id(
+        thread_id=thread_id,
+        phase_cycle_state=phase_cycle_state,
+        assignment=assignment,
+    )
+    if _delegate_dispatch_exists(thread_store, thread_id=thread_id, client_message_id=client_message_id):
+        return
+
+    content, tldr = _delegate_dispatch_content(
+        assignment=assignment,
+        phase_cycle_state=phase_cycle_state,
+    )
+    thread_store.send_message(
+        thread_id=thread_id,
+        from_agent="btwin",
+        content=content,
+        tldr=tldr,
+        client_message_id=client_message_id,
+        msg_type="delegation",
+        delivery_mode="direct",
+        target_agents=[assignment.resolved_agent],
+        routing_source="btwin.delegate.start",
+        routing_reason="delegate_assignment",
+        message_phase=phase_cycle_state.phase_name,
+        state_affecting=False,
+    )
+
+
 def _delegation_state_from_assignment(
     *,
     thread_id: str,
@@ -596,6 +687,8 @@ def create_threads_router(
         thread = thread_store.get_thread(thread_id)
         if thread is None:
             raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")
+        if thread.get("status") != "active":
+            raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found or closed")
 
         protocol_name = thread.get("protocol")
         protocol = protocol_store.get_protocol(protocol_name) if isinstance(protocol_name, str) else None
@@ -629,6 +722,12 @@ def create_threads_router(
             assignment=assignment,
         )
         delegation_store.write(state)
+        _dispatch_delegate_assignment(
+            thread_store,
+            thread_id=thread_id,
+            assignment=assignment,
+            phase_cycle_state=phase_cycle_state,
+        )
         return state.model_dump(exclude_none=True)
 
     @router.get("/api/threads/{thread_id}/delegate/status")
