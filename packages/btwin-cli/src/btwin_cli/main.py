@@ -1450,6 +1450,121 @@ def _validation_summary_pair_row(
     return grid
 
 
+def _shared_validation_header_context(
+    thread: dict[str, object],
+    phase_cycle_payload: dict[str, object] | None,
+    trace_rows: list[dict[str, object]],
+    runtime_sessions: dict[str, dict[str, object]],
+    protocol_plan: dict[str, object] | None,
+    *,
+    include_step_fallback: bool = True,
+) -> dict[str, str | dict[str, object]]:
+    state_payload = phase_cycle_payload.get("state") if isinstance(phase_cycle_payload, dict) else None
+    cycle_index = state_payload.get("cycle_index") if isinstance(state_payload, dict) else None
+    step_label = state_payload.get("current_step_label") if isinstance(state_payload, dict) else None
+    validation = _detail_validation_snapshot(
+        thread,
+        phase_cycle_payload,
+        trace_rows,
+        runtime_sessions,
+        protocol_plan,
+    )
+    primary_reason = _detail_primary_validation_reason(validation)
+    status_text, next_hint = _detail_status_summary(trace_rows, phase_cycle_payload)
+    next_action_token = str(validation.get("next_expected_action") or "").strip()
+    next_action_display = (
+        _humanize_hud_action(next_action_token)
+        if next_action_token and next_action_token != "none"
+        else next_hint or "-"
+    )
+
+    protocol_name = str(thread.get("protocol") or "").strip()
+    phase = str(thread.get("current_phase") or "-")
+    phase_definition = _thread_watch_protocol_phase(
+        _get_protocol_store().get_protocol(protocol_name) if protocol_name else None,
+        phase,
+    )
+    phase_progression = _detail_phase_progression(thread)
+    if not phase_progression or phase_progression == "-":
+        phase_progression = f"• {_detail_progress_label(phase)}"
+
+    procedure_progression = _detail_procedure_progression(
+        phase_cycle_payload,
+        phase_definition,
+        step_label,
+    )
+    if include_step_fallback and (not procedure_progression or procedure_progression == "-"):
+        procedure_progression = f"• {_detail_progress_label(step_label)}" if step_label else "-"
+    if procedure_progression and procedure_progression != "-" and isinstance(cycle_index, int):
+        procedure_progression = f"{procedure_progression}  (cycle {cycle_index})"
+
+    return {
+        "topic": str(thread.get("topic") or thread.get("thread_id") or "-"),
+        "protocol": protocol_name or "-",
+        "verdict": str(validation.get("verdict") or "PASS").upper(),
+        "primary_reason": primary_reason,
+        "phase_progression": phase_progression.replace(" - ", " · "),
+        "procedure_progression": procedure_progression.replace(" - ", " · ")
+        if procedure_progression and procedure_progression != "-"
+        else "-",
+        "next_action": next_action_display,
+        "validation": validation,
+    }
+
+
+def _shared_validation_header_lines(context: dict[str, str | dict[str, object]]) -> list[str]:
+    lines = [
+        _validation_summary_line("Topic", str(context["topic"])),
+        _validation_summary_line("Protocol", str(context["protocol"])),
+        _validation_summary_line("Verdict", str(context["verdict"])),
+        _validation_summary_line("Primary", str(context["primary_reason"])),
+        _validation_summary_line("Phase", str(context["phase_progression"])),
+    ]
+    procedure_progression = str(context.get("procedure_progression") or "").strip()
+    if procedure_progression and procedure_progression != "-":
+        lines.append(_validation_summary_line("Procedure", procedure_progression))
+    lines.append(_validation_summary_line("Next", str(context["next_action"])))
+    return lines
+
+
+def _shared_validation_header_renderables(
+    context: dict[str, str | dict[str, object]],
+    animation_phase: int = 0,
+) -> list[RenderableType | str]:
+    verdict = str(context["verdict"])
+    primary_style = "" if verdict == "PASS" else "yellow"
+    rows: list[RenderableType | str] = [
+        _validation_summary_pair_row(
+            "Topic",
+            Text(str(context["topic"]), style="bold"),
+            "Protocol",
+            Text(str(context["protocol"]), style="dim"),
+        ),
+        _validation_summary_pair_row(
+            "Verdict",
+            _verdict_text(verdict),
+            "Primary",
+            Text(str(context["primary_reason"]), style=primary_style),
+        ),
+        _validation_summary_row(
+            "Phase",
+            _hud_progress_value_text(str(context["phase_progression"]), animation_phase),
+        ),
+    ]
+    procedure_progression = str(context.get("procedure_progression") or "").strip()
+    if procedure_progression and procedure_progression != "-":
+        rows.append(
+            _validation_summary_row(
+                "Procedure",
+                _hud_progress_value_text(procedure_progression, animation_phase),
+            )
+        )
+    rows.append(
+        _validation_summary_row("Next", Text(str(context["next_action"]), style="cyan"))
+    )
+    return rows
+
+
 def _detail_phase_progression(thread: dict[str, object]) -> str | None:
     protocol_name = str(thread.get("protocol") or "").strip()
     if not protocol_name:
@@ -1541,91 +1656,21 @@ def _render_thread_detail(
 ) -> str:
     config = _get_config()
     thread_id = str(thread.get("thread_id", ""))
-    topic = str(thread.get("topic") or thread_id)
-    protocol = str(thread.get("protocol") or "-")
-    protocol_definition = _get_protocol_store().get_protocol(protocol) if protocol and protocol != "-" else None
-    phase = str(thread.get("current_phase") or "-")
-    phase_definition = _thread_watch_protocol_phase(protocol_definition, phase)
     state = phase_cycle_payload.get("state") if isinstance(phase_cycle_payload, dict) else {}
-    compiled = _detail_compiled_policy(phase_cycle_payload, trace_rows)
-    status_text, next_hint = _detail_status_summary(trace_rows, phase_cycle_payload)
     primary_row = _detail_primary_trace_row(trace_rows)
-
-    cycle_index = state.get("cycle_index") if isinstance(state, dict) else None
-    step_label = state.get("current_step_label") if isinstance(state, dict) else None
-
-    procedure_summary = None
-    current_procedure = None
-    gates_summary = None
-    current_gate = None
-    completed_cycles = None
-    if isinstance(phase_cycle_payload, dict):
-        visual = phase_cycle_payload.get("visual")
-        if isinstance(state, dict):
-            completed_cycles = _phase_cycle_completed_count(state)
-        if isinstance(visual, dict):
-            procedure_nodes = visual.get("procedure")
-            if isinstance(procedure_nodes, list) and procedure_nodes:
-                procedure_labels: list[str] = []
-                procedure_summary = " -> ".join(
-                    str(node.get("label", node.get("key", "")))
-                    for node in procedure_nodes
-                    if isinstance(node, dict)
-                )
-                for node in procedure_nodes:
-                    if not isinstance(node, dict):
-                        continue
-                    label = str(node.get("label") or node.get("key") or "").strip()
-                    if not label:
-                        continue
-                    procedure_labels.append(label)
-                    if node.get("status") == "active" or (isinstance(step_label, str) and step_label and node.get("key") == step_label):
-                        current_procedure = label
-                if current_procedure is None and procedure_labels:
-                    current_procedure = procedure_labels[0]
-            gate_nodes = visual.get("gates")
-            if isinstance(gate_nodes, list) and gate_nodes:
-                gate_labels: list[str] = []
-                gates_summary = " -> ".join(
-                    str(node.get("label", node.get("key", "")))
-                    for node in gate_nodes
-                    if isinstance(node, dict)
-                )
-                for node in gate_nodes:
-                    if not isinstance(node, dict):
-                        continue
-                    label = str(node.get("label") or node.get("key") or "").strip()
-                    if not label:
-                        continue
-                    gate_labels.append(label)
-                    if node.get("status") == "active":
-                        current_gate = label
-                if current_gate is None and isinstance(primary_row, dict):
-                    gate_alias = str(primary_row.get("gate_alias") or "").strip()
-                    gate_key = str(primary_row.get("gate_key") or "").strip()
-                    current_gate = gate_alias or gate_key or None
-                if current_gate is None and gate_labels:
-                    current_gate = gate_labels[0]
 
     runtime_sessions = {
         agent_name: session
         for agent_name, session in _runtime_sessions_for_thread(thread_id, config)
     }
     protocol_plan = _try_protocol_next_snapshot(thread_id, config)
-    validation = _detail_validation_snapshot(
+    header_context = _shared_validation_header_context(
         thread,
         phase_cycle_payload,
         trace_rows,
         runtime_sessions,
         protocol_plan,
-    )
-    validation_cases = _detail_validation_cases(thread, trace_rows, protocol_plan)
-    primary_reason = _detail_primary_validation_reason(validation)
-    next_action_token = str(validation["next_expected_action"] or "").strip()
-    next_action_display = (
-        _humanize_hud_action(next_action_token)
-        if next_action_token and next_action_token != "none"
-        else next_hint
+        include_step_fallback=False,
     )
     agents = status_summary.get("agents", [])
     actor_parts: list[str] = []
@@ -1642,43 +1687,7 @@ def _render_thread_detail(
                 actor_part += f" ({session_summary})"
             actor_parts.append(actor_part)
     agent_session_rows = _render_detail_agent_session_rows(agents, runtime_sessions)
-
-    lines = [
-        _detail_summary_line("Topic", topic),
-        _detail_summary_line("Protocol", protocol),
-    ]
-
-    current_guard = ""
-    if isinstance(primary_row, dict):
-        current_guard = str(primary_row.get("baseline_guard") or primary_row.get("reason") or "").strip()
-
-    phase_progression = _detail_phase_progression(thread)
-    procedure_progression = _detail_procedure_progression(
-        phase_cycle_payload,
-        phase_definition,
-        step_label,
-    )
-
-    if phase_progression:
-        lines.append(_detail_summary_line("Phase", phase_progression.replace(" - ", " · ")))
-    else:
-        lines.append(_detail_summary_line("Phase", phase))
-    if procedure_progression:
-        lines.append(_detail_summary_line("Procedure", procedure_progression.replace(" - ", " · ")))
-    elif isinstance(current_procedure, str) and current_procedure:
-        lines.append(_detail_summary_line("Procedure", f"• {current_procedure}"))
-    elif isinstance(procedure_summary, str) and procedure_summary:
-        lines.append(_detail_summary_line("Procedure", procedure_summary.replace(" -> ", " · ")))
-
-    cycle_line = _detail_cycle_line(cycle_index, completed_cycles)
-    if cycle_line:
-        lines.append(_detail_summary_line("Cycle", cycle_line))
-    lines.append(
-        _detail_summary_line(
-            "Status",
-            _detail_status_line(status_text, current_gate, current_guard, next_action_display),
-        )
-    )
+    lines = _shared_validation_header_lines(header_context)
 
     _append_detail_section(lines, "Recent Activity")
     if trace_rows:
@@ -1742,17 +1751,12 @@ def _render_validation_focus(
     trace_rows: list[dict[str, object]],
 ) -> str:
     config = _get_config()
-    state = phase_cycle_payload.get("state") if isinstance(phase_cycle_payload, dict) else {}
-    cycle_index = state.get("cycle_index") if isinstance(state, dict) else None
-    step_label = state.get("current_step_label") if isinstance(state, dict) else None
-
     thread_id = str(thread.get("thread_id", ""))
     runtime_sessions = {
         agent_name: session
         for agent_name, session in _runtime_sessions_for_thread(thread_id, config)
     }
     protocol_plan = _try_protocol_next_snapshot(thread_id, config)
-    telemetry_rows = _validation_telemetry_rows(thread_id, config)
     validation = _detail_validation_snapshot(
         thread,
         phase_cycle_payload,
@@ -1761,57 +1765,20 @@ def _render_validation_focus(
         protocol_plan,
     )
     validation_cases = _detail_validation_cases(thread, trace_rows, protocol_plan)
-    primary_reason = _detail_primary_validation_reason(validation)
     compliance_rows = _validation_compliance_rows(validation, validation_cases, runtime_sessions, trace_rows)
-    phase = str(thread.get("current_phase") or "-")
-    phase_definition = _thread_watch_protocol_phase(
-        _get_protocol_store().get_protocol(str(thread.get("protocol") or "")) if thread.get("protocol") else None,
-        phase,
-    )
-    snapshot = build_validation_snapshot(
+    header_context = _shared_validation_header_context(
         thread=thread,
         phase_cycle_payload=phase_cycle_payload,
-        validation=validation,
-        validation_cases=validation_cases,
         trace_rows=trace_rows,
         runtime_sessions=runtime_sessions,
-        telemetry_rows=telemetry_rows,
         protocol_plan=protocol_plan,
-        phase_progression=_detail_phase_progression(thread),
-        procedure_progression=(
-            _detail_procedure_progression(phase_cycle_payload, phase_definition, step_label)
-            or (f"• {_detail_progress_label(step_label)}" if step_label else None)
-        ),
+        include_step_fallback=True,
     )
-    status_text, next_hint = _detail_status_summary(trace_rows, phase_cycle_payload)
-    next_action_token = str(validation["next_expected_action"] or "").strip()
-    next_action_display = (
-        _humanize_hud_action(next_action_token)
-        if next_action_token and next_action_token != "none"
-        else next_hint
-    )
-    topic = str(snapshot.get("topic") or thread_id)
-    protocol = str(snapshot.get("protocol") or "-")
-    phase_progression = str(snapshot.get("phase_progression") or "").strip()
-    if not phase_progression or phase_progression == "-":
-        phase_progression = f"• {_detail_progress_label(phase)}"
-    procedure_progression = str(snapshot.get("procedure_progression") or "").strip()
-    if not procedure_progression or procedure_progression == "-":
-        procedure_progression = f"• {_detail_progress_label(step_label)}" if step_label else "-"
-    lines = [
-        _validation_summary_line("Topic", topic),
-        _validation_summary_line("Protocol", protocol),
-        _validation_summary_line("Verdict", str(validation["verdict"])),
-        _validation_summary_line("Primary", primary_reason),
-        _validation_summary_line("Phase", phase_progression.replace(" - ", " · ")),
-    ]
-    if procedure_progression != "-":
-        lines.append(_validation_summary_line("Procedure", procedure_progression.replace(" - ", " · ")))
-    lines.append(_validation_summary_line("Next", next_action_display))
+    lines = _shared_validation_header_lines(header_context)
 
     _append_detail_section(lines, "Rule Compliance")
     lines.append(f"verdict: {validation['verdict']}")
-    lines.append(f"primary_reason: {primary_reason}")
+    lines.append(f"primary_reason: {header_context['primary_reason']}")
     lines.append(f"next expected action: {validation['next_expected_action']}")
     for row in compliance_rows:
         lines.append(f"{row['name']}: {row['verdict']}")
@@ -3312,6 +3279,18 @@ def _render_hud_thread_detail_renderable(
             agent_name: session
             for agent_name, session in _runtime_sessions_for_thread(state.selected_thread_id, config)
         }
+    protocol_plan = snapshot.get("protocol_plan") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    if not isinstance(protocol_plan, dict):
+        protocol_plan = _try_protocol_next_snapshot(state.selected_thread_id, config)
+    header_context = _shared_validation_header_context(
+        thread,
+        trace_payload.get("phase_cycle") if isinstance(trace_payload, dict) else None,
+        trace_payload.get("trace", []) if isinstance(trace_payload, dict) else [],
+        runtime_sessions,
+        protocol_plan,
+        include_step_fallback=False,
+    )
+    header_rows = _shared_validation_header_renderables(header_context, animation_phase)
     agent_rows: list[RenderableType | str] = list(
         _render_agent_session_text_rows(
             status_summary.get("agents", []),
@@ -3327,11 +3306,11 @@ def _render_hud_thread_detail_renderable(
         Layout(
             _hud_panel(
                 protocol_title,
-                _hud_thread_pulse_renderables(intro_lines, animation_phase),
+                header_rows,
                 border_style="bright_blue",
             ),
             name="thread-summary",
-            size=max(len(intro_lines) + 2, 8),
+            size=max(len(header_rows) + 2, 8),
         ),
         Layout(name="thread-body-row", ratio=1),
     )
@@ -3414,75 +3393,18 @@ def _render_hud_validation_focus_renderable(
         protocol_plan,
     )
     validation_cases = _detail_validation_cases(thread, trace_rows, protocol_plan)
-    primary_reason = _detail_primary_validation_reason(validation)
-    verdict = str(validation.get("verdict") or "PASS").upper()
-    next_action_token = str(validation.get("next_expected_action") or "").strip()
-    status_text, next_hint = _detail_status_summary(trace_rows, phase_cycle_payload)
-    next_action_display = (
-        _humanize_hud_action(next_action_token)
-        if next_action_token and next_action_token != "none"
-        else next_hint or "-"
+    header_context = _shared_validation_header_context(
+        thread,
+        phase_cycle_payload,
+        trace_rows,
+        runtime_sessions,
+        protocol_plan,
+        include_step_fallback=True,
     )
-    state_payload = phase_cycle_payload.get("state") if isinstance(phase_cycle_payload, dict) else None
-    cycle_index = state_payload.get("cycle_index") if isinstance(state_payload, dict) else None
-    step_label = state_payload.get("current_step_label") if isinstance(state_payload, dict) else None
-    phase = str(thread.get("current_phase") or "-")
-    phase_definition = _thread_watch_protocol_phase(
-        _get_protocol_store().get_protocol(str(thread.get("protocol") or "")) if thread.get("protocol") else None,
-        phase,
-    )
-    validation_snapshot = build_validation_snapshot(
-        thread=thread,
-        phase_cycle_payload=phase_cycle_payload,
-        validation=validation,
-        validation_cases=validation_cases,
-        trace_rows=trace_rows,
-        runtime_sessions=runtime_sessions,
-        telemetry_rows=telemetry_rows,
-        protocol_plan=protocol_plan,
-        phase_progression=_detail_phase_progression(thread),
-        procedure_progression=(
-            _detail_procedure_progression(phase_cycle_payload, phase_definition, step_label)
-            or (f"• {_detail_progress_label(step_label)}" if step_label else None)
-        ),
-    )
-    topic = str(validation_snapshot.get("topic") or state.selected_thread_id)
-    protocol = str(validation_snapshot.get("protocol") or "-")
+    verdict = str(header_context["verdict"])
 
     rows = _validation_compliance_rows(validation, validation_cases, runtime_sessions, trace_rows)
-
-    phase_progression = str(validation_snapshot.get("phase_progression") or "").strip()
-    if not phase_progression or phase_progression == "-":
-        phase_progression = f"• {_detail_progress_label(phase)}"
-    procedure_progression = str(validation_snapshot.get("procedure_progression") or "").strip()
-    if not procedure_progression or procedure_progression == "-":
-        procedure_progression = f"• {_detail_progress_label(step_label)}" if step_label else "-"
-    context_rows: list[RenderableType | str] = [
-        _validation_summary_pair_row(
-            "Topic",
-            Text(topic, style="bold"),
-            "Protocol",
-            Text(protocol, style="dim"),
-        ),
-        _validation_summary_pair_row(
-            "Verdict",
-            _verdict_text(verdict),
-            "Primary",
-            Text(primary_reason, style="" if verdict == "PASS" else "yellow"),
-        ),
-        _validation_summary_row(
-            "Phase",
-            _hud_progress_value_text(phase_progression.replace(" - ", " · "), animation_phase),
-        ),
-    ]
-    if procedure_progression != "-":
-        context_rows.append(
-            _validation_summary_row(
-                "Procedure",
-                _hud_progress_value_text(procedure_progression.replace(" - ", " · "), animation_phase),
-            )
-        )
-    context_rows.append(_validation_summary_row("Next", Text(next_action_display, style="cyan")))
+    context_rows = _shared_validation_header_renderables(header_context, animation_phase)
 
     table = Table(
         box=box.SIMPLE_HEAD,

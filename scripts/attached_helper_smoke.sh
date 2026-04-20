@@ -394,9 +394,11 @@ assert close_gate["cycle_index"] == 1, close_gate
 assert close_gate["next_cycle_index"] == 1, close_gate
 assert "Recent Activity" in hud, hud
 assert "Agent Sessions" in hud, hud
-assert "Phase      • Review · Decision" in hud, hud
-assert "Procedure  • Review · Revise · Gate" in hud, hud
-assert "Status     READY · gate Retry Gate · next record outcome" in hud, hud
+assert "Verdict     PASS" in hud, hud
+assert "Primary     all checks aligned" in hud, hud
+assert "Phase       • Review · Decision" in hud, hud
+assert "Procedure   • Review · Revise · Gate  (cycle 3)" in hud, hud
+assert "Next        record outcome" in hud, hud
 assert "Retry Gate completed" in hud, hud
 assert "alice contributed exec" in hud, hud
 assert cleared["cleared"] is True, cleared
@@ -446,8 +448,10 @@ print(
 )
 print(f"- mailbox reports: {mailbox['count']}")
 print(f"- hud recent activity visible: {'Recent Activity' in hud and 'Retry Gate completed' in hud}")
-print(f"- hud phase progression visible: {'Phase      • Review · Decision' in hud}")
-print(f"- hud procedure visible: {'Procedure  • Review · Revise · Gate' in hud}")
+print(f"- hud verdict visible: {'Verdict     PASS' in hud and 'Primary     all checks aligned' in hud}")
+print(f"- hud phase progression visible: {'Phase       • Review · Decision' in hud}")
+print(f"- hud procedure visible: {'Procedure   • Review · Revise · Gate  (cycle 3)' in hud}")
+print(f"- hud next visible: {'Next        record outcome' in hud}")
 print(f"- hud agent session visible: {'Agent Sessions' in hud and 'alice contributed exec' in hud}")
 print(f"- runtime clear: {current_after_clear['bound']}")
 print(f"- mailbox reports after clear: {mailbox_after_clear['count']}")

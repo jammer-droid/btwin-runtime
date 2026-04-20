@@ -2492,16 +2492,18 @@ def test_hud_thread_detail_renders_status_policy_activity_and_hints(monkeypatch,
 
     assert "Thread Detail" in rendered
     assert "Design Review" in rendered
-    assert "Protocol   review-loop" in rendered
-    assert "Phase      Context · • Review · Decision" in rendered
-    assert "Procedure  Announce · • Collect Feedback · Resolve" in rendered
-    assert "Cycle      3" in rendered
-    assert "Status     BLOCKED · gate Retry Gate · guard contribution_required · next submit contribution" in rendered
+    assert "Protocol    review-loop" in rendered
+    assert "Verdict     WARN" in rendered
+    assert "Primary     Missing contribution for current phase." in rendered
+    assert "Phase       Context · • Review · Decision" in rendered
+    assert "Procedure   Announce · • Collect Feedback · Resolve  (cycle 3)" in rendered
+    assert "Next        submit contribution" in rendered
+    assert "Cycle      " not in rendered
+    assert "Status     " not in rendered
     assert "Protocol / Phase" not in rendered
     assert "Gate / Guard Focus" not in rendered
     assert "Agent Sessions" in rendered
     assert "jun  waiting" in rendered
-    assert "BLOCKED" in rendered
     assert "Collect Feedback" in rendered
     assert "Recent Activity" in rendered
     assert "Quick Actions" not in rendered
@@ -2577,9 +2579,13 @@ def test_hud_thread_detail_omits_procedure_flow_when_procedure_data_missing(monk
 
     rendered = main._render_hud_navigator(state, config, limit=5)
 
-    assert "Phase      Context · • Review · Decision" in rendered
+    assert "Verdict     WARN" in rendered
+    assert "Primary     no recent workflow trace" in rendered
+    assert "Phase       Context · • Review · Decision" in rendered
     assert "Procedure  " not in rendered
     assert "Procedure  None" not in rendered
+    assert "Cycle      " not in rendered
+    assert "Status     " not in rendered
 
 
 def test_hud_thread_detail_marks_first_procedure_step_when_runtime_step_missing(monkeypatch, tmp_path):
@@ -2661,8 +2667,11 @@ def test_hud_thread_detail_marks_first_procedure_step_when_runtime_step_missing(
 
     rendered = main._render_hud_navigator(state, config, limit=5)
 
-    assert "Phase      Context · • Review · Decision" in rendered
-    assert "Procedure  • Inspect · Revise · Confirm" in rendered
+    assert "Verdict     WARN" in rendered
+    assert "Phase       Context · • Review · Decision" in rendered
+    assert "Procedure   • Inspect · Revise · Confirm  (cycle 1)" in rendered
+    assert "Cycle      " not in rendered
+    assert "Status     " not in rendered
 
 
 def test_hud_thread_detail_shows_agent_sessions_and_runtime_summary(monkeypatch, tmp_path):
@@ -2932,8 +2941,9 @@ def test_hud_thread_detail_renders_cockpit_sections_in_stable_order(monkeypatch,
         return next(i for i, line in enumerate(lines) if prefix in line)
 
     assert lines[0] == "B-TWIN HUD :: Thread Detail :: mode=attached"
-    assert index_of("Topic") < index_of("Protocol") < index_of("Phase") < index_of("Status")
-    assert index_of("Status") < index_of("Recent Activity") < index_of("Agent Sessions")
+    assert index_of("Topic") < index_of("Protocol") < index_of("Verdict") < index_of("Primary")
+    assert index_of("Primary") < index_of("Phase") < index_of("Procedure") < index_of("Next")
+    assert index_of("Next") < index_of("Recent Activity") < index_of("Agent Sessions")
     assert lines[index_of("Recent Activity") + 1] == "---------------"
     assert lines[index_of("Agent Sessions") + 1] == "--------------"
     assert "Quick Actions" not in rendered
