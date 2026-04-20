@@ -1798,9 +1798,6 @@ def _render_validation_focus(
     procedure_progression = str(snapshot.get("procedure_progression") or "").strip()
     if not procedure_progression or procedure_progression == "-":
         procedure_progression = f"• {_detail_progress_label(step_label)}" if step_label else "-"
-    relevant_case_progression = str(snapshot.get("relevant_case_progression") or "").strip()
-    evidence_summary = snapshot.get("evidence_summary")
-
     lines = [
         _validation_summary_line("Topic", topic),
         _validation_summary_line("Protocol", protocol),
@@ -1811,12 +1808,6 @@ def _render_validation_focus(
     if procedure_progression != "-":
         lines.append(_validation_summary_line("Procedure", procedure_progression.replace(" - ", " · ")))
     lines.append(_validation_summary_line("Next", next_action_display))
-    lines.append(_validation_summary_line("Status", status_text))
-    if relevant_case_progression and relevant_case_progression != "-":
-        lines.append(_validation_summary_line("Cases", relevant_case_progression.replace(" - ", " · ")))
-    if isinstance(evidence_summary, list) and evidence_summary:
-        lines.append(_validation_summary_line("Evidence", " · ".join(str(item) for item in evidence_summary)))
-        lines.append(_validation_summary_line("Confidence", str(snapshot.get("confidence") or "-")))
 
     _append_detail_section(lines, "Rule Compliance")
     lines.append(f"verdict: {validation['verdict']}")
@@ -3466,9 +3457,6 @@ def _render_hud_validation_focus_renderable(
     procedure_progression = str(validation_snapshot.get("procedure_progression") or "").strip()
     if not procedure_progression or procedure_progression == "-":
         procedure_progression = f"• {_detail_progress_label(step_label)}" if step_label else "-"
-    relevant_case_progression = str(validation_snapshot.get("relevant_case_progression") or "").strip()
-    evidence_summary = validation_snapshot.get("evidence_summary")
-
     context_rows: list[RenderableType | str] = [
         _validation_summary_pair_row(
             "Topic",
@@ -3495,24 +3483,6 @@ def _render_hud_validation_focus_renderable(
             )
         )
     context_rows.append(_validation_summary_row("Next", Text(next_action_display, style="cyan")))
-    context_rows.append(_validation_summary_row("Status", status_text))
-    if relevant_case_progression and relevant_case_progression != "-":
-        context_rows.append(
-            _validation_summary_row("Cases", relevant_case_progression.replace(" - ", " · "))
-        )
-    if isinstance(evidence_summary, list) and evidence_summary:
-        context_rows.append(
-            _validation_summary_row(
-                "Evidence",
-                " · ".join(str(item) for item in evidence_summary),
-            )
-        )
-        context_rows.append(
-            _validation_summary_row(
-                "Confidence",
-                Text(str(validation_snapshot.get("confidence") or "-"), style="cyan"),
-            )
-        )
 
     table = Table(
         box=box.SIMPLE_HEAD,

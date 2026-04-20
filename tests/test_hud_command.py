@@ -1653,8 +1653,8 @@ def test_hud_validation_renderable_shows_validation_sections(monkeypatch, tmp_pa
     assert "Expected" in rendered
     assert "Actual" in rendered
     assert "Missing contribution blocked" in rendered
-    assert "Confidence" in rendered
-    assert "workflow trace present" in rendered
+    assert "Confidence" not in rendered
+    assert "workflow trace present" not in rendered
 
 
 def test_hud_validation_focus_uses_protocol_next_for_validation_gap(monkeypatch, tmp_path):
@@ -1723,17 +1723,18 @@ def test_hud_validation_focus_uses_protocol_next_for_validation_gap(monkeypatch,
 
     assert "Verdict     WARN" in rendered
     assert "Primary     jun missing scope, findings" in rendered
-    assert "Confidence  high" in rendered
-    assert "Evidence    workflow trace present · runtime sessions unavailable · telemetry signals 2 recent · protocol gaps 1 participant" in rendered
     assert "Phase       • Analysis · Discussion" in rendered
     assert "Procedure   • Gate" in rendered
-    assert "Cases       Missing contribution blocked [PASS]" in rendered
+    assert "Next        submit contribution" in rendered
     assert "Rule Compliance" in rendered
     assert "Required contribution: WARN" in rendered
     assert "primary_reason: jun missing scope, findings" in rendered
     assert "next expected action: submit_contribution" in rendered
-    assert "Next        submit contribution" in rendered
     assert "Flow" not in rendered
+    assert "Status" not in rendered
+    assert "Cases" not in rendered
+    assert "Evidence" not in rendered
+    assert "Confidence" not in rendered
     assert "Reasons" in rendered
     assert "- jun missing scope, findings" in rendered
     assert "Why this verdict" not in rendered
@@ -1805,13 +1806,12 @@ def test_hud_validation_renderable_shows_context_and_evidence_lines(monkeypatch,
     assert "Phase" in rendered
     assert "Procedure" in rendered
     assert "Announce · ⠙ Collect Feedback · Resolve" in rendered or "⠙ Collect Feedback" in rendered
-    assert "Cases" in rendered
-    assert "Missing contribution blocked [PASS]" in rendered
-    assert "Evidence" in rendered
-    assert "telemetry signals 2 recent" in rendered
-    assert "Confidence" in rendered
     assert "Primary" in rendered
     assert "Next" in rendered
+    assert "Status" not in rendered
+    assert "Cases" not in rendered
+    assert "Evidence" not in rendered
+    assert "Confidence" not in rendered
     assert "Trace / Reason Excerpt" not in rendered
 
 
