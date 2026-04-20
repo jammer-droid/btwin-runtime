@@ -38,6 +38,7 @@ from btwin_core.session_supervisor import (
 )
 from btwin_core.session_transports import TransportLaunchContext, build_transport_for_provider
 from btwin_core.thread_store import ThreadStore
+from btwin_core.validation_telemetry import ValidationTelemetryStore
 from btwin_core.prototypes.persistent_sessions.base import PersistentSessionAdapter
 from btwin_core.prototypes.persistent_sessions.types import SessionConfig, SessionTurn
 
@@ -106,6 +107,7 @@ class AgentRunner:
         self._event_bus = event_bus
         self._config = self._resolve_runtime_config(config)
         self._runtime_event_logger = runtime_event_logger
+        self._validation_telemetry = ValidationTelemetryStore(self._config.data_dir)
         self._providers_config = self._load_providers(providers_path)
         self._provider_cache: dict[str, CLIProvider] = {}
         self._message_router = MessageRouter()
@@ -244,6 +246,12 @@ class AgentRunner:
             resource_id=thread_id,
             metadata=metadata,
         ))
+        self._record_validation_signal(
+            thread_id,
+            agent_name,
+            signal="session_state_changed",
+            payload={"state": state, **extra},
+        )
 
     def _emit_agent_typing(
         self,
@@ -290,6 +298,42 @@ class AgentRunner:
             provider=provider,
             transport_mode=transport_mode,
             details=details,
+        )
+
+    def _validation_context(self, thread_id: str) -> dict[str, str | None]:
+        thread = self._threads.get_thread(thread_id)
+        if thread is None:
+            return {
+                "phase": None,
+                "procedure_step": None,
+                "gate": None,
+            }
+        return {
+            "phase": thread.get("current_phase"),
+            "procedure_step": None,
+            "gate": None,
+        }
+
+    def _record_validation_signal(
+        self,
+        thread_id: str,
+        agent_name: str,
+        *,
+        signal: str,
+        payload: dict[str, object] | None = None,
+        evidence_level: str = "critical",
+    ) -> None:
+        context = self._validation_context(thread_id)
+        self._validation_telemetry.record(
+            "validation.signal.recorded",
+            thread_id=thread_id,
+            agent_name=agent_name,
+            phase=context["phase"],
+            procedure_step=context["procedure_step"],
+            gate=context["gate"],
+            visibility="internal",
+            evidence_level=evidence_level,
+            payload={"signal": signal, **(payload or {})},
         )
 
     async def _run_subprocess(
@@ -1179,6 +1223,15 @@ class AgentRunner:
                     "contentPreview": content[:120],
                 },
             )
+            self._record_validation_signal(
+                thread_id,
+                agent_name,
+                signal="runtime_output_persisted",
+                payload={
+                    "message_phase": output.phase,
+                    "state_affecting": output.state_affecting,
+                },
+            )
             self._save_agent_message(
                 thread_id,
                 agent_name,
@@ -1203,6 +1256,15 @@ class AgentRunner:
                 "phase": "final_answer",
                 "stateAffecting": True,
                 "contentPreview": result.response_text.strip()[:120],
+            },
+        )
+        self._record_validation_signal(
+            thread_id,
+            agent_name,
+            signal="fallback_runtime_output_persisted",
+            payload={
+                "message_phase": "final_answer",
+                "state_affecting": True,
             },
         )
         self._save_agent_message(
@@ -1238,6 +1300,18 @@ class AgentRunner:
         )
         if saved_message is None:
             return
+        if state_affecting or message_phase == "final_answer":
+            self._record_validation_signal(
+                thread_id,
+                agent_name,
+                signal="message_persisted",
+                payload={
+                    "message_id": saved_message["message_id"],
+                    "message_phase": message_phase,
+                    "state_affecting": state_affecting,
+                    "contribution_candidate": state_affecting,
+                },
+            )
         if not state_affecting:
             return
         self._event_bus.publish(SSEEvent(
