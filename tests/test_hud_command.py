@@ -1649,7 +1649,7 @@ def test_hud_validation_renderable_shows_validation_sections(monkeypatch, tmp_pa
     assert "Rule Compliance" in rendered
     assert "Protocol match" in rendered
     assert "Required contribution" in rendered
-    assert "verdict" in rendered
+    assert "Verdict" in rendered
     assert "Expected" in rendered
     assert "Actual" in rendered
     assert "Missing contribution blocked" in rendered
@@ -1721,18 +1721,19 @@ def test_hud_validation_focus_uses_protocol_next_for_validation_gap(monkeypatch,
 
     rendered = main._render_hud_validation_focus_screen("thread-1", limit=5)
 
-    assert "Validation verdict  WARN" in rendered
-    assert "Primary reason  jun missing scope, findings" in rendered
+    assert "Verdict     WARN" in rendered
+    assert "Primary     jun missing scope, findings" in rendered
     assert "Confidence  high" in rendered
-    assert "Evidence  workflow trace present · runtime sessions unavailable · telemetry signals 2 recent · protocol gaps 1 participant" in rendered
-    assert "Flow  • Analysis · Discussion" in rendered
-    assert "Procedure  • Gate" in rendered
-    assert "Cases  Missing contribution blocked [PASS]" in rendered
+    assert "Evidence    workflow trace present · runtime sessions unavailable · telemetry signals 2 recent · protocol gaps 1 participant" in rendered
+    assert "Phase       • Analysis · Discussion" in rendered
+    assert "Procedure   • Gate" in rendered
+    assert "Cases       Missing contribution blocked [PASS]" in rendered
     assert "Rule Compliance" in rendered
     assert "Required contribution: WARN" in rendered
     assert "primary_reason: jun missing scope, findings" in rendered
     assert "next expected action: submit_contribution" in rendered
-    assert "Next action  submit contribution" in rendered
+    assert "Next        submit contribution" in rendered
+    assert "Flow" not in rendered
     assert "Reasons" in rendered
     assert "- jun missing scope, findings" in rendered
     assert "Why this verdict" not in rendered
@@ -1796,7 +1797,8 @@ def test_hud_validation_renderable_shows_context_and_evidence_lines(monkeypatch,
     renderable = main._render_hud_navigator_renderable(state, config, limit=5)
 
     rendered = _renderable_to_text(renderable, width=180)
-    assert "Flow" in rendered
+    assert "Flow" not in rendered
+    assert "Phase" in rendered
     assert "• Review" in rendered
     assert "Procedure" in rendered
     assert "Announce · • Collect Feedback · Resolve" in rendered
@@ -1805,6 +1807,8 @@ def test_hud_validation_renderable_shows_context_and_evidence_lines(monkeypatch,
     assert "Evidence" in rendered
     assert "telemetry signals 2 recent" in rendered
     assert "Confidence" in rendered
+    assert "Primary" in rendered
+    assert "Next" in rendered
     assert "Trace / Reason Excerpt" not in rendered
 
 

@@ -1409,6 +1409,7 @@ def _detail_progression_line(items: list[tuple[str, bool]]) -> str:
 
 _THREAD_DETAIL_LABEL_WIDTH = 9
 _THREAD_DETAIL_LABEL_GAP = "  "
+_VALIDATION_HEADER_LABEL_WIDTH = 10
 
 
 def _detail_summary_prefix(label: str) -> str:
@@ -1417,6 +1418,20 @@ def _detail_summary_prefix(label: str) -> str:
 
 def _detail_summary_line(label: str, value: str) -> str:
     return f"{_detail_summary_prefix(label)}{value}"
+
+
+def _validation_summary_line(label: str, value: str) -> str:
+    return f"{label:<{_VALIDATION_HEADER_LABEL_WIDTH}}  {value}"
+
+
+def _validation_summary_row(label: str, value: str | Text) -> Text:
+    row = Text()
+    row.append(f"{label:<{_VALIDATION_HEADER_LABEL_WIDTH}}  ", style="bold")
+    if isinstance(value, Text):
+        row.append_text(value)
+    else:
+        row.append(str(value))
+    return row
 
 
 def _detail_phase_progression(thread: dict[str, object]) -> str | None:
@@ -1761,34 +1776,31 @@ def _render_validation_focus(
     )
     topic = str(snapshot.get("topic") or thread_id)
     protocol = str(snapshot.get("protocol") or "-")
-
-    lines = [
-        f"Topic     {topic}",
-        f"Protocol  {protocol}",
-        f"Phase     {phase}"
-        + (f"  cycle={cycle_index}" if isinstance(cycle_index, int) else "")
-        + (f"  step={step_label}" if isinstance(step_label, str) and step_label.strip() else ""),
-        f"Status    {status_text}",
-        f"Validation verdict  {validation['verdict']}",
-        f"Primary reason  {primary_reason}",
-        f"Next action  {next_action_display}",
-    ]
     phase_progression = str(snapshot.get("phase_progression") or "").strip()
     if not phase_progression or phase_progression == "-":
         phase_progression = f"• {_detail_progress_label(phase)}"
-    lines.append(f"Flow  {phase_progression.replace(' - ', ' · ')}")
     procedure_progression = str(snapshot.get("procedure_progression") or "").strip()
     if not procedure_progression or procedure_progression == "-":
         procedure_progression = f"• {_detail_progress_label(step_label)}" if step_label else "-"
-    if procedure_progression != "-":
-        lines.append(f"Procedure  {procedure_progression.replace(' - ', ' · ')}")
     relevant_case_progression = str(snapshot.get("relevant_case_progression") or "").strip()
-    if relevant_case_progression and relevant_case_progression != "-":
-        lines.append(f"Cases  {relevant_case_progression.replace(' - ', ' · ')}")
     evidence_summary = snapshot.get("evidence_summary")
+
+    lines = [
+        _validation_summary_line("Topic", topic),
+        _validation_summary_line("Protocol", protocol),
+        _validation_summary_line("Verdict", str(validation["verdict"])),
+        _validation_summary_line("Primary", primary_reason),
+        _validation_summary_line("Phase", phase_progression.replace(" - ", " · ")),
+    ]
+    if procedure_progression != "-":
+        lines.append(_validation_summary_line("Procedure", procedure_progression.replace(" - ", " · ")))
+    lines.append(_validation_summary_line("Next", next_action_display))
+    lines.append(_validation_summary_line("Status", status_text))
+    if relevant_case_progression and relevant_case_progression != "-":
+        lines.append(_validation_summary_line("Cases", relevant_case_progression.replace(" - ", " · ")))
     if isinstance(evidence_summary, list) and evidence_summary:
-        lines.append(f"Confidence  {snapshot.get('confidence')}")
-        lines.append(f"Evidence  {' · '.join(str(item) for item in evidence_summary)}")
+        lines.append(_validation_summary_line("Evidence", " · ".join(str(item) for item in evidence_summary)))
+        lines.append(_validation_summary_line("Confidence", str(snapshot.get("confidence") or "-")))
 
     _append_detail_section(lines, "Rule Compliance")
     lines.append(f"verdict: {validation['verdict']}")
@@ -3397,7 +3409,7 @@ def _render_hud_validation_focus_renderable(
     primary_reason = _detail_primary_validation_reason(validation)
     verdict = str(validation.get("verdict") or "PASS").upper()
     next_action_token = str(validation.get("next_expected_action") or "").strip()
-    _, next_hint = _detail_status_summary(trace_rows, phase_cycle_payload)
+    status_text, next_hint = _detail_status_summary(trace_rows, phase_cycle_payload)
     next_action_display = (
         _humanize_hud_action(next_action_token)
         if next_action_token and next_action_token != "none"
@@ -3431,56 +3443,48 @@ def _render_hud_validation_focus_renderable(
 
     rows = _validation_compliance_rows(validation, validation_cases, runtime_sessions, trace_rows)
 
-    header_row = Text()
-    header_row.append("verdict  ", style="bold")
-    header_row.append_text(_verdict_text(verdict))
-    header_row.append("     primary  ", style="bold")
-    header_row.append(primary_reason, style="" if verdict == "PASS" else "yellow")
-    phase_row = Text()
-    phase_row.append("phase    ", style="bold")
-    phase_row.append(phase)
-    if isinstance(cycle_index, int):
-        phase_row.append(f"/{cycle_index}", style="dim")
-    phase_row.append("     next     ", style="bold")
-    phase_row.append(next_action_display, style="cyan")
-    topic_row = Text()
-    topic_row.append(topic, style="bold")
-    topic_row.append("  ")
-    topic_row.append(protocol, style="dim")
-    context_rows: list[RenderableType | str] = [topic_row, header_row, phase_row]
     phase_progression = str(validation_snapshot.get("phase_progression") or "").strip()
     if not phase_progression or phase_progression == "-":
         phase_progression = f"• {_detail_progress_label(phase)}"
-    flow_row = Text()
-    flow_row.append("Flow     ", style="bold")
-    flow_row.append(phase_progression.replace(" - ", " · "))
-    context_rows.append(flow_row)
     procedure_progression = str(validation_snapshot.get("procedure_progression") or "").strip()
     if not procedure_progression or procedure_progression == "-":
         procedure_progression = f"• {_detail_progress_label(step_label)}" if step_label else "-"
-    if procedure_progression != "-":
-        procedure_row = Text()
-        procedure_row.append("Procedure", style="bold")
-        procedure_row.append("  ")
-        procedure_row.append(procedure_progression.replace(" - ", " · "))
-        context_rows.append(procedure_row)
     relevant_case_progression = str(validation_snapshot.get("relevant_case_progression") or "").strip()
-    if relevant_case_progression and relevant_case_progression != "-":
-        cases_row = Text()
-        cases_row.append("Cases    ", style="bold")
-        cases_row.append(relevant_case_progression.replace(" - ", " · "))
-        context_rows.append(cases_row)
     evidence_summary = validation_snapshot.get("evidence_summary")
+
+    context_rows: list[RenderableType | str] = [
+        _validation_summary_row("Topic", Text(topic, style="bold")),
+        _validation_summary_row("Protocol", Text(protocol, style="dim")),
+        _validation_summary_row("Verdict", _verdict_text(verdict)),
+        _validation_summary_row(
+            "Primary",
+            Text(primary_reason, style="" if verdict == "PASS" else "yellow"),
+        ),
+        _validation_summary_row("Phase", phase_progression.replace(" - ", " · ")),
+    ]
+    if procedure_progression != "-":
+        context_rows.append(
+            _validation_summary_row("Procedure", procedure_progression.replace(" - ", " · "))
+        )
+    context_rows.append(_validation_summary_row("Next", Text(next_action_display, style="cyan")))
+    context_rows.append(_validation_summary_row("Status", status_text))
+    if relevant_case_progression and relevant_case_progression != "-":
+        context_rows.append(
+            _validation_summary_row("Cases", relevant_case_progression.replace(" - ", " · "))
+        )
     if isinstance(evidence_summary, list) and evidence_summary:
-        evidence_row = Text()
-        evidence_row.append("Evidence ", style="bold")
-        evidence_row.append(" · ".join(str(item) for item in evidence_summary))
-        context_rows.append(evidence_row)
-        confidence_row = Text()
-        confidence_row.append("Confidence", style="bold")
-        confidence_row.append("  ")
-        confidence_row.append(str(validation_snapshot.get("confidence") or "-"), style="cyan")
-        context_rows.append(confidence_row)
+        context_rows.append(
+            _validation_summary_row(
+                "Evidence",
+                " · ".join(str(item) for item in evidence_summary),
+            )
+        )
+        context_rows.append(
+            _validation_summary_row(
+                "Confidence",
+                Text(str(validation_snapshot.get("confidence") or "-"), style="cyan"),
+            )
+        )
 
     table = Table(
         box=box.SIMPLE_HEAD,
