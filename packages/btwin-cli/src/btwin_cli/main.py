@@ -1735,6 +1735,7 @@ def _render_thread_detail(
         )
         if phase_entry is not None:
             rendered_entries.append(phase_entry)
+        rendered_entries.sort(key=lambda entry: _detail_activity_timestamp_sort_key(entry[0]))
 
         for timestamp, headline, detail_lines in rendered_entries:
             time_label = timestamp[11:19] if "T" in timestamp and len(timestamp) >= 19 else timestamp
@@ -2172,6 +2173,13 @@ def _detail_user_facing_next_action(next_action: str) -> str | None:
     return text
 
 
+def _detail_activity_timestamp_sort_key(timestamp: str) -> tuple[int, str]:
+    text = str(timestamp or "").strip()
+    if not text:
+        return (1, "")
+    return (0, text)
+
+
 def _detail_system_phase_entry(
     thread: dict[str, object],
     activity_rows: list[dict[str, object]],
@@ -2181,7 +2189,14 @@ def _detail_system_phase_entry(
         return None
     timestamp = ""
     for row in activity_rows:
-        if str(row.get("kind") or "").strip() == "attempt" and str(row.get("phase") or "").strip() == phase:
+        kind = str(row.get("kind") or "").strip()
+        if kind == "phase" and str(row.get("phase") or "").strip() == phase:
+            timestamp = str(row.get("timestamp") or "")
+            break
+    for row in activity_rows:
+        if timestamp:
+            break
+        if str(row.get("target_phase") or "").strip() == phase:
             timestamp = str(row.get("timestamp") or "")
             break
     for row in activity_rows:
@@ -2191,12 +2206,12 @@ def _detail_system_phase_entry(
             timestamp = str(row.get("timestamp") or "")
             break
     if not timestamp and activity_rows:
-        timestamp = str(activity_rows[0].get("timestamp") or "")
+        timestamp = str(activity_rows[-1].get("timestamp") or "")
     required_result = _detail_required_result_from_rows(activity_rows)
     details: list[str] = []
     if required_result:
         details.append(f"Expected result: {required_result}")
-    return timestamp, f"[SYSTEM] Entered phase: {_detail_progress_label(phase)}", details
+    return timestamp, f"[DERIVED] phase: {_detail_progress_label(phase)} active", details
 
 
 def _detail_system_gate_entry(
@@ -2217,7 +2232,7 @@ def _detail_system_gate_entry(
         user_facing_next = _detail_user_facing_next_action(next_action)
         if user_facing_next:
             details.append(f"Next: {user_facing_next}")
-        return timestamp, f"[SYSTEM] Gate blocked: {gate_label}", details
+        return timestamp, f"[DERIVED] gate: {gate_label} blocked", details
     if kind == "gate":
         details = []
         outcome = str(row.get("outcome") or "").strip()
@@ -2229,7 +2244,7 @@ def _detail_system_gate_entry(
         policy_outcomes = row.get("policy_outcomes")
         if isinstance(policy_outcomes, list) and policy_outcomes:
             details.append("Options: " + " | ".join(str(item) for item in policy_outcomes))
-        return timestamp, f"[SYSTEM] Gate resolved: {gate_label}", details
+        return timestamp, f"[DERIVED] gate: {gate_label} resolved", details
     return None
 
 

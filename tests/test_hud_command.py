@@ -2801,8 +2801,8 @@ def test_hud_thread_detail_renders_status_policy_activity_and_hints(monkeypatch,
     assert "Recent Activity" in rendered
     assert "Quick Actions" not in rendered
     assert "Protocol Notes" not in rendered
-    assert "[SYSTEM] Entered phase: Review" in rendered
-    assert "[SYSTEM] Gate blocked: Retry Gate" in rendered
+    assert "[DERIVED] phase: Review active" in rendered
+    assert "[DERIVED] gate: Retry Gate blocked" in rendered
     assert "Reason: contribution_required" in rendered
     assert "Next: submit contribution" in rendered
     assert "[BTWIN] [Stop] [review] [Retry Gate] [contribution_required] Exit blocked" in rendered
@@ -2971,7 +2971,7 @@ def test_hud_thread_detail_collapses_repeated_recent_activity(monkeypatch, tmp_p
 
     rendered = main._render_hud_navigator(state, config, limit=5)
 
-    assert "[SYSTEM] Entered phase: Context" in rendered
+    assert "[DERIVED] phase: Context active" in rendered
     assert "Expected result: Contribution" in rendered
     assert "Next: inspect live trace" not in rendered
     assert "[CODEX alice] [UserPromptSubmit] [context] Contribution in progress ×2" in rendered
@@ -3080,12 +3080,13 @@ def test_hud_thread_detail_does_not_hard_cap_recent_activity_rows(monkeypatch, t
 
     rendered = main._render_hud_navigator(state, config, limit=10)
 
-    assert "[SYSTEM] Entered phase: Discussion" in rendered
-    assert "[SYSTEM] Gate resolved: Current Gate" in rendered
+    assert "[DERIVED] phase: Discussion active" in rendered
+    assert "[DERIVED] gate: Current Gate resolved" in rendered
     assert "[BTWIN] [context] Cycle gate completed" in rendered
     assert "[CODEX alice] [UserPromptSubmit] [context] Contribution in progress" in rendered
     assert "[CODEX alice] [Stop] [context] Exit check requested" in rendered
     assert "[CODEX alice] [context] Required result recorded" in rendered
+    assert rendered.index("[BTWIN] [context] Cycle gate completed") < rendered.index("[DERIVED] phase: Discussion active")
 
 
 def test_hud_thread_detail_marks_first_procedure_step_when_runtime_step_missing(monkeypatch, tmp_path):
