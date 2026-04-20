@@ -318,9 +318,9 @@ def _dispatch_delegate_assignment(
     thread_id: str,
     assignment: DelegationAssignment,
     phase_cycle_state: PhaseCycleState,
-) -> Any:
+) -> tuple[bool, Any | None]:
     if assignment.status != "running" or not assignment.resolved_agent:
-        return None
+        return False, None
 
     validation = _validate_delegate_direct_message(
         thread=thread,
@@ -330,7 +330,7 @@ def _dispatch_delegate_assignment(
         phase_name=phase_cycle_state.phase_name,
     )
     if validation is not None:
-        return validation
+        return False, validation
 
     client_message_id = _delegate_dispatch_client_message_id(
         thread_id=thread_id,
@@ -338,7 +338,7 @@ def _dispatch_delegate_assignment(
         assignment=assignment,
     )
     if _delegate_dispatch_exists(thread_store, thread_id=thread_id, client_message_id=client_message_id):
-        return None
+        return False, None
 
     content, tldr = _delegate_dispatch_content(
         assignment=assignment,
@@ -361,10 +361,10 @@ def _dispatch_delegate_assignment(
         )
     except Exception:
         logger.warning("Delegation dispatch failed for thread %s", thread_id, exc_info=True)
-        return {"error": "dispatch_failed"}
+        return False, {"error": "dispatch_failed"}
     if msg is None:
-        return {"error": "dispatch_failed"}
-    return None
+        return False, {"error": "dispatch_failed"}
+    return True, None
 
 
 def _resolve_delegate_phase(
@@ -792,7 +792,7 @@ def create_threads_router(
             assignment=assignment,
         )
         if assignment.status == "running":
-            dispatch_violation = _dispatch_delegate_assignment(
+            dispatched, dispatch_violation = _dispatch_delegate_assignment(
                 thread_store,
                 thread=thread,
                 protocol=protocol,
@@ -812,7 +812,7 @@ def create_threads_router(
                 delegation_store.write(blocked_state)
                 raise HTTPException(status_code=409, detail=blocked_state.model_dump(exclude_none=True))
         delegation_store.write(state)
-        if assignment.status == "running":
+        if assignment.status == "running" and dispatched:
             event_bus.publish(
                 SSEEvent(
                     type="thread_updated",

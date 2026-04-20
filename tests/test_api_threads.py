@@ -186,6 +186,7 @@ def test_delegate_start_creates_running_delegation_state(tmp_path):
     published_event = event_queue.get_nowait()
     assert published_event.type == "thread_updated"
     assert published_event.resource_id == thread["thread_id"]
+    assert event_queue.qsize() == 0
 
     second_response = client.post(f"/api/threads/{thread['thread_id']}/delegate/start")
     assert second_response.status_code == 200
@@ -200,6 +201,7 @@ def test_delegate_start_creates_running_delegation_state(tmp_path):
     second_inbox_response = client.get(f"/api/threads/{thread['thread_id']}/inbox", params={"agent": "alice"})
     assert second_inbox_response.status_code == 200
     assert second_inbox_response.json()["pending_count"] == 1
+    assert event_queue.qsize() == 0
 
     status_response = client.get(f"/api/threads/{thread['thread_id']}/delegate/status")
     assert status_response.status_code == 200
