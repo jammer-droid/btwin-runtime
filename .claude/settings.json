@@ -1,0 +1,56 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOKLUSION_CLAUDE_HOOK=SessionStart HOOKLUSION_CLAUDE_HOOK_MARKER=hooklusion-claude-hook sh -c 'curl -fsS --max-time 1 -X POST \"http://127.0.0.1:47321/event\" -H \"content-type: application/json\" -H \"x-hooklusion-host-pid: $PPID\" --data-binary @- >/dev/null 2>&1 || true'"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOKLUSION_CLAUDE_HOOK=UserPromptSubmit HOOKLUSION_CLAUDE_HOOK_MARKER=hooklusion-claude-hook sh -c 'curl -fsS --max-time 1 -X POST \"http://127.0.0.1:47321/event\" -H \"content-type: application/json\" -H \"x-hooklusion-host-pid: $PPID\" --data-binary @- >/dev/null 2>&1 || true'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOKLUSION_CLAUDE_HOOK=PreToolUse HOOKLUSION_CLAUDE_HOOK_MARKER=hooklusion-claude-hook sh -c 'curl -fsS --max-time 1 -X POST \"http://127.0.0.1:47321/event\" -H \"content-type: application/json\" -H \"x-hooklusion-host-pid: $PPID\" --data-binary @- >/dev/null 2>&1 || true'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOKLUSION_CLAUDE_HOOK=PostToolUse HOOKLUSION_CLAUDE_HOOK_MARKER=hooklusion-claude-hook sh -c 'curl -fsS --max-time 1 -X POST \"http://127.0.0.1:47321/event\" -H \"content-type: application/json\" -H \"x-hooklusion-host-pid: $PPID\" --data-binary @- >/dev/null 2>&1 || true'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOKLUSION_CLAUDE_HOOK=Stop HOOKLUSION_CLAUDE_HOOK_MARKER=hooklusion-claude-hook sh -c 'curl -fsS --max-time 1 -X POST \"http://127.0.0.1:47321/event\" -H \"content-type: application/json\" -H \"x-hooklusion-host-pid: $PPID\" --data-binary @- >/dev/null 2>&1 || true'"
+          }
+        ]
+      }
+    ]
+  }
+}
