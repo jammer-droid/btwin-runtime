@@ -1,5 +1,5 @@
 [project]
-name = "btwin-runtime"
+name = "btwin"
 version = "0.1.0"
 description = "Runtime workspace for the packaged B-TWIN core and CLI"
 requires-python = ">=3.11"
