@@ -407,6 +407,22 @@ class CodexAppServerPersistentAdapter(PersistentSessionAdapter):
                 metadata=metadata,
             )
 
+        if method == "thread/tokenUsage/updated":
+            token_usage = params.get("tokenUsage")
+            turn_id = params.get("turnId")
+            thread_id = params.get("threadId")
+            if isinstance(token_usage, dict):
+                metadata["provider_usage"] = token_usage
+            if isinstance(thread_id, str) and thread_id:
+                metadata["provider_thread_id"] = thread_id
+            if isinstance(turn_id, str) and turn_id:
+                metadata["provider_turn_id"] = turn_id
+            return SessionEvent(
+                kind="token_usage_updated",
+                content=turn_id if isinstance(turn_id, str) else None,
+                metadata=metadata,
+            )
+
         if method == "turn/completed":
             turn = params.get("turn")
             turn_id = turn.get("id") if isinstance(turn, dict) else None

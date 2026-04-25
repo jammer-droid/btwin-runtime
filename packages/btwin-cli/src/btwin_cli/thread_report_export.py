@@ -202,63 +202,128 @@ def _render_evidence(snapshot: dict[str, object]) -> str:
 
 
 def _render_resource_usage(snapshot: dict[str, object]) -> str:
-    rows = [item for item in _as_list(snapshot.get("resource_usage")) if isinstance(item, dict)]
+    rows = [
+        item
+        for item in _as_list(snapshot.get("resource_usage"))
+        if isinstance(item, dict) and item.get("event_type") == "resource.provider_token_usage"
+    ]
     if not rows:
-        return _section("Resource Usage", '<p class="empty">No prompt resource telemetry recorded.</p>')
+        return _section("Resource Usage", '<p class="empty">No provider token usage recorded.</p>')
 
-    total_input = sum(int(item.get("estimated_input_tokens") or 0) for item in rows)
-    total_output = sum(int(item.get("estimated_output_tokens") or 0) for item in rows)
-    total = sum(int(item.get("estimated_total_tokens") or 0) for item in rows)
-    truncated = sum(1 for item in rows if item.get("truncated"))
+    total_input = sum(int(item.get("actual_input_tokens") or 0) for item in rows)
+    total_cached = sum(int(item.get("actual_cached_input_tokens") or 0) for item in rows)
+    total_uncached = sum(int(item.get("actual_uncached_input_tokens") or 0) for item in rows)
+    total_output = sum(int(item.get("actual_output_tokens") or 0) for item in rows)
+    total_reasoning = sum(int(item.get("actual_reasoning_output_tokens") or 0) for item in rows)
+    total = sum(int(item.get("actual_total_tokens") or 0) for item in rows)
     summary = _table_rows(
         [
+            ("Metric source", "Actual Provider Tokens"),
             ("Telemetry events", len(rows)),
-            ("Estimated input tokens", total_input),
-            ("Estimated output tokens", total_output),
-            ("Estimated total tokens", total),
-            ("Truncated prompts", truncated),
+            ("Actual total tokens", total),
+            ("Input tokens", total_input),
+            ("Cached input tokens", total_cached),
+            ("Uncached input tokens", total_uncached),
+            ("Output tokens", total_output),
+            ("Reasoning output tokens", total_reasoning),
+            ("Cache hit ratio", _pct(total_cached, total_input)),
+            ("Uncached input ratio", _pct(total_uncached, total_input)),
+            ("Reasoning ratio", _pct(total_reasoning, total)),
         ]
     )
 
     groups: dict[tuple[str, str], dict[str, int]] = {}
-    section_totals: dict[str, int] = {}
+    cycle_groups: dict[str, dict[str, int]] = {}
+    section_names: set[str] = set()
     for item in rows:
         key = (str(item.get("agent_name") or "-"), str(item.get("phase") or "-"))
-        group = groups.setdefault(key, {"events": 0, "input": 0, "output": 0, "total": 0})
+        group = groups.setdefault(
+            key,
+            {"events": 0, "input": 0, "cached": 0, "uncached": 0, "output": 0, "reasoning": 0, "total": 0, "max": 0},
+        )
         group["events"] += 1
-        group["input"] += int(item.get("estimated_input_tokens") or 0)
-        group["output"] += int(item.get("estimated_output_tokens") or 0)
-        group["total"] += int(item.get("estimated_total_tokens") or 0)
-        for name, section in _as_dict(item.get("context_sections")).items():
-            if isinstance(section, dict):
-                section_totals[name] = section_totals.get(name, 0) + int(section.get("estimated_tokens") or 0)
+        group["input"] += int(item.get("actual_input_tokens") or 0)
+        group["cached"] += int(item.get("actual_cached_input_tokens") or 0)
+        group["uncached"] += int(item.get("actual_uncached_input_tokens") or 0)
+        group["output"] += int(item.get("actual_output_tokens") or 0)
+        group["reasoning"] += int(item.get("actual_reasoning_output_tokens") or 0)
+        turn_total = int(item.get("actual_total_tokens") or 0)
+        group["total"] += turn_total
+        group["max"] = max(group["max"], turn_total)
+        cycle_label = _cycle_label(item)
+        if cycle_label:
+            cycle = cycle_groups.setdefault(
+                cycle_label,
+                {"events": 0, "total": 0, "input": 0, "uncached": 0, "reasoning": 0},
+            )
+            cycle["events"] += 1
+            cycle["total"] += turn_total
+            cycle["input"] += int(item.get("actual_input_tokens") or 0)
+            cycle["uncached"] += int(item.get("actual_uncached_input_tokens") or 0)
+            cycle["reasoning"] += int(item.get("actual_reasoning_output_tokens") or 0)
+        for name in _as_list(item.get("context_sections")):
+            if name not in (None, ""):
+                section_names.add(str(name))
 
     group_rows = "".join(
         "<tr>"
         f"<td>{_esc(agent)}</td><td>{_esc(phase)}</td><td>{values['events']}</td>"
-        f"<td>{values['input']}</td><td>{values['output']}</td><td>{values['total']}</td>"
+        f"<td>{values['total']}</td><td>{avg_turn}</td><td>{values['input']}</td><td>{values['cached']}</td>"
+        f"<td>{values['uncached']}</td><td>{values['output']}</td><td>{values['reasoning']}</td>"
+        f"<td>{values['max']}</td><td>{_esc(_pct(values['uncached'], values['input']))}</td>"
+        f"<td>{_esc(_pct(values['reasoning'], values['total']))}</td>"
         "</tr>"
         for (agent, phase), values in sorted(groups.items())
+        for avg_turn in [round(values["total"] / values["events"]) if values["events"] else 0]
+    )
+    cycle_rows = "".join(
+        "<tr>"
+        f"<td>{_esc(cycle)}</td><td>{values['events']}</td><td>{values['total']}</td>"
+        f"<td>{values['input']}</td><td>{values['uncached']}</td><td>{values['reasoning']}</td>"
+        f"<td>{_esc(_pct(values['uncached'], values['input']))}</td>"
+        "</tr>"
+        for cycle, values in sorted(cycle_groups.items())
     )
     section_items = "".join(
-        f"<li>{_esc(name)}: {_esc(tokens)} estimated tokens</li>"
-        for name, tokens in sorted(section_totals.items(), key=lambda item: item[1], reverse=True)[:8]
+        f"<li>{_esc(name)}</li>"
+        for name in sorted(section_names)[:8]
+    )
+    hotspot_items = "".join(
+        "<li>"
+        f"{_esc(item.get('agent_name'))} · {_esc(item.get('phase'))} · {_esc(item.get('prompt_source'))} · "
+        f"{_esc(item.get('actual_total_tokens'))} tokens "
+        f"(uncached {_esc(item.get('actual_uncached_input_tokens'))}, reasoning {_esc(item.get('actual_reasoning_output_tokens'))})"
+        "</li>"
+        for item in sorted(rows, key=lambda row: int(row.get("actual_total_tokens") or 0), reverse=True)[:5]
     )
     recent_items = "".join(
         "<li>"
         f"{_esc(item.get('recorded_at'))} · {_esc(item.get('agent_name'))} · {_esc(item.get('phase'))} · "
-        f"{_esc(item.get('prompt_source'))} · {_esc(item.get('estimated_total_tokens'))} est. tokens"
+        f"{_esc(item.get('prompt_source'))} · {_esc(item.get('actual_total_tokens'))} tokens"
         "</li>"
         for item in rows[:8]
     )
+    cycle_table = (
+        '<h3>Cycle Cost</h3>'
+        '<table><thead><tr><th>Cycle</th><th>Calls</th><th>Total</th><th>Input</th><th>Uncached</th>'
+        '<th>Reasoning</th><th>Uncached %</th></tr></thead>'
+        f"<tbody>{cycle_rows}</tbody></table>"
+        if cycle_rows
+        else ""
+    )
     return _section(
         "Resource Usage",
+        '<p class="section-lede">Actual Provider Tokens from Codex app-server tokenUsage notifications.</p>'
         f'<table class="meta">{summary}</table>'
-        '<table><thead><tr><th>Agent</th><th>Phase</th><th>Events</th><th>Input</th><th>Output</th><th>Total</th></tr></thead>'
+        '<table><thead><tr><th>Agent</th><th>Phase</th><th>Calls</th><th>Total</th><th>Avg Turn</th>'
+        '<th>Input</th><th>Cached</th><th>Uncached</th><th>Output</th><th>Reasoning</th><th>Max Turn</th>'
+        '<th>Uncached %</th><th>Reasoning %</th></tr></thead>'
         f"<tbody>{group_rows}</tbody></table>"
+        f"{cycle_table}"
         '<div class="split">'
-        f'<div class="mini"><h4>Largest Context Sections</h4><ul>{section_items or "<li>-</li>"}</ul></div>'
-        f'<div class="mini"><h4>Recent Prompt Events</h4><ul>{recent_items}</ul></div></div>',
+        f'<div class="mini"><h4>Hotspot Turns</h4><ul>{hotspot_items}</ul></div>'
+        f'<div class="mini"><h4>Prompt Context Sections</h4><ul>{section_items or "<li>-</li>"}</ul></div>'
+        f'<div class="mini"><h4>Recent Token Events</h4><ul>{recent_items}</ul></div></div>',
     )
 
 
@@ -804,6 +869,19 @@ def _plain(value: object) -> str:
     if isinstance(value, (dict, list)):
         return _json_dump(value)
     return str(value)
+
+
+def _pct(numerator: int, denominator: int) -> str:
+    if denominator <= 0:
+        return "0%"
+    return f"{(numerator / denominator) * 100:.1f}%"
+
+
+def _cycle_label(item: dict[str, object]) -> str:
+    candidate = item.get("cycle_index") or item.get("cycle")
+    if candidate in (None, ""):
+        return ""
+    return f"cycle {candidate}"
 
 
 def _esc(value: object) -> str:

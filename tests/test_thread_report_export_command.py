@@ -423,20 +423,34 @@ def test_thread_report_renders_interpreted_sections_and_collapsed_raw_appendix()
             "resource_usage": [
                 {
                     "recorded_at": "2026-04-25T00:02:30+00:00",
-                    "event_type": "resource.prompt.estimated",
+                    "event_type": "resource.provider_token_usage",
                     "thread_id": "thread-1",
                     "agent_name": "developer",
                     "phase": "implement",
+                    "provider": "codex",
+                    "provider_thread_id": "codex-thread-1",
+                    "provider_turn_id": "turn-1",
+                    "cycle_index": 1,
                     "prompt_source": "context_pack",
-                    "prompt_chars": 1200,
-                    "response_chars": 200,
-                    "estimated_input_tokens": 300,
-                    "estimated_output_tokens": 50,
-                    "estimated_total_tokens": 350,
-                    "truncated": False,
-                    "context_sections": {
-                        "control": {"chars": 120, "estimated_tokens": 30},
-                        "phase_contract": {"chars": 240, "estimated_tokens": 60},
+                    "actual_input_tokens": 300,
+                    "actual_cached_input_tokens": 120,
+                    "actual_uncached_input_tokens": 180,
+                    "actual_output_tokens": 50,
+                    "actual_reasoning_output_tokens": 25,
+                    "actual_total_tokens": 350,
+                    "actual_cache_hit_ratio": 0.4,
+                    "actual_uncached_input_ratio": 0.6,
+                    "actual_reasoning_ratio": 25 / 350,
+                    "model_context_window": 258400,
+                    "context_sections": ["context_pack", "phase_contract"],
+                    "provider_usage": {
+                        "last": {
+                            "inputTokens": 300,
+                            "cachedInputTokens": 120,
+                            "outputTokens": 50,
+                            "reasoningOutputTokens": 25,
+                            "totalTokens": 350,
+                        }
                     },
                 }
             ],
@@ -455,6 +469,11 @@ def test_thread_report_renders_interpreted_sections_and_collapsed_raw_appendix()
     assert 'class="flow-node flow-node-request"' in html
     assert "Evidence" in html
     assert "Resource Usage" in html
+    assert "Actual Provider Tokens" in html
+    assert "Uncached input tokens" in html
+    assert "Reasoning output tokens" in html
+    assert "Cycle Cost" in html
+    assert "cycle 1" in html
     assert "context_pack" in html
     assert "350" in html
     assert "phase_contract" in html

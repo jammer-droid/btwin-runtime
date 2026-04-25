@@ -99,6 +99,7 @@ class InvocationResult:
     cli_missing: bool = False
     session_resumed: bool = False
     session_id_captured: str | None = None
+    provider_usage: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -637,6 +638,7 @@ class AgentRunner:
                         response_text=result.response_text,
                         outputs=result.outputs,
                         provider_session_id=result.session_id_captured,
+                        provider_usage=result.provider_usage,
                     )
                 if attempted_transport_mode == "live_process_transport":
                     runtime_session.last_transport_error = (
@@ -830,6 +832,7 @@ class AgentRunner:
                     response_text=result.response_text,
                     outputs=result.outputs,
                     provider_session_id=result.session_id_captured,
+                    provider_usage=result.provider_usage,
                 )
 
             self._mark_recovery_failed(runtime_session)
@@ -862,6 +865,7 @@ class AgentRunner:
         final_result.ok = delivery.ok
         final_result.response_text = delivery.response_text
         final_result.outputs = tuple(delivery.outputs)
+        final_result.provider_usage = delivery.provider_usage
         final_result.session_id_captured = session.provider_session_id if session else None
         self._record_resource_usage(
             thread_id=thread_id,
@@ -869,6 +873,7 @@ class AgentRunner:
             prompt=delivered_prompt,
             response_text=final_result.response_text,
             truncated=delivered_prompt_truncated,
+            provider_usage=final_result.provider_usage,
         )
         return final_result
 
@@ -1998,6 +2003,7 @@ class AgentRunner:
             completed_outputs: list[RuntimeOutput] = []
             final_text = ""
             captured_session_id = session.provider_session_id
+            latest_provider_usage: dict[str, object] | None = None
             seen_text_delta = False
             turn_complete_seen = False
             active_turn_id: str | None = None
@@ -2113,6 +2119,31 @@ class AgentRunner:
                             "turnId": event.metadata.get("turn_id"),
                         },
                     )
+                if event.kind == "token_usage_updated":
+                    usage = event.metadata.get("provider_usage") if isinstance(event.metadata, dict) else None
+                    if isinstance(usage, dict):
+                        latest_provider_usage = {
+                            "provider": session.provider,
+                            "provider_thread_id": event.metadata.get("provider_thread_id"),
+                            "provider_turn_id": event.metadata.get("provider_turn_id") or event.content,
+                            "token_usage": usage,
+                        }
+                        self._log_runtime_event(
+                            "runtime_provider_token_usage",
+                            thread_id=thread_id,
+                            agent_name=agent_name,
+                            provider=session.provider,
+                            transport_mode=session.transport_mode,
+                            message="runtime provider token usage observed",
+                            details={
+                                "providerThreadId": latest_provider_usage.get("provider_thread_id"),
+                                "providerTurnId": latest_provider_usage.get("provider_turn_id"),
+                                "last": usage.get("last"),
+                                "total": usage.get("total"),
+                                "modelContextWindow": usage.get("modelContextWindow"),
+                            },
+                        )
+                    continue
                 if event.kind == "turn_started" and isinstance(event.content, str) and event.content:
                     active_turn_id = event.content
                     codex_idle_completion_deadline = None
@@ -2236,6 +2267,7 @@ class AgentRunner:
                 response_text=final_text,
                 outputs=tuple(completed_outputs),
                 session_id_captured=captured_session_id,
+                provider_usage=latest_provider_usage,
             )
         except HelperOverlayBootstrapError as exc:
             session.last_transport_error = str(exc)
@@ -2994,19 +3026,38 @@ class AgentRunner:
         prompt: str,
         response_text: str,
         truncated: bool,
+        provider_usage: dict[str, object] | None = None,
     ) -> None:
         thread = self._threads.get_thread(thread_id)
         phase = thread.get("current_phase") if thread is not None else None
+        prompt_source = "context_pack" if "## Context Pack" in prompt else "runtime_prompt"
         try:
-            self._resource_usage.record_prompt(
+            if provider_usage is None:
+                return
+            token_usage = provider_usage.get("token_usage")
+            if not isinstance(token_usage, dict):
+                return
+            phase_cycle = self._phase_cycles.read(thread_id)
+            cycle_index = phase_cycle.cycle_index if phase_cycle is not None else None
+            self._resource_usage.record_provider_usage(
                 thread_id=thread_id,
                 agent_name=agent_name,
                 phase=phase if isinstance(phase, str) else None,
-                prompt=prompt,
-                response_text=response_text,
-                context_sections=_prompt_context_sections(prompt),
-                prompt_source="context_pack" if "## Context Pack" in prompt else "runtime_prompt",
-                truncated=truncated,
+                provider=str(provider_usage.get("provider") or ""),
+                provider_thread_id=(
+                    str(provider_usage.get("provider_thread_id"))
+                    if provider_usage.get("provider_thread_id") is not None
+                    else None
+                ),
+                provider_turn_id=(
+                    str(provider_usage.get("provider_turn_id"))
+                    if provider_usage.get("provider_turn_id") is not None
+                    else None
+                ),
+                token_usage=token_usage,
+                prompt_source=prompt_source,
+                context_sections=list(_prompt_context_sections(prompt).keys()),
+                cycle_index=cycle_index,
             )
         except Exception:
             logger.warning("Failed to record resource usage telemetry", exc_info=True)

@@ -70,6 +70,7 @@ class SessionDeliveryResult:
     response_text: str = ""
     outputs: tuple[object, ...] = ()
     provider_session_id: str | None = None
+    provider_usage: dict[str, object] | None = None
     fallback_mode: str | None = None
 
 

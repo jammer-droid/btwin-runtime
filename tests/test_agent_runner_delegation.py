@@ -139,7 +139,7 @@ def test_helper_result_advances_delegation_and_dispatches_next_work(tmp_path: Pa
     assert delegation_messages[0]["message_phase"] == "followup"
 
 
-def test_agent_runner_records_prompt_resource_usage(tmp_path: Path) -> None:
+def test_agent_runner_records_provider_token_usage(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     runner, thread_store, _protocol_store, _delegation_store, _phase_cycle_store = _build_runner(data_dir)
     thread = thread_store.create_thread(
@@ -155,16 +155,32 @@ def test_agent_runner_records_prompt_resource_usage(tmp_path: Path) -> None:
         prompt="## Context Pack\ncontrol\n\n## Current Ask\nDo the work.",
         response_text="Done.",
         truncated=False,
+        provider_usage={
+            "provider": "codex",
+            "provider_thread_id": "codex-thread-1",
+            "provider_turn_id": "turn-1",
+            "token_usage": {
+                "last": {
+                    "inputTokens": 100,
+                    "cachedInputTokens": 40,
+                    "outputTokens": 20,
+                    "reasoningOutputTokens": 5,
+                    "totalTokens": 120,
+                }
+            },
+        },
     )
 
     rows = ResourceUsageTelemetryStore(data_dir).tail(limit=10, thread_id=thread["thread_id"])
 
     assert len(rows) == 1
-    assert rows[0]["event_type"] == "resource.prompt.estimated"
+    assert rows[0]["event_type"] == "resource.provider_token_usage"
     assert rows[0]["agent_name"] == "alice"
     assert rows[0]["phase"] == "analysis"
     assert rows[0]["prompt_source"] == "context_pack"
-    assert rows[0]["context_sections"]["context_pack"]["estimated_tokens"] > 0
+    assert rows[0]["actual_total_tokens"] == 120
+    assert rows[0]["actual_uncached_input_tokens"] == 60
+    assert "context_pack" in rows[0]["context_sections"]
 
 
 def test_helper_result_waits_for_human_when_outcome_is_ambiguous(tmp_path: Path) -> None:

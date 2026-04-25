@@ -1,4 +1,4 @@
-"""Estimated prompt/resource usage telemetry for btwin runtime boundaries."""
+"""Provider token usage telemetry for btwin runtime boundaries."""
 
 from __future__ import annotations
 
@@ -8,58 +8,63 @@ from pathlib import Path
 from typing import Any
 
 
-def estimate_tokens(text: object) -> int:
-    """Cheap local token estimate for trend tracking when provider usage is unavailable."""
-    value = str(text or "")
-    if not value:
-        return 0
-    return max(1, (len(value) + 3) // 4)
-
-
 class ResourceUsageTelemetryStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
         self.file_path = data_dir / "logs" / "resource-usage.jsonl"
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def record_prompt(
+    def record_provider_usage(
         self,
         *,
         thread_id: str,
         agent_name: str | None,
         phase: str | None,
-        prompt: str,
-        response_text: str | None = None,
-        context_sections: dict[str, object] | None = None,
+        provider: str | None,
+        provider_thread_id: str | None,
+        provider_turn_id: str | None,
+        token_usage: dict[str, object],
         prompt_source: str = "runtime_prompt",
-        truncated: bool = False,
-        provider_usage: dict[str, object] | None = None,
+        context_sections: list[str] | tuple[str, ...] | None = None,
+        cycle_index: int | None = None,
+        source: str = "codex_app_server",
         schema_version: str = "v1",
     ) -> dict[str, Any]:
-        sections = {
-            name: {
-                "chars": len(str(content or "")),
-                "estimated_tokens": estimate_tokens(content),
-            }
-            for name, content in (context_sections or {}).items()
-        }
-        input_tokens = estimate_tokens(prompt)
-        output_tokens = estimate_tokens(response_text or "")
+        last = _coerce_breakdown(token_usage.get("last") if isinstance(token_usage, dict) else None)
+        total = _coerce_breakdown(token_usage.get("total") if isinstance(token_usage, dict) else None)
+        model_context_window = _coerce_int(token_usage.get("modelContextWindow")) if isinstance(token_usage, dict) else None
+        input_tokens = last["inputTokens"]
+        cached_input_tokens = last["cachedInputTokens"]
+        uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
+        total_tokens = last["totalTokens"]
         event: dict[str, Any] = {
             "recorded_at": datetime.now(timezone.utc).isoformat(),
-            "event_type": "resource.prompt.estimated",
+            "event_type": "resource.provider_token_usage",
+            "source": source,
             "thread_id": thread_id,
             "agent_name": agent_name,
             "phase": phase,
+            "provider": provider,
+            "provider_thread_id": provider_thread_id,
+            "provider_turn_id": provider_turn_id,
+            "cycle_index": cycle_index,
             "prompt_source": prompt_source,
-            "prompt_chars": len(prompt or ""),
-            "response_chars": len(response_text or ""),
-            "estimated_input_tokens": input_tokens,
-            "estimated_output_tokens": output_tokens,
-            "estimated_total_tokens": input_tokens + output_tokens,
-            "context_sections": sections,
-            "truncated": truncated,
-            "provider_usage": dict(provider_usage or {}),
+            "actual_input_tokens": input_tokens,
+            "actual_cached_input_tokens": cached_input_tokens,
+            "actual_uncached_input_tokens": uncached_input_tokens,
+            "actual_output_tokens": last["outputTokens"],
+            "actual_reasoning_output_tokens": last["reasoningOutputTokens"],
+            "actual_total_tokens": total_tokens,
+            "actual_cache_hit_ratio": _safe_ratio(cached_input_tokens, input_tokens),
+            "actual_uncached_input_ratio": _safe_ratio(uncached_input_tokens, input_tokens),
+            "actual_reasoning_ratio": _safe_ratio(last["reasoningOutputTokens"], total_tokens),
+            "model_context_window": model_context_window,
+            "provider_usage": {
+                "last": last,
+                "total": total,
+                "modelContextWindow": model_context_window,
+            },
+            "context_sections": list(context_sections or []),
             "schema_version": schema_version,
         }
         with self.file_path.open("a", encoding="utf-8") as handle:
@@ -79,49 +84,60 @@ class ResourceUsageTelemetryStore:
                 break
         return rows
 
-    def summarize(self, *, thread_id: str | None = None, limit: int = 200) -> dict[str, Any]:
-        rows = list(reversed(self.tail(limit=limit, thread_id=thread_id)))
+    def summarize_provider_usage(self, *, thread_id: str | None = None, limit: int = 200) -> dict[str, Any]:
+        rows = [
+            row
+            for row in reversed(self.tail(limit=limit, thread_id=thread_id))
+            if row.get("event_type") == "resource.provider_token_usage"
+        ]
         summary: dict[str, Any] = {
             "event_count": len(rows),
-            "total_estimated_input_tokens": sum(int(row.get("estimated_input_tokens") or 0) for row in rows),
-            "total_estimated_output_tokens": sum(int(row.get("estimated_output_tokens") or 0) for row in rows),
-            "total_estimated_tokens": sum(int(row.get("estimated_total_tokens") or 0) for row in rows),
-            "truncated_count": sum(1 for row in rows if row.get("truncated")),
+            "actual_input_tokens": sum(int(row.get("actual_input_tokens") or 0) for row in rows),
+            "actual_cached_input_tokens": sum(int(row.get("actual_cached_input_tokens") or 0) for row in rows),
+            "actual_uncached_input_tokens": sum(int(row.get("actual_uncached_input_tokens") or 0) for row in rows),
+            "actual_output_tokens": sum(int(row.get("actual_output_tokens") or 0) for row in rows),
+            "actual_reasoning_output_tokens": sum(int(row.get("actual_reasoning_output_tokens") or 0) for row in rows),
+            "actual_total_tokens": sum(int(row.get("actual_total_tokens") or 0) for row in rows),
             "by_agent": {},
             "by_phase": {},
-            "largest_sections": [],
+            "hotspots": [],
         }
-        section_totals: dict[str, int] = {}
         for row in rows:
-            self._add_group(summary["by_agent"], str(row.get("agent_name") or "unknown"), row)
-            self._add_group(summary["by_phase"], str(row.get("phase") or "unknown"), row)
-            for name, section in dict(row.get("context_sections") or {}).items():
-                if isinstance(section, dict):
-                    section_totals[name] = section_totals.get(name, 0) + int(section.get("estimated_tokens") or 0)
-        summary["largest_sections"] = [
-            {"name": name, "estimated_tokens": tokens}
-            for name, tokens in sorted(section_totals.items(), key=lambda item: item[1], reverse=True)
-        ][:8]
+            self._add_provider_group(summary["by_agent"], str(row.get("agent_name") or "unknown"), row)
+            self._add_provider_group(summary["by_phase"], str(row.get("phase") or "unknown"), row)
+        summary["hotspots"] = sorted(
+            rows,
+            key=lambda item: int(item.get("actual_total_tokens") or 0),
+            reverse=True,
+        )[:5]
         return summary
 
     @staticmethod
-    def _add_group(groups: dict[str, dict[str, Any]], key: str, row: dict[str, Any]) -> None:
+    def _add_provider_group(groups: dict[str, dict[str, Any]], key: str, row: dict[str, Any]) -> None:
         group = groups.setdefault(
             key,
             {
                 "event_count": 0,
-                "estimated_input_tokens": 0,
-                "estimated_output_tokens": 0,
-                "estimated_total_tokens": 0,
-                "truncated_count": 0,
+                "actual_input_tokens": 0,
+                "actual_cached_input_tokens": 0,
+                "actual_uncached_input_tokens": 0,
+                "actual_output_tokens": 0,
+                "actual_reasoning_output_tokens": 0,
+                "actual_total_tokens": 0,
+                "max_turn_tokens": 0,
             },
         )
         group["event_count"] += 1
-        group["estimated_input_tokens"] += int(row.get("estimated_input_tokens") or 0)
-        group["estimated_output_tokens"] += int(row.get("estimated_output_tokens") or 0)
-        group["estimated_total_tokens"] += int(row.get("estimated_total_tokens") or 0)
-        if row.get("truncated"):
-            group["truncated_count"] += 1
+        for field in (
+            "actual_input_tokens",
+            "actual_cached_input_tokens",
+            "actual_uncached_input_tokens",
+            "actual_output_tokens",
+            "actual_reasoning_output_tokens",
+            "actual_total_tokens",
+        ):
+            group[field] += int(row.get(field) or 0)
+        group["max_turn_tokens"] = max(group["max_turn_tokens"], int(row.get("actual_total_tokens") or 0))
 
     def _read_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -135,3 +151,29 @@ class ResourceUsageTelemetryStore:
             if isinstance(parsed, dict):
                 events.append(parsed)
         return events
+
+
+def _coerce_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_breakdown(value: object) -> dict[str, int]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "inputTokens": _coerce_int(source.get("inputTokens")) or 0,
+        "cachedInputTokens": _coerce_int(source.get("cachedInputTokens")) or 0,
+        "outputTokens": _coerce_int(source.get("outputTokens")) or 0,
+        "reasoningOutputTokens": _coerce_int(source.get("reasoningOutputTokens")) or 0,
+        "totalTokens": _coerce_int(source.get("totalTokens")) or 0,
+    }
+
+
+def _safe_ratio(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return numerator / denominator

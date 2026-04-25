@@ -305,6 +305,96 @@ async def test_live_transport_collects_commentary_and_final_outputs_from_complet
 
 
 @pytest.mark.asyncio
+async def test_live_transport_captures_provider_token_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    threads_dir = data_dir / "threads"
+    threads_dir.mkdir(parents=True)
+
+    runner = AgentRunner(
+        ThreadStore(threads_dir),
+        ProtocolStore(data_dir / "protocols"),
+        AgentStore(data_dir),
+        EventBus(),
+        config=BTwinConfig(data_dir=data_dir),
+    )
+
+    adapter = _FakeLiveTransportAdapter(
+        [
+            SessionEvent(kind="turn_started", content="turn-1"),
+            SessionEvent(
+                kind="token_usage_updated",
+                content="turn-1",
+                metadata={
+                    "provider": "codex-app-server",
+                    "provider_thread_id": "codex-thread-1",
+                    "provider_turn_id": "turn-1",
+                    "provider_usage": {
+                        "last": {
+                            "inputTokens": 100,
+                            "cachedInputTokens": 40,
+                            "outputTokens": 20,
+                            "reasoningOutputTokens": 5,
+                            "totalTokens": 120,
+                        },
+                        "total": {
+                            "inputTokens": 100,
+                            "cachedInputTokens": 40,
+                            "outputTokens": 20,
+                            "reasoningOutputTokens": 5,
+                            "totalTokens": 120,
+                        },
+                        "modelContextWindow": 258400,
+                    },
+                },
+            ),
+            SessionEvent(
+                kind="agent_message_completed",
+                content="Done",
+                metadata={"phase": "final_answer", "provider": "codex-app-server"},
+            ),
+            SessionEvent(kind="turn_complete", content="turn-1", metadata={"provider": "codex-app-server"}),
+        ]
+    )
+    monkeypatch.setattr(
+        "btwin_core.agent_runner.build_transport_for_provider",
+        lambda *args, **kwargs: _FakeLiveTransport(adapter),
+    )
+
+    session = RuntimeSession(
+        thread_id="thread-123",
+        agent_name="agent-1",
+        provider="codex",
+        transport_mode="live_process_transport",
+    )
+    launch = LaunchResolution(
+        provider=CodexProvider(),
+        auth=ResolvedLaunchAuth(
+            provider_name="codex",
+            mode="cli_environment",
+        ),
+        env={},
+        metadata={},
+    )
+
+    result = await runner._run_live_transport(
+        session,
+        "prompt text",
+        launch,
+        thread_id="thread-123",
+        agent_name="agent-1",
+    )
+
+    assert result.ok is True
+    assert result.provider_usage is not None
+    assert result.provider_usage["provider_thread_id"] == "codex-thread-1"
+    assert result.provider_usage["provider_turn_id"] == "turn-1"
+    assert result.provider_usage["token_usage"]["last"]["totalTokens"] == 120
+
+
+@pytest.mark.asyncio
 async def test_live_transport_accepts_codex_final_message_that_arrives_after_turn_complete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

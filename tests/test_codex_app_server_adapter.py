@@ -195,3 +195,42 @@ def test_codex_app_server_parse_error_notification_keeps_retry_and_error_info() 
     assert event.metadata["will_retry"] is True
     assert event.metadata["additional_details"] == "connection reset"
     assert event.metadata["codex_error_info"] == {"responseStreamDisconnected": {"httpStatusCode": 502}}
+
+
+def test_codex_app_server_parse_token_usage_notification_as_runtime_event() -> None:
+    adapter = CodexAppServerPersistentAdapter()
+
+    event = adapter._parse_notification(
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": "codex-thread-1",
+                "turnId": "turn-1",
+                "tokenUsage": {
+                    "last": {
+                        "inputTokens": 100,
+                        "cachedInputTokens": 40,
+                        "outputTokens": 20,
+                        "reasoningOutputTokens": 5,
+                        "totalTokens": 120,
+                    },
+                    "total": {
+                        "inputTokens": 300,
+                        "cachedInputTokens": 160,
+                        "outputTokens": 60,
+                        "reasoningOutputTokens": 15,
+                        "totalTokens": 360,
+                    },
+                    "modelContextWindow": 258400,
+                },
+            },
+        }
+    )
+
+    assert event is not None
+    assert event.kind == "token_usage_updated"
+    assert event.content == "turn-1"
+    assert event.metadata["provider_usage"]["last"]["inputTokens"] == 100
+    assert event.metadata["provider_usage"]["last"]["cachedInputTokens"] == 40
+    assert event.metadata["provider_usage"]["total"]["totalTokens"] == 360
+    assert event.metadata["provider_usage"]["modelContextWindow"] == 258400
