@@ -368,6 +368,69 @@ async def test_live_transport_accepts_codex_final_message_that_arrives_after_tur
     ]
 
 
+@pytest.mark.asyncio
+async def test_live_transport_accepts_codex_final_message_when_stream_ends_without_turn_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    threads_dir = data_dir / "threads"
+    threads_dir.mkdir(parents=True)
+
+    runner = AgentRunner(
+        ThreadStore(threads_dir),
+        ProtocolStore(data_dir / "protocols"),
+        AgentStore(data_dir),
+        EventBus(),
+        config=BTwinConfig(data_dir=data_dir),
+    )
+
+    adapter = _FakeLiveTransportAdapter(
+        [
+            SessionEvent(kind="turn_started", content="turn-1"),
+            SessionEvent(
+                kind="agent_message_completed",
+                content="Done before stream close",
+                metadata={"phase": "final_answer", "provider": "codex-app-server"},
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "btwin_core.agent_runner.build_transport_for_provider",
+        lambda *args, **kwargs: _FakeLiveTransport(adapter),
+    )
+
+    session = RuntimeSession(
+        thread_id="thread-123",
+        agent_name="agent-1",
+        provider="codex",
+        transport_mode="live_process_transport",
+    )
+    launch = LaunchResolution(
+        provider=CodexProvider(),
+        auth=ResolvedLaunchAuth(
+            provider_name="codex",
+            mode="cli_environment",
+        ),
+        env={},
+        metadata={},
+    )
+
+    result = await runner._run_live_transport(
+        session,
+        "prompt text",
+        launch,
+        thread_id="thread-123",
+        agent_name="agent-1",
+    )
+
+    assert result.ok is True
+    assert result.response_text == "Done before stream close"
+    assert [(item.content, item.phase, item.state_affecting) for item in result.outputs] == [
+        ("Done before stream close", "final_answer", True),
+    ]
+
+
 def test_build_transport_launch_context_includes_managed_codex_developer_instructions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -576,7 +639,7 @@ def test_live_transport_timeout_policy_uses_startup_grace_for_first_turn(tmp_pat
     idle_timeout, turn_timeout = runner._live_transport_timeout_policy(session)
 
     assert idle_timeout == 180.0
-    assert turn_timeout == 180.0
+    assert turn_timeout is None
 
 
 def test_live_transport_timeout_policy_disables_deadlines_after_startup_turn(tmp_path: Path) -> None:
@@ -625,4 +688,4 @@ def test_live_transport_timeout_policy_uses_startup_grace_for_recovery_turn(tmp_
     idle_timeout, turn_timeout = runner._live_transport_timeout_policy(session)
 
     assert idle_timeout == 180.0
-    assert turn_timeout == 180.0
+    assert turn_timeout is None

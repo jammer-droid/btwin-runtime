@@ -432,6 +432,23 @@ def test_list_runtime_sessions_by_agent_exposes_helper_overlay_launch_cwd(
     )
 
 
+def test_session_state_events_update_runtime_session_status(tmp_path: Path) -> None:
+    runner, _event_bus = _build_runner(tmp_path)
+    session = RuntimeSession(
+        thread_id="thread-123",
+        agent_name="agent-1",
+        provider="codex",
+        transport_mode="live_process_transport",
+    )
+    runner._sessions[("thread-123", "agent-1")] = session
+
+    runner._emit_session_state("thread-123", "agent-1", "working")
+
+    status = runner.get_runtime_session_status("thread-123", "agent-1")
+    assert status is not None
+    assert status["status"] == "working"
+
+
 def test_resolve_launch_resolution_does_not_raise_before_helper_overlay_failure_path(
     tmp_path: Path,
 ) -> None:

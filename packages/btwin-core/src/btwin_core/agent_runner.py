@@ -42,6 +42,7 @@ from btwin_core.runtime_logging import RuntimeEventLogger
 from btwin_core.session_transcript import normalize_runtime_events
 from btwin_core.session_supervisor import (
     RuntimeSession as AgentSession,
+    RuntimeSessionStatus,
     SessionDeliveryResult,
     SessionSupervisor,
 )
@@ -252,6 +253,13 @@ class AgentRunner:
         **extra: object,
     ) -> None:
         """Publish a normalized session-state event for UI consumers."""
+        session = self._session_supervisor.get_session(thread_id, agent_name)
+        if session is not None:
+            try:
+                session.status = RuntimeSessionStatus(state)
+                session.last_activity_at = _now_iso()
+            except ValueError:
+                pass
         metadata = {"agent_name": agent_name, "state": state, **extra}
         self._event_bus.publish(SSEEvent(
             type="agent_session_state",
@@ -1928,7 +1936,13 @@ class AgentRunner:
                     else:
                         event = await asyncio.wait_for(anext(event_iterator), timeout=timeout_seconds)
                 except StopAsyncIteration:
-                    if codex_idle_completion_deadline is not None or post_turn_completion_deadline is not None:
+                    has_completed_output = any(output.state_affecting for output in completed_outputs)
+                    if (
+                        codex_idle_completion_deadline is not None
+                        or post_turn_completion_deadline is not None
+                        or has_completed_output
+                        or bool(final_text.strip())
+                    ):
                         turn_complete_seen = True
                     break
                 except asyncio.TimeoutError as exc:
@@ -2242,7 +2256,7 @@ class AgentRunner:
     def _live_transport_timeout_policy(self, session: AgentSession) -> tuple[float | None, float | None]:
         is_startup_turn = session.invocation_count == 0 or session.recovery_pending
         if is_startup_turn:
-            return (LIVE_TRANSPORT_STARTUP_TIMEOUT, LIVE_TRANSPORT_STARTUP_TIMEOUT)
+            return (LIVE_TRANSPORT_STARTUP_TIMEOUT, None)
         return (None, None)
 
     async def _connect_live_transport_only(

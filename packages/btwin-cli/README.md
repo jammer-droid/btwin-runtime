@@ -71,7 +71,7 @@ Today `btwin-cli` supports exactly one provider bootstrap path: Codex.
 - it creates `~/.btwin/providers.json`
 - it writes the MCP client entry for `btwin mcp-proxy`
 - it syncs bundled global B-TWIN assets into the active data dir
-- it installs bundled Codex-facing B-TWIN skills into the global client path
+- it installs bundled Codex-facing B-TWIN skills into `~/.codex/skills/`
 
 Additional providers may be added later, but the current packaged workflow is
 intentionally Codex-first.
@@ -106,7 +106,8 @@ btwin init
 ```
 
 `btwin install-skills --platform codex` remains available as a compatibility
-refresh path when you only want to relink bundled skills.
+refresh path when you only want to relink bundled skills. It writes the bundled
+skill directories to `~/.codex/skills/` for Codex discovery.
 
 After pulling repo changes, refresh the installed `btwin` executable first if the
 update touched CLI/runtime packaging, then re-run `btwin init` or the compatibility

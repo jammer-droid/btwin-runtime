@@ -196,6 +196,89 @@ def test_thread_export_report_standalone_writes_self_contained_html(tmp_path, mo
     assert "href=\"http" not in html.lower()
 
 
+def test_thread_report_command_uses_planned_positional_cli_shape(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    ProtocolStore(project_root / ".btwin" / "protocols").save_protocol(_report_protocol())
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    thread = thread_store.create_thread(
+        topic="Planned Report CLI",
+        protocol="report-flow",
+        participants=["developer"],
+        initial_phase="implement",
+        phase_participants=["developer"],
+    )
+    thread_store.submit_contribution(
+        thread["thread_id"],
+        "developer",
+        "implement",
+        content="## implementation\n\nUses the planned command shape.",
+        tldr="planned command implemented",
+    )
+
+    output_path = tmp_path / "planned-report.html"
+    result = runner.invoke(
+        app,
+        ["thread", "report", thread["thread_id"], "--output", str(output_path), "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["path"] == str(output_path)
+    html = output_path.read_text(encoding="utf-8")
+    assert "Planned Report CLI" in html
+    assert "Uses the planned command shape." in html
+
+
+def test_thread_report_command_requires_overwrite_for_existing_output(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    ProtocolStore(project_root / ".btwin" / "protocols").save_protocol(_report_protocol())
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    thread = thread_store.create_thread(
+        topic="Overwrite Guard",
+        protocol="report-flow",
+        participants=["developer"],
+        initial_phase="implement",
+        phase_participants=["developer"],
+    )
+
+    output_path = tmp_path / "existing-report.html"
+    output_path.write_text("keep me\n", encoding="utf-8")
+
+    blocked = runner.invoke(
+        app,
+        ["thread", "report", thread["thread_id"], "--output", str(output_path), "--json"],
+    )
+
+    assert blocked.exit_code == 2, blocked.output
+    assert "already exists" in blocked.output
+    assert "--overwrite" in blocked.output
+    assert output_path.read_text(encoding="utf-8") == "keep me\n"
+
+    overwritten = runner.invoke(
+        app,
+        [
+            "thread",
+            "report",
+            thread["thread_id"],
+            "--output",
+            str(output_path),
+            "--overwrite",
+            "--json",
+        ],
+    )
+
+    assert overwritten.exit_code == 0, overwritten.output
+    assert "Overwrite Guard" in output_path.read_text(encoding="utf-8")
+
+
 def test_thread_export_report_attached_uses_existing_shared_routes(tmp_path, monkeypatch):
     data_dir = tmp_path / ".btwin"
     project_root = tmp_path / "project"

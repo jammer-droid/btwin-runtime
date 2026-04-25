@@ -170,7 +170,8 @@ btwin service status
 `btwin init` is now the preferred first-time global setup path. It registers the
 Codex MCP entry and installs the bundled B-TWIN assets needed for the Codex-facing
 workflow. `btwin install-skills --platform codex` remains available as a compatibility
-refresh path when you only want to relink bundled skills.
+refresh path when you only want to relink bundled skills. For Codex, bundled
+skills are installed under `~/.codex/skills/`.
 
 `btwin init` handles the global Codex-facing setup. It does not pre-create
 repo-local helper files for every repository. Those are bootstrapped lazily
@@ -393,7 +394,8 @@ args: ["mcp-proxy"]
 For Codex, `btwin init` is the canonical global setup path: it writes the
 equivalent MCP entry, syncs bundled B-TWIN assets, and installs the bundled
 skills. `btwin install-skills --platform codex` remains available as a
-compatibility refresh command.
+compatibility refresh command. The Codex skill discovery path used by B-TWIN is
+`~/.codex/skills/`.
 
 The bundled skills are short task-oriented guides installed into the client
 environment. They are not part of `btwin-core`; they ship with `btwin-cli` and

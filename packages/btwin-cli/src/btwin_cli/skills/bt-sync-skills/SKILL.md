@@ -150,6 +150,6 @@ Synced B-TWIN post-pull refresh.
 - Service: btwin service install
 - Command: btwin install-skills --platform codex
 - Mode: global
-- Result: 13 skills installed to ~/.agents/skills/
+- Result: 13 skills installed to ~/.codex/skills/
 - Next: restart Codex so it reconnects with the refreshed btwin MCP proxy
 ```

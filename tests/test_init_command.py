@@ -26,7 +26,7 @@ def test_init_global_creates_providers_config_and_codex_registration(tmp_path, m
     codex_config = tmp_path / ".codex" / "config.toml"
     assert codex_config.exists()
     assert 'args = ["mcp-proxy"]' in codex_config.read_text(encoding="utf-8")
-    assert (tmp_path / ".agents" / "skills" / "bt-handoff").exists()
+    assert (tmp_path / ".codex" / "skills" / "bt-handoff").exists()
     assert (tmp_path / ".btwin" / "guidelines.md").exists()
     assert (tmp_path / ".btwin" / "protocols" / "debate.yaml").exists()
 

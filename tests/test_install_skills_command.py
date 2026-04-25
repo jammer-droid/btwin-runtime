@@ -15,7 +15,7 @@ def test_install_skills_codex_reports_init_as_preferred_global_setup(tmp_path, m
     result = runner.invoke(app, ["install-skills", "--platform", "codex"])
 
     assert result.exit_code == 0, result.output
-    assert (tmp_path / ".agents" / "skills" / "bt-handoff").exists()
+    assert (tmp_path / ".codex" / "skills" / "bt-handoff").exists()
     assert "btwin init" in result.output
     assert "preferred" in result.output.lower()
 

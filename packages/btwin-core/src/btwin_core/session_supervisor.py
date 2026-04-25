@@ -16,7 +16,11 @@ def _now_iso() -> str:
 
 class RuntimeSessionStatus(StrEnum):
     IDLE = "idle"
+    QUEUED = "queued"
     RECEIVED = "received"
+    THINKING = "thinking"
+    WORKING = "working"
+    RESPONDING = "responding"
     FAILED = "failed"
     DONE = "done"
 

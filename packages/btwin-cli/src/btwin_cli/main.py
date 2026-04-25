@@ -8400,6 +8400,27 @@ def thread_export_report(
     as_json: bool = typer.Option(False, "--json", help="Output JSON"),
 ):
     """Export a self-contained static HTML work report for one thread."""
+    _write_thread_report(thread_id=thread_id, output=output, overwrite=True, as_json=as_json)
+
+
+@thread_app.command("report")
+def thread_report(
+    thread_id: str = typer.Argument(..., help="Thread id"),
+    output: Path | None = typer.Option(None, "--output", help="Output HTML path"),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite an existing output file"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Export a self-contained static HTML work report for one thread."""
+    _write_thread_report(thread_id=thread_id, output=output, overwrite=overwrite, as_json=as_json)
+
+
+def _write_thread_report(
+    *,
+    thread_id: str,
+    output: Path | None,
+    overwrite: bool,
+    as_json: bool,
+) -> None:
     config = _get_config()
     exported_at = datetime.now(timezone.utc)
     snapshot = _load_thread_report_snapshot(thread_id, config)
@@ -8410,6 +8431,10 @@ def thread_export_report(
         raise typer.Exit(4)
 
     report_path = output or default_report_path(_project_root(), thread, exported_at)
+    if report_path.exists() and not overwrite:
+        console.print(f"[red]Report already exists:[/red] {report_path}")
+        console.print("Use [bold]--overwrite[/bold] to replace it.")
+        raise typer.Exit(2)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(render_thread_report_html(snapshot), encoding="utf-8")
 
@@ -9742,7 +9767,7 @@ def hud(
 
 _PLATFORMS = {
     "claude": ("Claude Code", (".claude/commands/",), ()),
-    "codex": ("Codex", (), (".agents/skills/",)),
+    "codex": ("Codex", (), (".codex/skills/",)),
     "gemini": ("Gemini", (".gemini/commands/",), ()),
 }
 
