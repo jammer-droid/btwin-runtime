@@ -112,6 +112,7 @@ from btwin_cli.provider_init import (
 )
 from btwin_cli.phase_cycle_visual import build_phase_cycle_visual_payload
 from btwin_cli.resource_paths import resolve_bundled_skills_dir
+from btwin_cli.thread_report_export import default_report_path, render_thread_report_html
 from btwin_core.resource_paths import resolve_bundled_protocols_dir
 
 app = typer.Typer(
@@ -1474,13 +1475,32 @@ def _detail_validation_snapshot(
     for session in runtime_sessions.values():
         if not isinstance(session, dict):
             continue
-        if bool(session.get("degraded")) and not bool(session.get("recovery_pending")):
+        session_status = str(session.get("status") or "").strip().lower()
+        transport_mode = session.get("transport_mode")
+        primary_transport_mode = session.get("primary_transport_mode") or transport_mode
+        transport_surface, _transport_kind = _runtime_transport_surface_and_kind(transport_mode)
+        primary_surface, _primary_kind = _runtime_transport_surface_and_kind(primary_transport_mode)
+        terminal_status = session_status in {"failed", "closed", "ended", "exited", "terminated"}
+        fallback_active = bool(session.get("fallback_transport_involved")) or bool(session.get("degraded"))
+        app_server_terminal = terminal_status and transport_surface == "app-server" and not fallback_active
+        if app_server_terminal:
             session_health = "FAIL"
-            reasons.append("runtime session degraded")
+            reasons.append("runtime session ended")
             break
+        if terminal_status and session_status == "failed":
+            session_health = "WARN"
+            reasons.append("runtime helper failed")
+            continue
+        if terminal_status and primary_surface == "app-server" and fallback_active:
+            session_health = "WARN"
+            reasons.append("runtime session fallback active")
+            continue
         if bool(session.get("recovery_pending")):
             session_health = "WARN"
             reasons.append("runtime session recovery pending")
+        elif bool(session.get("degraded")):
+            session_health = "WARN"
+            reasons.append("runtime session degraded/fallback active")
         elif bool(session.get("fallback_transport_involved")):
             session_health = "WARN"
             reasons.append("runtime session fallback active")
@@ -1644,8 +1664,11 @@ def _append_detail_bullets(lines: list[str], label: str, items: list[str]) -> No
 def _render_detail_agent_session_rows(
     agents: list[dict[str, object]] | object,
     runtime_sessions: dict[str, dict[str, object]],
+    agent_profiles: object | None = None,
+    delegation_status: dict[str, object] | None = None,
 ) -> list[str]:
     rows: list[str] = []
+    profiles_by_name = _agent_profile_lookup(agent_profiles)
     if isinstance(agents, list):
         for agent in agents:
             if not isinstance(agent, dict):
@@ -1654,8 +1677,18 @@ def _render_detail_agent_session_rows(
             if not agent_name:
                 continue
             status = str(agent.get("status") or "-").strip() or "-"
-            transport = _runtime_session_summary(runtime_sessions.get(agent_name)) or "-"
-            rows.append(f"{agent_name:<4} {status:<11} {transport}")
+            session = runtime_sessions.get(agent_name)
+            logical, transport = _agent_state_descriptor(status, session)
+            task_state = _delegation_task_state(agent_name, delegation_status)
+            if task_state == "assigned" and session is None:
+                logical = "waiting"
+            profile = profiles_by_name.get(agent_name) or {}
+            role = str(profile.get("role") or "-").strip() or "-"
+            provider = str(profile.get("provider") or "-").strip() or "-"
+            rows.append(
+                f"{agent_name} | role={role} | provider={provider} | task={task_state} | "
+                f"state={logical} | participant={status} | runtime={_runtime_label(session, transport)}"
+            )
     if rows:
         return rows
 
@@ -1663,8 +1696,15 @@ def _render_detail_agent_session_rows(
         if not isinstance(session, dict):
             continue
         status = str(session.get("status") or "-").strip() or "-"
-        transport = _runtime_session_summary(session) or "-"
-        rows.append(f"{agent_name:<4} {status:<11} {transport}")
+        logical, transport = _agent_state_descriptor(status, session)
+        profile = profiles_by_name.get(agent_name) or {}
+        role = str(profile.get("role") or "-").strip() or "-"
+        provider = str(profile.get("provider") or "-").strip() or "-"
+        rows.append(
+            f"{agent_name} | role={role} | provider={provider} | "
+            f"task={_delegation_task_state(agent_name, delegation_status)} | state={logical} | "
+            f"participant=- | runtime={_runtime_label(session, transport)}"
+        )
     return rows
 
 
@@ -1961,7 +2001,7 @@ def _shared_validation_header_context(
     protocol_name = str(thread.get("protocol") or "").strip()
     phase = str(thread.get("current_phase") or "-")
     phase_definition = _thread_watch_protocol_phase(
-        _get_protocol_store().get_protocol(protocol_name) if protocol_name else None,
+        _detail_protocol_definition(protocol_name) if protocol_name else None,
         phase,
     )
     phase_progression = _detail_phase_progression(thread)
@@ -2049,7 +2089,7 @@ def _detail_phase_progression(thread: dict[str, object]) -> str | None:
     protocol_name = str(thread.get("protocol") or "").strip()
     if not protocol_name:
         return None
-    protocol = _get_protocol_store().get_protocol(protocol_name)
+    protocol = _detail_protocol_definition(protocol_name)
     if protocol is None or not getattr(protocol, "phases", None):
         return None
     current_phase = str(thread.get("current_phase") or "").strip()
@@ -2059,6 +2099,24 @@ def _detail_phase_progression(thread: dict[str, object]) -> str | None:
     ]
     rendered = _detail_progression_line(items)
     return rendered if rendered != "-" else None
+
+
+def _detail_protocol_definition(protocol_name: str) -> Protocol | None:
+    if not protocol_name:
+        return None
+    protocol = _get_protocol_store().get_protocol(protocol_name)
+    if protocol is not None:
+        return protocol
+    try:
+        config = _get_config()
+        if not _use_attached_api(config):
+            return None
+        payload = _api_get(f"/api/protocols/{protocol_name}")
+        if isinstance(payload, dict):
+            return Protocol.model_validate(payload)
+    except Exception:
+        return None
+    return None
 
 
 def _detail_procedure_progression(
@@ -2166,7 +2224,12 @@ def _render_thread_detail(
             if session_summary:
                 actor_part += f" ({session_summary})"
             actor_parts.append(actor_part)
-    agent_session_rows = _render_detail_agent_session_rows(agents, runtime_sessions)
+    agent_session_rows = _render_detail_agent_session_rows(
+        agents,
+        runtime_sessions,
+        agent_profiles=_agent_profiles_for_hud(config),
+        delegation_status=_try_delegate_status_snapshot(thread_id, config),
+    )
     lines = _shared_validation_header_lines(header_context)
 
     _append_detail_section(lines, "Recent Activity")
@@ -3037,6 +3100,8 @@ _AGENT_WORKING_STATUSES = {
     "contributing",
     "active",
     "running",
+    "received",
+    "thinking",
     "busy",
     "attempt",
     "attempting",
@@ -3068,6 +3133,13 @@ def _agent_state_descriptor(
             return "recovering", transport
         if session.get("degraded") or session.get("fallback_transport_involved"):
             return "degraded", transport
+        session_status = str(session.get("status") or "").strip().lower()
+        if session_status in _AGENT_WORKING_STATUSES:
+            return "working", transport
+        if session_status in _AGENT_WAITING_STATUSES:
+            return "waiting", transport
+        if session_status in _AGENT_IDLE_STATUSES or session_status == "done":
+            return "idle", transport
     normalized = (status or "").strip().lower()
     if normalized in _AGENT_WORKING_STATUSES:
         return "working", transport
@@ -3077,6 +3149,94 @@ def _agent_state_descriptor(
         return "idle", transport
     # unknown status -> treat as informational idle
     return "idle", transport
+
+
+def _agent_profiles_for_hud(config: BTwinConfig) -> list[dict[str, object]]:
+    profiles: list[dict[str, object]] = []
+    try:
+        if _use_attached_api(config):
+            payload = _api_get("/api/agents")
+            if isinstance(payload, dict):
+                payload = payload.get("agents")
+            profiles = [dict(agent) for agent in payload if isinstance(agent, dict)] if isinstance(payload, list) else []
+        else:
+            profiles = [dict(agent) for agent in _get_agent_store().list_agents()]
+    except Exception:
+        profiles = []
+    try:
+        local_profiles = [dict(agent) for agent in _get_agent_store().list_agents()]
+    except Exception:
+        local_profiles = []
+    if not local_profiles:
+        return profiles
+    local_by_name = {
+        str(profile.get("name") or "").strip(): profile
+        for profile in local_profiles
+        if str(profile.get("name") or "").strip()
+    }
+    merged_profiles: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for profile in profiles:
+        name = str(profile.get("name") or "").strip()
+        local = local_by_name.get(name, {})
+        merged = {**local, **profile}
+        for key in ("role", "provider", "model", "reasoning_level"):
+            if not merged.get(key) and local.get(key):
+                merged[key] = local[key]
+        if name:
+            seen.add(name)
+        merged_profiles.append(merged)
+    for name, local in local_by_name.items():
+        if name not in seen:
+            merged_profiles.append(local)
+    return merged_profiles
+
+
+def _try_delegate_status_snapshot(thread_id: str, config: BTwinConfig) -> dict[str, object] | None:
+    try:
+        if _use_attached_api(config):
+            payload = _api_get(f"/api/threads/{thread_id}/delegate/status")
+            return dict(payload) if isinstance(payload, dict) else None
+        return _delegate_status_local(thread_id, config=config)
+    except Exception:
+        return None
+
+
+def _agent_profile_lookup(agent_profiles: object) -> dict[str, dict[str, object]]:
+    if not isinstance(agent_profiles, list):
+        return {}
+    result: dict[str, dict[str, object]] = {}
+    for profile in agent_profiles:
+        if not isinstance(profile, dict):
+            continue
+        name = str(profile.get("name") or "").strip()
+        if name:
+            result[name] = profile
+    return result
+
+
+def _delegation_task_state(agent_name: str, delegation_status: dict[str, object] | None) -> str:
+    if not isinstance(delegation_status, dict):
+        return "-"
+    resolved_agent = str(delegation_status.get("resolved_agent") or "").strip()
+    if resolved_agent != agent_name:
+        return "-"
+    status = str(delegation_status.get("status") or "").strip().lower()
+    if status == "running":
+        return "assigned"
+    if status:
+        return status
+    return "assigned"
+
+
+def _runtime_label(session: dict[str, object] | None, transport: str) -> str:
+    if not isinstance(session, dict):
+        return "not attached"
+    status = str(session.get("status") or "").strip()
+    runtime = transport or _runtime_session_summary(session) or "attached"
+    if status and status != "-":
+        return f"{runtime}:{status}"
+    return runtime
 
 
 def _agent_glyph_text(logical_state: str, animation_phase: int) -> Text:
@@ -3097,8 +3257,11 @@ def _render_agent_session_text_rows(
     agents: object,
     runtime_sessions: dict[str, dict[str, object]],
     animation_phase: int,
+    agent_profiles: object | None = None,
+    delegation_status: dict[str, object] | None = None,
 ) -> list[Text]:
     rows: list[Text] = []
+    profiles_by_name = _agent_profile_lookup(agent_profiles)
     if isinstance(agents, list):
         for agent in agents:
             if not isinstance(agent, dict):
@@ -3109,7 +3272,21 @@ def _render_agent_session_text_rows(
             status = str(agent.get("status") or "-").strip() or "-"
             session = runtime_sessions.get(agent_name)
             logical, transport = _agent_state_descriptor(status, session)
-            rows.append(_compose_agent_row(agent_name, logical, status, transport, animation_phase))
+            task_state = _delegation_task_state(agent_name, delegation_status)
+            if task_state == "assigned" and session is None:
+                logical = "waiting"
+            rows.extend(
+                _compose_agent_rows(
+                    agent_name,
+                    logical,
+                    status,
+                    transport,
+                    animation_phase,
+                    profile=profiles_by_name.get(agent_name),
+                    task_state=task_state,
+                    session=session,
+                )
+            )
     if rows:
         return rows
     for agent_name, session in runtime_sessions.items():
@@ -3117,35 +3294,66 @@ def _render_agent_session_text_rows(
             continue
         status = str(session.get("status") or "-").strip() or "-"
         logical, transport = _agent_state_descriptor(status, session)
-        rows.append(_compose_agent_row(agent_name, logical, status, transport, animation_phase))
+        rows.extend(
+            _compose_agent_rows(
+                agent_name,
+                logical,
+                status,
+                transport,
+                animation_phase,
+                profile=profiles_by_name.get(agent_name),
+                task_state=_delegation_task_state(agent_name, delegation_status),
+                session=session,
+            )
+        )
     return rows
 
 
-def _compose_agent_row(
+def _compose_agent_rows(
     agent_name: str,
     logical_state: str,
     raw_status: str,
     transport: str,
     animation_phase: int,
+    *,
+    profile: dict[str, object] | None = None,
+    task_state: str = "-",
+    session: dict[str, object] | None = None,
 ) -> Text:
     glyph = _agent_glyph_text(logical_state, animation_phase)
-    label_style = {
+    state_style = {
         "working": "bold cyan",
         "waiting": "yellow",
         "degraded": "bold red",
         "recovering": "yellow",
         "idle": "dim",
     }.get(logical_state, "")
-    row = Text()
-    row.append_text(glyph)
-    row.append(" ")
-    row.append(f"{agent_name:<8}", style="bold")
-    row.append(logical_state, style=label_style)
-    if raw_status and raw_status.lower() != logical_state:
-        row.append(f" · {raw_status}", style="dim")
-    if transport:
-        row.append(f"  {transport}", style="dim")
-    return row
+    role = str((profile or {}).get("role") or "-").strip() or "-"
+    provider = str((profile or {}).get("provider") or "-").strip() or "-"
+    participant_status = raw_status or "-"
+    runtime = _runtime_label(session, transport)
+    header = Text()
+    header.append_text(glyph)
+    header.append(" ")
+    header.append(agent_name, style="bold")
+    header.append(f"  role={role}", style="dim")
+
+    task_row = Text()
+    task_row.append("   ")
+    task_row.append(f"task={task_state}", style="yellow" if task_state not in {"", "-"} else "dim")
+    task_row.append("  state=", style="dim")
+    task_row.append(logical_state, style=state_style)
+
+    runtime_row = Text()
+    runtime_row.append("   ")
+    runtime_row.append(f"provider={provider}", style="dim")
+    runtime_row.append(f"  participant={participant_status}", style="dim")
+
+    transport_row = Text()
+    transport_row.append("   ")
+    transport_row.append(f"runtime={runtime}", style="cyan" if session is not None else "red")
+
+    return [header, task_row, runtime_row, transport_row]
 
 
 def _protocol_progress_node(label: str, status: str, *, animation_phase: int) -> str:
@@ -3344,6 +3552,8 @@ def _snapshot_hud_navigator_screen(
                         agent_name: session
                         for agent_name, session in _runtime_sessions_for_thread(focused_thread_id, config)
                     }
+                    snapshot["agent_profiles"] = _agent_profiles_for_hud(config)
+                    snapshot["delegation_status"] = _try_delegate_status_snapshot(focused_thread_id, config)
         return snapshot
 
     if state.selected_thread_id is None:
@@ -3366,6 +3576,8 @@ def _snapshot_hud_navigator_screen(
         agent_name: session
         for agent_name, session in _runtime_sessions_for_thread(state.selected_thread_id, config)
     }
+    snapshot["agent_profiles"] = _agent_profiles_for_hud(config)
+    snapshot["delegation_status"] = _try_delegate_status_snapshot(state.selected_thread_id, config)
     if state.screen == "validation":
         snapshot["protocol_plan"] = _try_protocol_next_snapshot(state.selected_thread_id, config)
     elif state.screen == "live":
@@ -3842,6 +4054,8 @@ def _render_hud_threads_renderable(
                 status_summary.get("agents", []),
                 runtime_sessions,
                 animation_phase,
+                agent_profiles=snapshot.get("agent_profiles") if isinstance(snapshot, dict) else None,
+                delegation_status=snapshot.get("delegation_status") if isinstance(snapshot, dict) else None,
             )
             if agent_rows:
                 preview_lines.append(Text(""))
@@ -3933,6 +4147,12 @@ def _render_hud_thread_detail_renderable(
     protocol_plan = snapshot.get("protocol_plan") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
     if not isinstance(protocol_plan, dict):
         protocol_plan = _try_protocol_next_snapshot(state.selected_thread_id, config)
+    delegation_status = snapshot.get("delegation_status") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    if not isinstance(delegation_status, dict):
+        delegation_status = _try_delegate_status_snapshot(state.selected_thread_id, config)
+    agent_profiles = snapshot.get("agent_profiles") if isinstance(snapshot, dict) and snapshot.get("selected_thread_id") == state.selected_thread_id else None
+    if not isinstance(agent_profiles, list):
+        agent_profiles = _agent_profiles_for_hud(config)
     header_context = _shared_validation_header_context(
         thread,
         trace_payload.get("phase_cycle") if isinstance(trace_payload, dict) else None,
@@ -3947,6 +4167,8 @@ def _render_hud_thread_detail_renderable(
             status_summary.get("agents", []),
             runtime_sessions,
             animation_phase,
+            agent_profiles=agent_profiles,
+            delegation_status=delegation_status,
         )
     )
     if not agent_rows:
@@ -5779,6 +6001,76 @@ def _load_protocol_flow_context(
     return thread, protocol, phase, [str(name) for name in phase_participants if isinstance(name, str)], contributions
 
 
+def _optional_attached_api_get(path: str, params: dict | None = None) -> object | None:
+    try:
+        return _api_get(path, params)
+    except Exception as exc:
+        try:
+            import httpx
+        except Exception:
+            httpx = None  # type: ignore[assignment]
+        if httpx is not None and isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404:
+            return None
+        logger.warning("Optional attached report source unavailable: %s", path, exc_info=True)
+        return None
+
+
+def _load_thread_report_snapshot(thread_id: str, config: BTwinConfig) -> dict[str, object]:
+    if _use_attached_api(config):
+        thread = _attached_api_get_or_exit(f"/api/threads/{thread_id}")
+        status_summary = _attached_api_get_or_exit(f"/api/threads/{thread_id}/status")
+        protocol_name = thread.get("protocol") if isinstance(thread, dict) else None
+        protocol = (
+            _attached_api_get_or_exit(f"/api/protocols/{protocol_name}")
+            if isinstance(protocol_name, str) and protocol_name
+            else {}
+        )
+        messages = _attached_api_get_or_exit(f"/api/threads/{thread_id}/messages")
+        contributions = _attached_api_get_or_exit(f"/api/threads/{thread_id}/contributions")
+        mailbox_reports = _list_system_mailbox_reports(thread_id=thread_id, limit=200, config=config)
+        phase_cycle = _optional_attached_api_get(f"/api/threads/{thread_id}/phase-cycle") or {}
+        delegation_status = _optional_attached_api_get(f"/api/threads/{thread_id}/delegate/status") or {}
+        agents_payload = _optional_attached_api_get("/api/agents")
+        runtime_sessions = _optional_attached_api_get("/api/agent-runtime-status")
+        return {
+            "thread": thread,
+            "status_summary": status_summary,
+            "protocol": protocol,
+            "messages": messages if isinstance(messages, list) else [],
+            "contributions": contributions if isinstance(contributions, list) else [],
+            "mailbox_reports": mailbox_reports,
+            "workflow_events": _workflow_event_log(thread_id).list_events(),
+            "phase_cycle": phase_cycle,
+            "delegation_status": delegation_status,
+            "agents": agents_payload if isinstance(agents_payload, list) else [],
+            "runtime_sessions": runtime_sessions if isinstance(runtime_sessions, dict) else {},
+        }
+
+    store = _get_thread_store()
+    thread = store.get_thread(thread_id)
+    if thread is None:
+        console.print(f"[red]Thread not found:[/red] {thread_id}")
+        raise typer.Exit(4)
+
+    protocol_name = thread.get("protocol")
+    protocol = _get_protocol_store().get_protocol(protocol_name) if isinstance(protocol_name, str) else None
+    phase_cycle_state = PhaseCycleStore(store.data_dir).read(thread_id)
+    delegation_state = DelegationStore(store.data_dir).read(thread_id)
+    return {
+        "thread": thread,
+        "status_summary": store.get_status(thread_id) or {},
+        "protocol": protocol.model_dump(by_alias=True) if protocol is not None else {},
+        "messages": store.list_messages(thread_id),
+        "contributions": store.list_contributions(thread_id, include_history=True),
+        "mailbox_reports": SystemMailboxStore(store.data_dir).list_reports(thread_id=thread_id, limit=200),
+        "workflow_events": WorkflowEventLog(store.workflow_event_log_path(thread_id)).list_events(),
+        "phase_cycle": {"state": phase_cycle_state.model_dump()} if phase_cycle_state is not None else {},
+        "delegation_status": delegation_state.model_dump(exclude_none=True) if delegation_state is not None else {},
+        "agents": [sanitize_agent_for_output(agent) for agent in _get_agent_store().list_agents()],
+        "runtime_sessions": {},
+    }
+
+
 def _thread_chat_tldr(content: str, limit: int = 80) -> str:
     text = " ".join(content.split())
     if len(text) <= limit:
@@ -7066,6 +7358,7 @@ def agent_create(
     provider: str = typer.Option(..., "--provider", help="Provider name"),
     role: str = typer.Option(..., "--role", help="Agent role"),
     model: str = typer.Option(..., "--model", help="Model name"),
+    reasoning_level: str | None = typer.Option(None, "--reasoning-level", help="Agent reasoning level"),
     as_json: bool = typer.Option(False, "--json", help="Output JSON"),
 ):
     """Create a registered agent definition."""
@@ -7075,6 +7368,7 @@ def agent_create(
         alias=name,
         provider=provider,
         role=role,
+        reasoning_level=reasoning_level,
     )
     _emit_payload(agent, as_json=as_json)
 
@@ -7086,6 +7380,7 @@ def agent_edit(
     model: str | None = typer.Option(None, "--model", help="Override model name"),
     provider: str | None = typer.Option(None, "--provider", help="Override provider name"),
     role: str | None = typer.Option(None, "--role", help="Override agent role"),
+    reasoning_level: str | None = typer.Option(None, "--reasoning-level", help="Override reasoning level"),
     memo: str | None = typer.Option(None, "--memo", help="Update operator note"),
     capabilities: str | None = typer.Option(None, "--capabilities", help="Comma-separated capabilities"),
     as_json: bool = typer.Option(False, "--json", help="Output JSON"),
@@ -7100,6 +7395,8 @@ def agent_edit(
         updates["provider"] = provider
     if role is not None:
         updates["role"] = role
+    if reasoning_level is not None:
+        updates["reasoning_level"] = reasoning_level
     if memo is not None:
         updates["memo"] = memo
     if capabilities is not None:
@@ -7546,7 +7843,12 @@ def protocol_apply_next(
             )
         else:
             store = _get_thread_store()
-            closed_or_updated = store.advance_phase(resolved_thread_id, next_phase=plan.next_phase)
+            target_phase = next((item for item in protocol.phases if item.name == plan.next_phase), None)
+            closed_or_updated = store.advance_phase(
+                resolved_thread_id,
+                next_phase=plan.next_phase,
+                phase_participants=default_phase_participants(thread, target_phase) if target_phase is not None else None,
+            )
             if closed_or_updated is None:
                 console.print(f"[red]Thread not found:[/red] {resolved_thread_id}")
                 raise typer.Exit(4)
@@ -7659,11 +7961,18 @@ def thread_create(
 
         store = _get_thread_store()
         locale = LocaleSettingsStore(store.data_dir).read().model_dump()
+        initial_phase_def = proto.phases[0] if proto.phases else None
+        phase_participants = (
+            default_phase_participants({"participants": participant or []}, initial_phase_def)
+            if initial_phase_def is not None
+            else None
+        )
         thread = store.create_thread(
             topic=topic,
             protocol=protocol,
             participants=participant or None,
             initial_phase=proto.phases[0].name if proto.phases else None,
+            phase_participants=phase_participants,
             locale=locale,
         )
     payload = _thread_create_payload(thread)
@@ -8073,6 +8382,34 @@ def thread_watch(
         return
 
     _run_live_view(render_once, interval)
+
+
+@thread_app.command("export-report")
+def thread_export_report(
+    thread_id: str = typer.Option(..., "--thread", help="Thread id"),
+    output: Path | None = typer.Option(None, "--output", help="Output HTML path"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Export a self-contained static HTML work report for one thread."""
+    config = _get_config()
+    exported_at = datetime.now(timezone.utc)
+    snapshot = _load_thread_report_snapshot(thread_id, config)
+    snapshot["exported_at"] = exported_at.isoformat()
+    thread = snapshot.get("thread")
+    if not isinstance(thread, dict):
+        console.print(f"[red]Thread not found:[/red] {thread_id}")
+        raise typer.Exit(4)
+
+    report_path = output or default_report_path(_project_root(), thread, exported_at)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(render_thread_report_html(snapshot), encoding="utf-8")
+
+    payload = {
+        "thread_id": thread_id,
+        "path": str(report_path),
+        "format": "html",
+    }
+    _emit_payload(payload, as_json=as_json)
 
 
 @thread_app.command("send-message")

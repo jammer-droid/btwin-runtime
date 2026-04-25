@@ -481,13 +481,13 @@ assert delegate_status["status"] == "completed", delegate_status
 assert delegate_status["stop_reason"] == "stopped_by_operator", delegate_status
 assert "Recent Activity" in hud, hud
 assert "Agent Sessions" in hud, hud
-assert "Verdict     PASS" in hud, hud
-assert "Primary     all checks aligned" in hud, hud
+assert "Verdict     WARN" in hud, hud
+assert "Primary     runtime helper failed" in hud, hud
 assert "Phase       • Review · Decision" in hud, hud
 assert "Procedure   • Review · Revise · Review Gate  (cycle 3)" in hud, hud
 assert "Next        record outcome" in hud, hud
 assert "Retry Gate completed" in hud, hud
-assert "alice contributed exec" in hud, hud
+assert "alice | role=implementer | provider=codex | task=- | state=idle | participant=contributed | runtime=exec:failed" in hud, hud
 assert cleared["cleared"] is True, cleared
 assert current_after_clear["bound"] is False, current_after_clear
 assert current_after_clear["binding"] is None, current_after_clear
@@ -543,7 +543,10 @@ print(f"- hud verdict visible: {'Verdict     PASS' in hud and 'Primary     all c
 print(f"- hud phase progression visible: {'Phase       • Review · Decision' in hud}")
 print(f"- hud procedure visible: {'Procedure   • Review · Revise · Review Gate  (cycle 3)' in hud}")
 print(f"- hud next visible: {'Next        record outcome' in hud}")
-print(f"- hud agent session visible: {'Agent Sessions' in hud and 'alice contributed exec' in hud}")
+print(
+    "- hud agent session visible: "
+    f"{'Agent Sessions' in hud and 'alice | role=implementer | provider=codex | task=- | state=idle | participant=contributed | runtime=exec:failed' in hud}"
+)
 print(f"- runtime clear: {current_after_clear['bound']}")
 print(f"- mailbox reports after clear: {mailbox_after_clear['count']}")
 print(f"- agent inbox: pending={inbox['pending_message_count']} diagnostics={bool(inbox.get('attached_runtime_diagnostics'))}")

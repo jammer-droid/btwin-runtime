@@ -529,12 +529,19 @@ def create_threads_router(
         if proto is None:
             raise HTTPException(status_code=404, detail=f"Protocol '{req.protocol}' not found")
         initial_phase = proto.phases[0].name if proto.phases else None
+        initial_phase_def = proto.phases[0] if proto.phases else None
+        phase_participants = (
+            default_phase_participants({"participants": req.participants or []}, initial_phase_def)
+            if initial_phase_def is not None
+            else None
+        )
 
         thread = thread_store.create_thread(
             topic=req.topic,
             protocol=req.protocol,
             participants=req.participants,
             initial_phase=initial_phase,
+            phase_participants=phase_participants,
             locale=locale_settings_store.read().model_dump(),
         )
         event_bus.publish(SSEEvent(type="thread_created", resource_id=thread["thread_id"]))
@@ -1090,8 +1097,13 @@ def create_threads_router(
                         },
                     )
 
+        next_phase_def = next((phase for phase in proto.phases if phase.name == req.next_phase), None) if proto else None
         old_phase = meta.get("current_phase")
-        updated = thread_store.advance_phase(thread_id, next_phase=req.next_phase)
+        updated = thread_store.advance_phase(
+            thread_id,
+            next_phase=req.next_phase,
+            phase_participants=default_phase_participants(meta, next_phase_def) if next_phase_def is not None else None,
+        )
         if updated is None:
             raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found or closed")
         event_bus.publish(

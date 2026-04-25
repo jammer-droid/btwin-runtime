@@ -175,7 +175,18 @@ def describe_next(
     sequential_next = protocol.phases[phase_index + 1].name if 0 <= phase_index < len(protocol.phases) - 1 else None
     branch_transitions = [t for t in protocol.transitions if t.from_phase == current_phase and t.on]
     default_transition = next((t for t in protocol.transitions if t.from_phase == current_phase and t.on is None), None)
-    valid_outcomes = list(protocol.outcomes) or [transition.on for transition in branch_transitions if transition.on]
+    if policy_outcomes:
+        valid_outcomes = list(policy_outcomes)
+    elif branch_transitions and not protocol.outcome_policies:
+        valid_outcomes = list(protocol.outcomes) or [
+            transition.on for transition in branch_transitions if transition.on
+        ]
+    elif branch_transitions:
+        valid_outcomes = [transition.on for transition in branch_transitions if transition.on]
+    elif protocol.outcome_policies:
+        valid_outcomes = []
+    else:
+        valid_outcomes = list(protocol.outcomes)
 
     next_phase = None
     suggested_action: ProtocolSuggestedAction = "close_thread"

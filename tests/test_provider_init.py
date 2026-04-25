@@ -21,6 +21,8 @@ def test_build_provider_config_returns_codex_models_and_reasoning_levels():
     assert "gpt-5.4" in models
     assert models["gpt-5.4"]["reasoning_levels"] == ["none", "low", "medium", "high", "xhigh"]
     assert "gpt-5.4-mini" in models
+    assert "gpt-5.5" in models
+    assert "high" in models["gpt-5.5"]["reasoning_levels"]
     assert "gpt-5.3-codex" in models
     assert "gpt-5.3-codex-spark" in models
     assert "gpt-5.2" in models

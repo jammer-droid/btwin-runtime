@@ -358,12 +358,77 @@ def test_protocol_apply_next_uses_runtime_binding_and_advances_phase(tmp_path, m
 
     assert result.exit_code == 0, result.output
     payload = _parse_json_output(result.output)
-    assert payload["applied"] is True
+    assert payload["applied"] is True, result.output
     assert payload["thread_source"] == "runtime_binding"
     assert payload["suggested_action"] == "advance_phase"
     assert payload["next_phase"] == "followup"
     updated_thread = thread_store.get_thread(thread["thread_id"])
     assert updated_thread["current_phase"] == "followup"
+
+
+def test_protocol_apply_next_sets_next_phase_participants_from_procedure_roles(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    thread = thread_store.create_thread(
+        topic="role-next thread",
+        protocol="role-next",
+        participants=["moderator", "developer", "reviewer"],
+        initial_phase="plan",
+        phase_participants=["moderator"],
+    )
+    protocol_store = _save_protocol(
+        project_root,
+        compile_protocol_definition(
+            {
+                "name": "role-next",
+                "phases": [
+                    {
+                        "name": "plan",
+                        "actions": ["contribute"],
+                        "template": [{"section": "plan", "required": True}],
+                        "procedure": [{"role": "moderator", "action": "plan"}],
+                    },
+                    {
+                        "name": "implement",
+                        "actions": ["contribute"],
+                        "template": [{"section": "implementation", "required": True}],
+                        "procedure": [{"role": "developer", "action": "implement"}],
+                    },
+                ],
+            }
+        ),
+    )
+    thread_store.submit_contribution(
+        thread["thread_id"],
+        "moderator",
+        "plan",
+        content="## plan\nReady.\n",
+        tldr="plan ready",
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+    monkeypatch.setattr(main, "_get_protocol_store", lambda: protocol_store)
+
+    result = runner.invoke(
+        app,
+        [
+            "protocol",
+            "apply-next",
+            "--thread",
+            thread["thread_id"],
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["applied"] is True, result.output
+    updated_thread = thread_store.get_thread(thread["thread_id"])
+    assert updated_thread["current_phase"] == "implement"
+    assert updated_thread["phase_participants"] == ["developer"]
 
 
 def test_protocol_apply_next_updates_phase_cycle_state_on_retry(tmp_path, monkeypatch):

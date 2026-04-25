@@ -339,6 +339,7 @@ def test_standalone_phase_cycle_payload_prefers_protocol_keys_in_visuals(tmp_pat
     assert payload["context_core"]["policy_outcomes"] == ["retry", "accept"]
     assert payload["visual"]["procedure"][0] == {"key": "step-review", "label": "Review", "status": "active"}
     assert payload["visual"]["procedure"][1] == {"key": "step-revise", "label": "Revise", "status": "pending"}
+    assert payload["visual"]["procedure"][2] == {"key": "review-gate", "label": "Review Gate", "status": "pending"}
     assert payload["visual"]["gates"][0] == {
         "key": "gate-retry",
         "label": "Retry Gate",
@@ -2647,7 +2648,7 @@ def test_hud_thread_detail_renders_status_policy_activity_and_hints(monkeypatch,
     assert "Protocol / Phase" not in rendered
     assert "Gate / Guard Focus" not in rendered
     assert "Agent Sessions" in rendered
-    assert "jun  waiting" in rendered
+    assert "jun | role=- | provider=- | task=- | state=waiting | participant=waiting | runtime=not attached" in rendered
     assert "Collect Feedback" in rendered
     assert "Recent Activity" in rendered
     assert "Quick Actions" not in rendered
@@ -3025,6 +3026,91 @@ def test_hud_thread_detail_marks_first_procedure_step_when_runtime_step_missing(
     assert "Status     " not in rendered
 
 
+def test_hud_thread_detail_uses_attached_protocol_for_full_phase_flow(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    config = _attached_config(data_dir)
+    state = main._HudNavigatorState(screen="thread", selected_thread_id="thread-1")
+
+    protocol = Protocol(
+        name="report-flow",
+        phases=[
+            ProtocolPhase(name="plan"),
+            ProtocolPhase(
+                name="implement",
+                procedure=[{"role": "developer", "action": "implement", "alias": "Implement"}],
+            ),
+            ProtocolPhase(name="review"),
+            ProtocolPhase(name="complete"),
+        ],
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: config)
+    monkeypatch.setattr(
+        main,
+        "_try_load_thread_snapshot",
+        lambda thread_id, current_config: (
+            {
+                "thread_id": thread_id,
+                "topic": "Report Flow",
+                "protocol": "report-flow",
+                "current_phase": "implement",
+            },
+            {"agents": [{"name": "developer", "status": "joined"}]},
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_get_protocol_store",
+        lambda: type("EmptyProtocolStore", (), {"get_protocol": lambda self, name: None})(),
+    )
+
+    def fake_api_get(path, params=None):
+        if path == "/api/protocols/report-flow":
+            return protocol.model_dump(by_alias=True)
+        if path == "/api/threads/thread-1/contributions":
+            return []
+        raise AssertionError(f"unexpected API path: {path}")
+
+    monkeypatch.setattr(main, "_api_get", fake_api_get)
+    monkeypatch.setattr(
+        main,
+        "_workflow_event_log",
+        lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_thread_watch_payload",
+        lambda thread, status, events: {
+            "phase_cycle": {
+                "state": {
+                    "cycle_index": 1,
+                    "current_step_label": "implement",
+                    "status": "active",
+                },
+                "visual": {
+                    "procedure": [
+                        {"key": "implement", "label": "Implement", "status": "active"},
+                        {"key": "implement-gate", "label": "Implement Gate", "status": "pending"},
+                    ],
+                },
+            },
+            "trace": [],
+        },
+    )
+    monkeypatch.setattr(main, "_runtime_sessions_for_thread", lambda thread_id, config: [])
+    monkeypatch.setattr(main, "_render_thread_runtime_diagnostics", lambda thread_id, config: [])
+    monkeypatch.setattr(main, "_hud_thread_view_window_size", lambda: 200)
+
+    rendered = main._render_hud_navigator(state, config, limit=5)
+
+    assert "Phase       Plan · • Implement · Review · Complete" in rendered
+    assert "Procedure   • Implement · Implement Gate  (cycle 1)" in rendered
+
+
 def test_hud_thread_detail_shows_agent_sessions_and_runtime_summary(monkeypatch, tmp_path):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"
@@ -3078,7 +3164,7 @@ def test_hud_thread_detail_shows_agent_sessions_and_runtime_summary(monkeypatch,
     rendered = main._render_hud_navigator(state, config, limit=5)
 
     assert "Agent Sessions" in rendered
-    assert "jun  waiting     app-server" in rendered
+    assert "jun | role=- | provider=- | task=- | state=idle | participant=waiting | runtime=app-server:done" in rendered
 
 
 def test_hud_direct_thread_entry_uses_thread_detail_renderer(monkeypatch, tmp_path):
@@ -3304,6 +3390,185 @@ def test_hud_thread_detail_renders_cockpit_sections_in_stable_order(monkeypatch,
     assert "binding=" not in rendered
 
 
+def test_hud_thread_detail_separates_agent_role_task_and_runtime(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    config = _attached_config(data_dir)
+    state = main._HudNavigatorState(screen="thread", selected_thread_id="thread-1")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: config)
+    monkeypatch.setattr(
+        main,
+        "_try_load_thread_snapshot",
+        lambda thread_id, current_config: (
+            {
+                "thread_id": thread_id,
+                "topic": "Report Build",
+                "protocol": "report-flow",
+                "current_phase": "implement",
+            },
+            {
+                "agents": [
+                    {"name": "moderator", "status": "joined"},
+                    {"name": "developer", "status": "joined"},
+                ]
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_workflow_event_log",
+        lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_thread_watch_payload",
+        lambda thread, status, events: {
+            "phase_cycle": {
+                "state": {"cycle_index": 1, "current_step_label": "implement"},
+                "context_core": {},
+            },
+            "trace": [],
+        },
+    )
+    monkeypatch.setattr(main, "_runtime_sessions_for_thread", lambda thread_id, current_config: [])
+    monkeypatch.setattr(main, "_render_thread_runtime_diagnostics", lambda thread_id, current_config: [])
+    monkeypatch.setattr(main, "_try_protocol_next_snapshot", lambda thread_id, current_config: {"passed": False})
+    monkeypatch.setattr(
+        main,
+        "_agent_profiles_for_hud",
+        lambda current_config: [
+            {"name": "moderator", "role": "moderator", "provider": "codex", "model": "gpt-5.5"},
+            {"name": "developer", "role": "developer", "provider": "codex", "model": "gpt-5.5"},
+        ],
+    )
+    monkeypatch.setattr(
+        main,
+        "_try_delegate_status_snapshot",
+        lambda thread_id, current_config: {
+            "status": "running",
+            "resolved_agent": "developer",
+            "target_role": "developer",
+        },
+    )
+    monkeypatch.setattr(main, "_hud_thread_view_window_size", lambda: 200)
+
+    rendered = _renderable_to_text(main._render_hud_navigator_renderable(state, config, limit=5), width=180)
+
+    assert "moderatoridle" not in rendered
+    assert "developeridle" not in rendered
+    assert "moderator  role=moderator" in rendered
+    assert "developer  role=developer" in rendered
+    assert "provider=codex  participant=joined" in rendered
+    assert "task=assigned" in rendered
+    assert "state=waiting" in rendered
+    assert "runtime=not attached" in rendered
+
+
+def test_plain_hud_thread_detail_separates_agent_role_task_and_runtime(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    config = _attached_config(data_dir)
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: config)
+    monkeypatch.setattr(main, "_runtime_sessions_for_thread", lambda thread_id, current_config: [])
+    monkeypatch.setattr(main, "_try_protocol_next_snapshot", lambda thread_id, current_config: {"passed": False})
+    monkeypatch.setattr(
+        main,
+        "_agent_profiles_for_hud",
+        lambda current_config: [
+            {"name": "moderator", "role": "moderator", "provider": "codex"},
+            {"name": "developer", "role": "developer", "provider": "codex"},
+        ],
+    )
+    monkeypatch.setattr(
+        main,
+        "_try_delegate_status_snapshot",
+        lambda thread_id, current_config: {
+            "status": "running",
+            "resolved_agent": "developer",
+            "target_role": "developer",
+        },
+    )
+
+    rendered = main._render_thread_detail(
+        {
+            "thread_id": "thread-1",
+            "topic": "Report Build",
+            "protocol": "report-flow",
+            "current_phase": "implement",
+        },
+        {
+            "agents": [
+                {"name": "moderator", "status": "joined"},
+                {"name": "developer", "status": "joined"},
+            ]
+        },
+        {"state": {"cycle_index": 1, "current_step_label": "implement"}},
+        [],
+    )
+
+    assert "moderatoridle" not in rendered
+    assert "developeridle" not in rendered
+    assert "moderator | role=moderator | provider=codex | task=- | state=idle | participant=joined | runtime=not attached" in rendered
+    assert "developer | role=developer | provider=codex | task=assigned | state=waiting | participant=joined | runtime=not attached" in rendered
+
+
+def test_agent_profiles_for_hud_merges_attached_payload_with_local_role_provider(monkeypatch, tmp_path):
+    data_dir = tmp_path / ".btwin"
+    config = _attached_config(data_dir)
+
+    monkeypatch.setattr(
+        main,
+        "_api_get",
+        lambda path, params=None: {
+            "agents": [
+                {"name": "developer", "model": "gpt-5.5", "status": "registered"},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_get_agent_store",
+        lambda: type(
+            "FakeAgentStore",
+            (),
+            {
+                "list_agents": lambda self: [
+                    {"name": "developer", "role": "developer", "provider": "codex", "model": "gpt-5.5"},
+                ]
+            },
+        )(),
+    )
+
+    profiles = main._agent_profiles_for_hud(config)
+
+    assert profiles == [
+        {
+            "name": "developer",
+            "role": "developer",
+            "provider": "codex",
+            "model": "gpt-5.5",
+            "status": "registered",
+        }
+    ]
+
+
+def test_agent_state_descriptor_prefers_runtime_working_status_over_participant_status():
+    logical, transport = main._agent_state_descriptor(
+        "joined",
+        {"transport_mode": "live_process_transport", "status": "received"},
+    )
+
+    assert logical == "working"
+    assert transport == "app-server"
+
+
 def test_hud_validation_focus_warns_on_session_recovery(monkeypatch, tmp_path):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"
@@ -3377,6 +3642,220 @@ def test_hud_validation_focus_warns_on_session_recovery(monkeypatch, tmp_path):
     assert "Session health" in rendered
     assert "runtime session recovery pending" in rendered
     assert "Reasons" in rendered
+
+
+def test_hud_validation_focus_does_not_fail_for_completed_exec_session(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    config = _attached_config(data_dir)
+    state = main._HudNavigatorState(screen="validation", selected_thread_id="thread-1")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: config)
+    monkeypatch.setattr(
+        main,
+        "_try_load_thread_snapshot",
+        lambda thread_id, current_config: (
+            {
+                "thread_id": thread_id,
+                "topic": "Design Review",
+                "protocol": "review-loop",
+                "current_phase": "review",
+            },
+            {"agents": [{"name": "ari", "status": "contributed"}]},
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_workflow_event_log",
+        lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_thread_watch_payload",
+        lambda thread, status, events: {
+            "phase_cycle": {
+                "state": {"cycle_index": 1, "current_step_label": "review"},
+                "context_core": {},
+            },
+            "trace": [
+                {
+                    "timestamp": "2026-04-19T12:04:28Z",
+                    "kind": "result",
+                    "phase": "review",
+                    "agent": "ari",
+                    "summary": "Ari result recorded.",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_runtime_sessions_for_thread",
+        lambda thread_id, current_config: [
+            (
+                "ari",
+                {
+                    "transport_mode": "resume_invocation_transport",
+                    "status": "ended",
+                    "fallback_transport_involved": False,
+                },
+            )
+        ],
+    )
+    monkeypatch.setattr(main, "_render_thread_runtime_diagnostics", lambda thread_id, current_config: [])
+    monkeypatch.setattr(main, "_hud_thread_view_window_size", lambda: 200)
+
+    rendered = _renderable_to_text(main._render_hud_navigator_renderable(state, config, limit=5), width=160)
+
+    assert "Rule Compliance" in rendered
+    assert "PASS" in rendered
+    assert "runtime session ended" not in rendered
+
+
+def test_hud_validation_focus_warns_for_failed_exec_helper(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    config = _attached_config(data_dir)
+    state = main._HudNavigatorState(screen="validation", selected_thread_id="thread-1")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: config)
+    monkeypatch.setattr(
+        main,
+        "_try_load_thread_snapshot",
+        lambda thread_id, current_config: (
+            {
+                "thread_id": thread_id,
+                "topic": "Design Review",
+                "protocol": "review-loop",
+                "current_phase": "review",
+            },
+            {"agents": [{"name": "ari", "status": "contributed"}]},
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_workflow_event_log",
+        lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_thread_watch_payload",
+        lambda thread, status, events: {
+            "phase_cycle": {
+                "state": {"cycle_index": 1, "current_step_label": "review"},
+                "context_core": {},
+            },
+            "trace": [
+                {
+                    "timestamp": "2026-04-19T12:04:28Z",
+                    "kind": "result",
+                    "phase": "review",
+                    "agent": "ari",
+                    "summary": "Ari result recorded.",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_runtime_sessions_for_thread",
+        lambda thread_id, current_config: [
+            (
+                "ari",
+                {
+                    "transport_mode": "resume_invocation_transport",
+                    "status": "failed",
+                    "fallback_transport_involved": False,
+                },
+            )
+        ],
+    )
+    monkeypatch.setattr(main, "_render_thread_runtime_diagnostics", lambda thread_id, current_config: [])
+    monkeypatch.setattr(main, "_hud_thread_view_window_size", lambda: 200)
+
+    rendered = _renderable_to_text(main._render_hud_navigator_renderable(state, config, limit=5), width=160)
+
+    assert "Rule Compliance" in rendered
+    assert "WARN" in rendered
+    assert "runtime helper failed" in rendered
+    assert "runtime session ended" not in rendered
+
+
+def test_hud_validation_focus_fails_for_ended_app_server_session(monkeypatch, tmp_path):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    project_root.mkdir()
+    config = _attached_config(data_dir)
+    state = main._HudNavigatorState(screen="validation", selected_thread_id="thread-1")
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: config)
+    monkeypatch.setattr(
+        main,
+        "_try_load_thread_snapshot",
+        lambda thread_id, current_config: (
+            {
+                "thread_id": thread_id,
+                "topic": "Design Review",
+                "protocol": "review-loop",
+                "current_phase": "review",
+            },
+            {"agents": [{"name": "ari", "status": "contributed"}]},
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_workflow_event_log",
+        lambda thread_id: type("FakeLog", (), {"list_events": lambda self, limit: []})(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_thread_watch_payload",
+        lambda thread, status, events: {
+            "phase_cycle": {
+                "state": {"cycle_index": 1, "current_step_label": "review"},
+                "context_core": {},
+            },
+            "trace": [
+                {
+                    "timestamp": "2026-04-19T12:04:28Z",
+                    "kind": "result",
+                    "phase": "review",
+                    "agent": "ari",
+                    "summary": "Ari result recorded.",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_runtime_sessions_for_thread",
+        lambda thread_id, current_config: [
+            (
+                "ari",
+                {
+                    "transport_mode": "live_process_transport",
+                    "status": "ended",
+                    "fallback_transport_involved": False,
+                },
+            )
+        ],
+    )
+    monkeypatch.setattr(main, "_render_thread_runtime_diagnostics", lambda thread_id, current_config: [])
+    monkeypatch.setattr(main, "_hud_thread_view_window_size", lambda: 200)
+
+    rendered = _renderable_to_text(main._render_hud_navigator_renderable(state, config, limit=5), width=160)
+
+    assert "Rule Compliance" in rendered
+    assert "FAIL" in rendered
+    assert "runtime session ended" in rendered
 
 
 def test_hud_validation_focus_section_contract(monkeypatch, tmp_path):

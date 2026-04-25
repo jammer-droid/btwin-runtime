@@ -174,10 +174,6 @@ def default_phase_participants(
     thread: dict[str, object],
     phase,
 ) -> list[str]:
-    phase_participants = thread.get("phase_participants", [])
-    if isinstance(phase_participants, list) and phase_participants:
-        return [name for name in phase_participants if isinstance(name, str) and name][: len(phase.procedure or [])]
-
     participants = thread.get("participants", [])
     names: list[str] = []
     for participant in participants:
@@ -188,6 +184,19 @@ def default_phase_participants(
             continue
         if isinstance(participant, str) and participant:
             names.append(participant)
+
+    if phase.procedure:
+        role_matched = [
+            step.role
+            for step in phase.procedure
+            if isinstance(step.role, str) and step.role in names
+        ]
+        if len(role_matched) == len(phase.procedure):
+            return role_matched
+
+    phase_participants = thread.get("phase_participants", [])
+    if isinstance(phase_participants, list) and phase_participants:
+        return [name for name in phase_participants if isinstance(name, str) and name][: len(phase.procedure or [])]
     if not phase.procedure:
         return names
     return names[: len(phase.procedure)]
@@ -227,9 +236,15 @@ def _fallback_expected_output(phase_name: str) -> str:
 def _runtime_recovery_failed(runtime_session: Mapping[str, object] | None) -> bool:
     if runtime_session is None:
         return False
-    return bool(runtime_session.get("degraded")) and not bool(runtime_session.get("recoverable")) and not bool(
-        runtime_session.get("recovery_pending")
-    )
+    if bool(runtime_session.get("recovery_pending")):
+        return False
+    if bool(runtime_session.get("degraded")) or bool(runtime_session.get("recoverable")):
+        return False
+    status = str(runtime_session.get("status") or "").strip().lower()
+    if status not in {"failed", "closed", "ended", "exited", "terminated"}:
+        return False
+    transport_mode = str(runtime_session.get("transport_mode") or "").strip()
+    return transport_mode == "live_process_transport"
 
 
 def _loop_iteration_limit_reached(*, loop_iteration: int | None, max_auto_iterations: int) -> bool:

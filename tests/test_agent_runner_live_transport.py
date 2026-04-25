@@ -383,6 +383,14 @@ def test_build_transport_launch_context_includes_managed_codex_developer_instruc
         EventBus(),
         config=BTwinConfig(data_dir=data_dir),
     )
+    runner._agents.register(
+        name="alice",
+        model="gpt-5.5",
+        alias="alice",
+        provider="codex",
+        role="moderator",
+        reasoning_level="high",
+    )
     thread = runner._threads.create_thread(
         topic="Managed launch profile",
         protocol="debate",
@@ -414,6 +422,13 @@ def test_build_transport_launch_context_includes_managed_codex_developer_instruc
     launch_context = runner._build_transport_launch_context(session, launch)
 
     assert launch_context.config_overrides
+    assert launch_context.requested_model == "gpt-5.5"
+    assert launch_context.requested_effort == "high"
+    assert launch_context.config_overrides["model"] == "gpt-5.5"
+    assert launch_context.config_overrides["model_reasoning_effort"] == "high"
+    session_config = launch_context.build_session_config()
+    assert session_config.options["requested_model"] == "gpt-5.5"
+    assert session_config.options["requested_effort"] == "high"
     developer_instructions = launch_context.config_overrides["developer_instructions"]
     assert 'You are "alice".' in developer_instructions
     assert f"Thread ID: {thread['thread_id']}" in developer_instructions

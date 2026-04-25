@@ -783,7 +783,7 @@ def test_threads_router_exposes_phase_cycle_progress(tmp_path):
     assert payload["context_core"]["outcome_actions"] == ["decide"]
     assert payload["context_core"]["policy_outcomes"] == ["retry", "accept"]
     assert payload["visual"]["procedure"][0]["label"] == "Review"
-    assert payload["visual"]["procedure"][-1]["key"] == "gate"
+    assert payload["visual"]["procedure"][-1]["key"] == "review-gate"
     assert payload["visual"]["guards"] == [
         {
             "key": "phase_actor_eligibility",
@@ -1144,6 +1144,63 @@ def test_spawn_agent_uses_attach_or_resume_for_recoverable_existing_session(tmp_
         }
     ]
     assert response.json()["recovery_started"] is True
+
+
+def test_advance_phase_sets_phase_participants_from_next_procedure_roles(tmp_path):
+    thread_store = ThreadStore(tmp_path / "threads")
+    protocol_store = ProtocolStore(tmp_path / "protocols")
+    event_bus = EventBus()
+    protocol_store.save_protocol(
+        compile_protocol_definition(
+            {
+                "name": "role-next",
+                "phases": [
+                    {
+                        "name": "plan",
+                        "actions": ["contribute"],
+                        "template": [{"section": "plan", "required": True}],
+                        "procedure": [{"role": "moderator", "action": "plan"}],
+                    },
+                    {
+                        "name": "implement",
+                        "actions": ["contribute"],
+                        "template": [{"section": "implementation", "required": True}],
+                        "procedure": [{"role": "developer", "action": "implement"}],
+                    },
+                ],
+            }
+        )
+    )
+    thread = thread_store.create_thread(
+        topic="Role next thread",
+        protocol="role-next",
+        participants=["moderator", "developer", "reviewer"],
+        initial_phase="plan",
+        phase_participants=["moderator"],
+    )
+    thread_store.submit_contribution(
+        thread["thread_id"],
+        "moderator",
+        "plan",
+        content="## plan\nReady.\n",
+        tldr="plan ready",
+    )
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(create_threads_router(thread_store, protocol_store, event_bus))
+    client = TestClient(app)
+
+    response = client.post(
+        f"/api/threads/{thread['thread_id']}/advance-phase",
+        json={"nextPhase": "implement"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["current_phase"] == "implement"
+    assert payload["phase_participants"] == ["developer"]
 
 
 def test_recover_agent_uses_agent_runner_recovery_path(tmp_path):

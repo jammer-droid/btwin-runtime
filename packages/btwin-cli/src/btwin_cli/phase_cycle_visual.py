@@ -7,11 +7,27 @@ from btwin_core.phase_cycle_engine import resolve_phase_cycle_current_step_index
 from btwin_core.protocol_store import Protocol, ProtocolPhase
 
 
+def _visual_label(value: str) -> str:
+    return value.replace("-", " ").replace("_", " ").title()
+
+
+def _procedure_gate_key(phase: ProtocolPhase | None) -> str:
+    phase_name = str(phase.name or "").strip() if phase is not None else ""
+    gate_name = str(phase.gate or "").strip() if phase is not None else ""
+    prefix = phase_name or gate_name
+    if prefix:
+        return f"{prefix}-gate"
+    return "phase-gate"
+
+
 def _procedure_gate_label(phase: ProtocolPhase | None) -> str:
     gate_name = str(phase.gate or "").strip() if phase is not None else ""
-    if not gate_name:
-        return "Gate"
-    return gate_name.replace("-", " ").replace("_", " ").title()
+    if gate_name:
+        return _visual_label(gate_name)
+    phase_name = str(phase.name or "").strip() if phase is not None else ""
+    if phase_name:
+        return f"{_visual_label(phase_name)} Gate"
+    return "Phase Gate"
 
 
 def build_phase_cycle_visual_payload(
@@ -51,7 +67,13 @@ def build_phase_cycle_visual_payload(
                 status = "active"
             procedure_nodes.append({"key": step, "label": step, "status": status})
     gate_status = "completed" if state.status == "completed" else "pending"
-    procedure_nodes.append({"key": "gate", "label": _procedure_gate_label(phase), "status": gate_status})
+    procedure_nodes.append(
+        {
+            "key": _procedure_gate_key(phase),
+            "label": _procedure_gate_label(phase),
+            "status": gate_status,
+        }
+    )
 
     gate_nodes: list[dict[str, object]] = []
     if protocol is not None:

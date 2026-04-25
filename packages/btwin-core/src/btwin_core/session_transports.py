@@ -21,6 +21,8 @@ class TransportLaunchContext:
     transport_mode: str
     auth_mode: str | None = None
     token_ref: str | None = None
+    requested_model: str | None = None
+    requested_effort: str | None = None
     gateway_metadata: dict[str, str] = field(default_factory=dict)
     env: dict[str, str] = field(default_factory=dict)
     cwd: str | None = None
@@ -39,6 +41,10 @@ class TransportLaunchContext:
             options["env"] = dict(self.env)
         if self.cwd:
             options["cwd"] = self.cwd
+        if self.requested_model:
+            options["requested_model"] = self.requested_model
+        if self.requested_effort:
+            options["requested_effort"] = self.requested_effort
         if self.config_overrides:
             options["config_overrides"] = dict(self.config_overrides)
         return SessionConfig(

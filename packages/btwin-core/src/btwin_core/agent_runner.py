@@ -35,6 +35,7 @@ from btwin_core.message_router import MessageRouter
 from btwin_core.phase_cycle_engine import phase_cycle_procedure_actions
 from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.protocol_store import ProtocolStore
+from btwin_core.protocol_validator import ProtocolValidator
 from btwin_core.providers import CLIProvider, get_provider, get_provider_runtime_profile
 from btwin_core.resource_paths import resolve_workspace_root
 from btwin_core.runtime_logging import RuntimeEventLogger
@@ -505,7 +506,6 @@ class AgentRunner:
                 session_id_captured=captured_session_id,
             )
         except TimeoutError as exc:
-            session.last_transport_error = str(exc)
             proc.kill()
             await proc.wait()
             if proc.pid:
@@ -1416,38 +1416,49 @@ class AgentRunner:
         if not isinstance(content, str) or not content.strip():
             return
 
-        contribution = self._threads.submit_contribution(
-            thread_id,
-            agent_name,
-            current_phase_name,
-            content=content,
-            tldr=content[:100].replace("\n", " "),
-            source_message_id=message_id,
-        )
-        if contribution is None:
-            blocked_state = delegation_state.model_copy(
-                update={
-                    "status": "blocked",
-                    "reason_blocked": "contribution_persist_failed",
-                    "stop_reason": "contribution_persist_failed",
-                    "last_result_message_id": message_id,
-                    "updated_at": _now_iso(),
-                }
-            )
-            self._delegations.write(blocked_state)
-            return
-
         assignment_thread = dict(thread)
         assignment_thread["current_phase"] = current_phase_name
         phase = next((item for item in protocol.phases if item.name == current_phase_name), None)
         if phase is None:
             return
+        existing_contributions = self._threads.list_contributions(thread_id, phase=current_phase_name)
+        should_submit_contribution = not self._should_skip_final_answer_contribution(
+            agent_name=agent_name,
+            phase_name=current_phase_name,
+            phase=phase,
+            content=content,
+            contributions=existing_contributions,
+        )
+        if should_submit_contribution:
+            contribution = self._threads.submit_contribution(
+                thread_id,
+                agent_name,
+                current_phase_name,
+                content=content,
+                tldr=content[:100].replace("\n", " "),
+                source_message_id=message_id,
+            )
+            if contribution is None:
+                blocked_state = delegation_state.model_copy(
+                    update={
+                        "status": "blocked",
+                        "reason_blocked": "contribution_persist_failed",
+                        "stop_reason": "contribution_persist_failed",
+                        "last_result_message_id": message_id,
+                        "updated_at": _now_iso(),
+                    }
+                )
+                self._delegations.write(blocked_state)
+                return
+            contributions_for_assignment = self._threads.list_contributions(thread_id, phase=current_phase_name)
+        else:
+            contributions_for_assignment = existing_contributions
         assignment = build_delegation_assignment(
             thread=assignment_thread,
             protocol=protocol,
             phase_cycle_state=phase_cycle_state,
             role_bindings=build_delegate_role_bindings(assignment_thread, phase),
-            contributions=self._threads.list_contributions(thread_id, phase=current_phase_name),
+            contributions=contributions_for_assignment,
         )
 
         if (
@@ -1501,6 +1512,14 @@ class AgentRunner:
                         "degraded": next_session.degraded,
                         "recoverable": next_session.recoverable,
                         "recovery_pending": next_session.recovery_pending,
+                        "status": next_session.status,
+                        "transport_mode": next_session.transport_mode,
+                        "primary_transport_mode": next_session.primary_transport_mode,
+                        "fallback_transport_involved": (
+                            isinstance(next_session.fallback_mode, str)
+                            and bool(next_session.fallback_mode)
+                            and next_session.transport_mode == next_session.fallback_mode
+                        ),
                     }
                     if next_session is not None
                     else None,
@@ -1593,6 +1612,31 @@ class AgentRunner:
                 }
             )
         )
+
+    def _should_skip_final_answer_contribution(
+        self,
+        *,
+        agent_name: str,
+        phase_name: str,
+        phase,
+        content: str,
+        contributions: list[dict[str, object]],
+    ) -> bool:
+        required_sections = [section.section for section in (phase.template or []) if section.required]
+        if not required_sections:
+            return False
+        current_result = ProtocolValidator.validate_contribution(content, required_sections)
+        if current_result.valid:
+            return False
+        for contribution in contributions:
+            if contribution.get("agent") != agent_name or contribution.get("phase") != phase_name:
+                continue
+            existing_content = contribution.get("_content")
+            if not isinstance(existing_content, str) or not existing_content.strip():
+                continue
+            if ProtocolValidator.validate_contribution(existing_content, required_sections).valid:
+                return True
+        return False
 
     def _dispatch_delegation_message(
         self,
@@ -2260,6 +2304,8 @@ class AgentRunner:
             transport_mode=self._session_transport_mode_for_invoke(session),
             auth_mode=auth_mode if isinstance(auth_mode, str) and auth_mode else None,
             token_ref=token_ref if isinstance(token_ref, str) and token_ref else None,
+            requested_model=self._agent_requested_model(session.agent_name),
+            requested_effort=self._agent_requested_effort(session.agent_name),
             gateway_metadata=gateway_metadata,
             env=dict(launch.env),
             cwd=str(self._prepare_helper_workspace(
@@ -2678,12 +2724,37 @@ class AgentRunner:
         if thread is None:
             return {}
 
-        return {
+        overrides: dict[str, object] = {
             "developer_instructions": ContextFormatter.format_launch_developer_instructions(
                 thread=thread,
                 agent_name=agent_name,
             )
         }
+        requested_model = self._agent_requested_model(agent_name)
+        if requested_model:
+            overrides["model"] = requested_model
+        requested_effort = self._agent_requested_effort(agent_name)
+        if requested_effort:
+            overrides["model_reasoning_effort"] = requested_effort
+        return overrides
+
+    def _agent_requested_model(self, agent_name: str) -> str | None:
+        agent = self._agents.get_agent(agent_name)
+        if agent is None:
+            return None
+        model = agent.get("model")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+        return None
+
+    def _agent_requested_effort(self, agent_name: str) -> str | None:
+        agent = self._agents.get_agent(agent_name)
+        if agent is None:
+            return None
+        reasoning_level = agent.get("reasoning_level")
+        if isinstance(reasoning_level, str) and reasoning_level.strip():
+            return reasoning_level.strip()
+        return None
 
     def _apply_codex_launch_config_overrides(
         self,

@@ -27,7 +27,7 @@ def _expected_phase_cycle_visual_payload(scenario_id: str) -> dict[str, object]:
     return {
         "procedure": [
             *[step.as_dict() for step in scenario.visual_procedure],
-            {"key": "gate", "label": "Review Gate", "status": "pending"},
+            {"key": "review-gate", "label": "Review Gate", "status": "pending"},
         ],
         "gates": [gate.as_dict() for gate in scenario.visual_gates],
         "guards": [],
@@ -457,3 +457,56 @@ def test_protocol_flow_keeps_accept_as_non_loop_outcome():
 
     assert plan.next_phase is None
     assert plan.suggested_action == "record_outcome"
+
+
+def test_protocol_flow_uses_phase_local_outcomes_when_protocol_has_later_policies():
+    protocol = compile_protocol_definition(
+        {
+            "name": "mixed-outcomes",
+            "outcome_policies": [
+                {
+                    "name": "review-outcomes",
+                    "authoring_only": True,
+                    "emitters": ["reviewer"],
+                    "actions": ["decide"],
+                    "outcomes": ["request_changes", "approve"],
+                }
+            ],
+            "phases": [
+                {
+                    "name": "plan",
+                    "actions": ["contribute"],
+                    "template": [{"section": "completed", "required": True}],
+                },
+                {
+                    "name": "review",
+                    "actions": ["review", "decide"],
+                    "template": [{"section": "completed", "required": True}],
+                    "outcome_policy": "review-outcomes",
+                },
+            ],
+            "transitions": [
+                {"from": "plan", "to": "review"},
+                {"from": "review", "to": "plan", "on": "request_changes"},
+            ],
+        }
+    )
+    thread = {
+        "thread_id": "thread-1",
+        "current_phase": "plan",
+        "phase_participants": ["moderator"],
+    }
+    contributions = [
+        {
+            "agent": "moderator",
+            "phase": "plan",
+            "created_at": "2026-04-25T00:00:00+00:00",
+            "_content": "## completed\nPlan is ready.\n",
+        }
+    ]
+
+    plan = describe_next(thread, protocol, contributions)
+
+    assert plan.valid_outcomes == []
+    assert plan.next_phase == "review"
+    assert plan.suggested_action == "advance_phase"

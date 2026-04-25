@@ -285,6 +285,98 @@ def test_duplicate_result_message_id_is_not_reprocessed(tmp_path: Path) -> None:
     assert len(review_contributions) == 1
 
 
+def test_confirmation_final_answer_does_not_supersede_existing_valid_contribution(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    runner, thread_store, protocol_store, delegation_store, phase_cycle_store = _build_runner(data_dir)
+
+    protocol_store.save_protocol(
+        compile_protocol_definition(
+            {
+                "name": "delegate-plan",
+                "phases": [
+                    {
+                        "name": "plan",
+                        "actions": ["contribute"],
+                        "template": [
+                            {"section": "plan", "required": True},
+                            {"section": "acceptance_criteria", "required": True},
+                        ],
+                        "procedure": [{"role": "moderator", "action": "create_plan", "alias": "Plan"}],
+                    },
+                    {
+                        "name": "implement",
+                        "actions": ["discuss", "contribute"],
+                        "template": [{"section": "implementation", "required": True}],
+                        "procedure": [{"role": "developer", "action": "implement", "alias": "Implement"}],
+                    },
+                ],
+            }
+        )
+    )
+    thread = thread_store.create_thread(
+        topic="Delegate plan thread",
+        protocol="delegate-plan",
+        participants=["moderator", "developer"],
+        initial_phase="plan",
+        phase_participants=["moderator"],
+    )
+    phase_cycle_store.write(
+        PhaseCycleState.start(
+            thread_id=thread["thread_id"],
+            phase_name="plan",
+            procedure_steps=["create_plan"],
+        )
+    )
+    delegation_store.write(
+        DelegationState(
+            thread_id=thread["thread_id"],
+            status="running",
+            loop_iteration=1,
+            current_phase="plan",
+            current_cycle_index=1,
+            target_role="moderator",
+            resolved_agent="moderator",
+            required_action="submit_contribution",
+            expected_output="create_plan contribution",
+        )
+    )
+    thread_store.submit_contribution(
+        thread["thread_id"],
+        "moderator",
+        "plan",
+        content="## plan\nBuild it.\n\n## acceptance_criteria\nIt works.\n",
+        tldr="valid plan",
+    )
+    saved_message = runner._save_agent_message(
+        thread["thread_id"],
+        "moderator",
+        "Submitted the `plan` contribution and verified it was recorded.",
+        1,
+        message_phase="final_answer",
+        state_affecting=True,
+    )
+
+    runner._maybe_continue_delegation_from_saved_message(
+        thread["thread_id"],
+        "moderator",
+        saved_message,
+    )
+
+    plan_contributions = thread_store.list_contributions(thread["thread_id"], phase="plan")
+    assert len(plan_contributions) == 1
+    assert plan_contributions[0]["_content"] == "## plan\nBuild it.\n\n## acceptance_criteria\nIt works."
+
+    updated_thread = thread_store.get_thread(thread["thread_id"])
+    assert updated_thread is not None
+    assert updated_thread["current_phase"] == "implement"
+
+    state = delegation_store.read(thread["thread_id"])
+    assert state is not None
+    assert state.status == "running"
+    assert state.current_phase == "implement"
+    assert state.resolved_agent == "developer"
+
+
 def test_helper_result_blocks_when_runtime_recovery_has_failed(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     runner, thread_store, protocol_store, delegation_store, phase_cycle_store = _build_runner(data_dir)
@@ -329,9 +421,11 @@ def test_helper_result_blocks_when_runtime_recovery_has_failed(tmp_path: Path) -
         "alice",
         provider="codex",
     )
-    session.degraded = True
+    session.degraded = False
     session.recoverable = False
     session.recovery_pending = False
+    session.status = "failed"
+    session.transport_mode = "live_process_transport"
 
     runner._persist_invocation_outputs(
         thread["thread_id"],

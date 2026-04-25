@@ -65,6 +65,7 @@ class ThreadStore:
         protocol: str,
         participants: list[str] | None = None,
         initial_phase: str | None = None,
+        phase_participants: list[str] | None = None,
         locale: dict[str, object] | None = None,
     ) -> dict:
         thread_id = _generate_thread_id()
@@ -83,7 +84,7 @@ class ThreadStore:
             "participants": participant_list,
             "current_phase": initial_phase,
             "interaction_mode": "discuss",
-            "phase_participants": list(participants or []),
+            "phase_participants": list(phase_participants if phase_participants is not None else participants or []),
         }
         if locale is not None:
             meta["locale"] = dict(locale)

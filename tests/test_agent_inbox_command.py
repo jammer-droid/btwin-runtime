@@ -315,6 +315,68 @@ def test_agent_edit_updates_selected_fields(tmp_path, monkeypatch):
     assert payload["provider"] == "codex"
 
 
+def test_agent_create_accepts_reasoning_level(tmp_path, monkeypatch):
+    agent_store = AgentStore(tmp_path / "global-btwin")
+    monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
+
+    result = runner.invoke(
+        app,
+        [
+            "agent",
+            "create",
+            "moderator",
+            "--provider",
+            "codex",
+            "--role",
+            "moderator",
+            "--model",
+            "gpt-5.5",
+            "--reasoning-level",
+            "high",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["name"] == "moderator"
+    assert payload["model"] == "gpt-5.5"
+    assert payload["reasoning_level"] == "high"
+
+
+def test_agent_edit_updates_reasoning_level(tmp_path, monkeypatch):
+    agent_data_dir = tmp_path / "global-btwin"
+    agent_store = AgentStore(agent_data_dir)
+    agent_store.register(
+        name="alice",
+        model="gpt-5.5",
+        alias="alice",
+        provider="codex",
+        role="moderator",
+        reasoning_level="medium",
+    )
+
+    monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
+
+    result = runner.invoke(
+        app,
+        [
+            "agent",
+            "edit",
+            "alice",
+            "--reasoning-level",
+            "high",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["name"] == "alice"
+    assert payload["model"] == "gpt-5.5"
+    assert payload["reasoning_level"] == "high"
+
+
 def test_agent_delete_removes_agent(tmp_path, monkeypatch):
     agent_data_dir = tmp_path / "global-btwin"
     agent_store = AgentStore(agent_data_dir)

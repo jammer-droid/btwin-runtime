@@ -1,7 +1,7 @@
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.protocol_store import Protocol, ProtocolOutcomePolicy, ProtocolPhase, ProtocolSection
 
-from btwin_core.delegation_engine import build_delegation_assignment
+from btwin_core.delegation_engine import build_delegation_assignment, default_phase_participants
 
 
 def _review_protocol() -> Protocol:
@@ -58,6 +58,24 @@ def test_build_delegation_assignment_uses_compiled_phase_and_role():
     assert assignment.resolved_agent == "alice"
     assert assignment.required_action == "submit_contribution"
     assert assignment.expected_output == "review contribution"
+
+
+def test_default_phase_participants_prefers_agent_names_matching_procedure_roles():
+    phase = ProtocolPhase(
+        name="implement",
+        actions=["contribute"],
+        procedure=[{"role": "developer", "action": "implement"}],
+    )
+    thread = {
+        "participants": [
+            {"name": "moderator"},
+            {"name": "developer"},
+            {"name": "reviewer"},
+        ],
+        "phase_participants": ["moderator"],
+    }
+
+    assert default_phase_participants(thread, phase) == ["developer"]
 
 
 def test_build_delegation_assignment_blocks_when_role_binding_missing():
@@ -136,9 +154,11 @@ def test_build_delegation_assignment_blocks_when_runtime_recovery_has_failed():
         phase_cycle_state=_review_cycle_state(),
         role_bindings={"reviewer": "alice"},
         runtime_session={
-            "degraded": True,
+            "degraded": False,
             "recoverable": False,
             "recovery_pending": False,
+            "status": "failed",
+            "transport_mode": "live_process_transport",
         },
     )
 
@@ -147,6 +167,63 @@ def test_build_delegation_assignment_blocks_when_runtime_recovery_has_failed():
     assert assignment.resolved_agent == "alice"
     assert assignment.reason_blocked == "failed_recovery"
     assert assignment.stop_reason == "failed_recovery"
+
+
+def test_build_delegation_assignment_keeps_running_for_failed_exec_helper():
+    assignment = build_delegation_assignment(
+        thread=_review_thread(),
+        protocol=_review_protocol(),
+        phase_cycle_state=_review_cycle_state(),
+        role_bindings={"reviewer": "alice"},
+        runtime_session={
+            "degraded": False,
+            "recoverable": False,
+            "recovery_pending": False,
+            "status": "failed",
+            "transport_mode": "resume_invocation_transport",
+        },
+    )
+
+    assert assignment.status == "running"
+    assert assignment.resolved_agent == "alice"
+
+
+def test_build_delegation_assignment_keeps_running_for_recoverable_degraded_timeout():
+    assignment = build_delegation_assignment(
+        thread=_review_thread(),
+        protocol=_review_protocol(),
+        phase_cycle_state=_review_cycle_state(),
+        role_bindings={"reviewer": "alice"},
+        runtime_session={
+            "degraded": True,
+            "recoverable": True,
+            "recovery_pending": False,
+            "status": "received",
+            "last_transport_error": "live transport timed out after 180.00s",
+        },
+    )
+
+    assert assignment.status == "running"
+    assert assignment.target_role == "reviewer"
+    assert assignment.resolved_agent == "alice"
+
+
+def test_build_delegation_assignment_does_not_treat_degraded_received_session_as_failed():
+    assignment = build_delegation_assignment(
+        thread=_review_thread(),
+        protocol=_review_protocol(),
+        phase_cycle_state=_review_cycle_state(),
+        role_bindings={"reviewer": "alice"},
+        runtime_session={
+            "degraded": True,
+            "recoverable": False,
+            "recovery_pending": False,
+            "status": "received",
+        },
+    )
+
+    assert assignment.status == "running"
+    assert assignment.resolved_agent == "alice"
 
 
 def test_build_delegation_assignment_fails_when_loop_iteration_exceeds_cap():

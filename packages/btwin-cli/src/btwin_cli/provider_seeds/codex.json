@@ -21,6 +21,11 @@
           "reasoning_levels": ["none", "low", "medium", "high", "xhigh"]
         },
         {
+          "id": "gpt-5.5",
+          "name": "GPT-5.5",
+          "reasoning_levels": ["none", "low", "medium", "high", "xhigh"]
+        },
+        {
           "id": "gpt-5.3-codex",
           "name": "GPT-5.3 Codex",
           "reasoning_levels": ["low", "medium", "high", "xhigh"]
