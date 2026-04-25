@@ -702,7 +702,10 @@ def test_delegate_resume_uses_agent_runner_to_reattach_running_work(tmp_path):
     )
     client = TestClient(app)
 
-    response = client.post(f"/api/threads/{thread['thread_id']}/delegate/resume")
+    response = client.post(
+        f"/api/threads/{thread['thread_id']}/delegate/resume",
+        json={"bypassPermissions": True, "projectRoot": str(tmp_path)},
+    )
 
     assert response.status_code == 200
     assert response.json()["runtime_ensured"] is True
@@ -710,8 +713,8 @@ def test_delegate_resume_uses_agent_runner_to_reattach_running_work(tmp_path):
     assert runner.resume_delegation_calls == [
         {
             "thread_id": thread["thread_id"],
-            "bypass_permissions": None,
-            "workspace_root": None,
+            "bypass_permissions": True,
+            "workspace_root": tmp_path,
         }
     ]
 

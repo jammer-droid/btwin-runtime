@@ -425,7 +425,12 @@ def test_delegate_resume_uses_attached_api_when_attached(tmp_path, monkeypatch):
     payload = _parse_json_output(result.output)
     assert payload["runtime_ensured"] is True
     assert payload["pending_replayed"] == 1
-    assert calls == [("/api/threads/thread-1/delegate/resume", {})]
+    assert calls == [
+        (
+            "/api/threads/thread-1/delegate/resume",
+            {"bypassPermissions": True, "projectRoot": str(project_root)},
+        )
+    ]
 
 
 def test_delegate_stop_marks_state_completed(tmp_path, monkeypatch):

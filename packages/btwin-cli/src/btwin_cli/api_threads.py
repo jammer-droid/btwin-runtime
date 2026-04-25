@@ -478,6 +478,12 @@ class DelegateRespondRequest(BaseModel):
     resume_token: str | None = Field(default=None, alias="resumeToken")
 
 
+class DelegateResumeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    bypass_permissions: bool | None = Field(default=None, alias="bypassPermissions")
+    project_root: str | None = Field(default=None, alias="projectRoot")
+
+
 class SpawnAgentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     agent_name: str = Field(alias="agentName")
@@ -863,12 +869,16 @@ def create_threads_router(
         return state.model_dump(exclude_none=True)
 
     @router.post("/api/threads/{thread_id}/delegate/resume")
-    async def resume_delegate(thread_id: str):
+    async def resume_delegate(thread_id: str, req: DelegateResumeRequest):
         if thread_store.get_thread(thread_id) is None:
             raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")
         if agent_runner is None or not hasattr(agent_runner, "resume_running_delegation"):
             raise HTTPException(status_code=503, detail="Agent runner delegation resume not configured")
-        payload = await agent_runner.resume_running_delegation(thread_id)
+        payload = await agent_runner.resume_running_delegation(
+            thread_id,
+            bypass_permissions=req.bypass_permissions,
+            workspace_root=Path(req.project_root).expanduser() if req.project_root else None,
+        )
         if payload is None:
             raise HTTPException(status_code=404, detail=f"Delegation state for thread '{thread_id}' not found")
         return payload
