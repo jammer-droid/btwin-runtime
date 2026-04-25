@@ -899,6 +899,66 @@ class AgentRunner:
             "resumed_from_state": resumed_from_state,
         }
 
+    async def resume_running_delegation(
+        self,
+        thread_id: str,
+        *,
+        bypass_permissions: bool | None = None,
+        workspace_root: Path | None = None,
+    ) -> dict[str, object] | None:
+        """Reattach the current delegated agent and replay pending direct work."""
+        state = self._delegations.read(thread_id)
+        if state is None:
+            return None
+        payload = state.model_dump(exclude_none=True)
+        agent_name = state.resolved_agent
+        if state.status != "running" or not agent_name:
+            return {
+                **payload,
+                "runtime_ensured": False,
+                "pending_replayed": 0,
+                "reason": "delegation_not_running",
+            }
+
+        key = (thread_id, agent_name)
+        pending_messages = self._threads.list_inbox(thread_id, agent_name) or []
+        if key not in self._inbox:
+            self._inbox[key] = asyncio.Queue()
+        thread = self._threads.get_thread(thread_id) or {}
+        for message in pending_messages:
+            relay = ContextFormatter.format_message_relay(
+                from_agent=str(message.get("from") or "unknown"),
+                content=str(message.get("_content") or message.get("content") or ""),
+                thread_id=thread_id,
+                phase_name=thread.get("current_phase"),
+            )
+            await self._inbox[key].put(relay)
+
+        attached = await self.attach_or_resume_for_thread(
+            thread_id,
+            agent_name,
+            bypass_permissions=bypass_permissions,
+            workspace_root=workspace_root,
+        )
+        if attached is None:
+            return {
+                **payload,
+                "runtime_ensured": False,
+                "pending_replayed": len(pending_messages),
+                "reason": "runtime_attach_failed",
+            }
+
+        self._emit_session_state(thread_id, agent_name, "queued")
+        if bool(attached.get("reused_session")) and not bool(attached.get("recovery_started")):
+            await self._drain_inbox(thread_id, agent_name, chain_depth=1)
+
+        return {
+            **payload,
+            "runtime_ensured": True,
+            "pending_replayed": len(pending_messages),
+            "runtime_session": attached,
+        }
+
     async def _background_spawn(self, thread_id: str, agent_name: str) -> None:
         """Background task: run initial invocation and save response."""
         key = (thread_id, agent_name)

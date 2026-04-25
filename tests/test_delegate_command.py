@@ -398,6 +398,36 @@ def test_delegate_wait_and_respond_use_attached_api_when_attached(tmp_path, monk
     ]
 
 
+def test_delegate_resume_uses_attached_api_when_attached(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+
+    calls: list[tuple[str, object]] = []
+
+    def fake_attached_post(path: str, data: dict) -> dict:
+        calls.append((path, data))
+        return {
+            "thread_id": "thread-1",
+            "status": "running",
+            "resolved_agent": "alice",
+            "runtime_ensured": True,
+            "pending_replayed": 1,
+        }
+
+    monkeypatch.setattr(main, "_attached_api_call_or_exit", fake_attached_post)
+
+    result = runner.invoke(app, ["delegate", "resume", "--thread", "thread-1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["runtime_ensured"] is True
+    assert payload["pending_replayed"] == 1
+    assert calls == [("/api/threads/thread-1/delegate/resume", {})]
+
+
 def test_delegate_stop_marks_state_completed(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     data_dir = tmp_path / "custom-runtime-data"

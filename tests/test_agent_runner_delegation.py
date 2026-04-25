@@ -603,3 +603,70 @@ async def test_direct_delegation_recovers_degraded_session_before_delivery(
     assert recover_calls == [(thread["thread_id"], "alice")]
     queued = runner._inbox[(thread["thread_id"], "alice")]
     assert queued.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_running_delegation_reattaches_agent_and_replays_pending_inbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    runner, thread_store, _protocol_store, delegation_store, _phase_cycle_store = _build_runner(data_dir)
+    thread = thread_store.create_thread(
+        topic="Restarted delegation",
+        protocol="delegate-review",
+        participants=["alice", "btwin"],
+        initial_phase="review",
+    )
+    thread_store.send_message(
+        thread_id=thread["thread_id"],
+        from_agent="btwin",
+        content="## Delegation Continue\n\nPhase: review\n",
+        tldr="delegate review -> alice",
+        msg_type="delegation",
+        delivery_mode="direct",
+        target_agents=["alice"],
+    )
+    delegation_store.write(
+        DelegationState(
+            thread_id=thread["thread_id"],
+            status="running",
+            loop_iteration=1,
+            current_phase="review",
+            current_cycle_index=1,
+            target_role="reviewer",
+            resolved_agent="alice",
+            required_action="submit_contribution",
+            expected_output="review contribution",
+        )
+    )
+
+    attach_calls: list[tuple[str, str]] = []
+    drain_calls: list[tuple[str, str, int]] = []
+
+    async def fake_attach_or_resume(thread_id, agent_name, *, bypass_permissions=None, workspace_root=None):
+        del bypass_permissions, workspace_root
+        attach_calls.append((thread_id, agent_name))
+        return {
+            "thread_id": thread_id,
+            "agent_name": agent_name,
+            "recovery_started": False,
+            "reused_session": True,
+            "resumed_from_state": False,
+        }
+
+    async def fake_drain_inbox(thread_id, agent_name, chain_depth):
+        drain_calls.append((thread_id, agent_name, chain_depth))
+
+    monkeypatch.setattr(runner, "attach_or_resume_for_thread", fake_attach_or_resume)
+    monkeypatch.setattr(runner, "_drain_inbox", fake_drain_inbox)
+
+    payload = await runner.resume_running_delegation(thread["thread_id"])
+
+    assert payload is not None
+    assert payload["status"] == "running"
+    assert payload["resolved_agent"] == "alice"
+    assert payload["pending_replayed"] == 1
+    assert attach_calls == [(thread["thread_id"], "alice")]
+    assert runner._inbox[(thread["thread_id"], "alice")].qsize() == 1
+    assert drain_calls == [(thread["thread_id"], "alice", 1)]

@@ -8563,6 +8563,26 @@ def delegate_status(
     _emit_payload(payload, as_json=as_json)
 
 
+@delegate_app.command("resume")
+def delegate_resume(
+    thread_id: str = typer.Option(..., "--thread", help="Thread id"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Reattach the current delegated agent and replay pending work."""
+    config = _get_config()
+    if _use_attached_api(config):
+        payload = _attached_api_call_or_exit(f"/api/threads/{thread_id}/delegate/resume", {})
+    else:
+        payload = _delegate_status_local(thread_id, config)
+        payload = {
+            **payload,
+            "runtime_ensured": False,
+            "pending_replayed": 0,
+            "reason": "attached_runtime_required",
+        }
+    _emit_payload(payload, as_json=as_json)
+
+
 @delegate_app.command("wait")
 def delegate_wait(
     thread_id: str = typer.Option(..., "--thread", help="Thread id"),

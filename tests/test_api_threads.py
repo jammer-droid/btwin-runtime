@@ -26,6 +26,8 @@ class _FakeAgentRunner:
         self.spawn_calls = []
         self.recover_calls = []
         self.attach_or_resume_calls = []
+        self.resume_delegation_calls = []
+        self.resume_delegation_payload = None
         self.session_status = None
         self.runtime_sessions_by_agent = None
 
@@ -88,6 +90,16 @@ class _FakeAgentRunner:
             "reused_session": False,
             "resumed_from_state": False,
         }
+
+    async def resume_running_delegation(self, thread_id, *, bypass_permissions=None, workspace_root=None):
+        self.resume_delegation_calls.append(
+            {
+                "thread_id": thread_id,
+                "bypass_permissions": bypass_permissions,
+                "workspace_root": workspace_root,
+            }
+        )
+        return self.resume_delegation_payload
 
 
 def _seed_waiting_delegate_thread(tmp_path: Path):
@@ -656,6 +668,52 @@ def test_delegate_start_rejects_closed_thread(tmp_path):
 
     status_response = client.get(f"/api/threads/{thread['thread_id']}/delegate/status")
     assert status_response.status_code == 404
+
+
+def test_delegate_resume_uses_agent_runner_to_reattach_running_work(tmp_path):
+    thread_store = ThreadStore(tmp_path / "threads")
+    protocol_store = ProtocolStore(tmp_path / "protocols")
+    event_bus = EventBus()
+    thread = thread_store.create_thread(
+        topic="Delegate resume thread",
+        protocol="delegate-review",
+        participants=["alice"],
+        initial_phase="review",
+    )
+    runner = _FakeAgentRunner({"alice": []})
+    runner.resume_delegation_payload = {
+        "thread_id": thread["thread_id"],
+        "status": "running",
+        "resolved_agent": "alice",
+        "runtime_ensured": True,
+        "pending_replayed": 1,
+    }
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(
+        create_threads_router(
+            thread_store,
+            protocol_store,
+            event_bus,
+            agent_runner=runner,
+        )
+    )
+    client = TestClient(app)
+
+    response = client.post(f"/api/threads/{thread['thread_id']}/delegate/resume")
+
+    assert response.status_code == 200
+    assert response.json()["runtime_ensured"] is True
+    assert response.json()["pending_replayed"] == 1
+    assert runner.resume_delegation_calls == [
+        {
+            "thread_id": thread["thread_id"],
+            "bypass_permissions": None,
+            "workspace_root": None,
+        }
+    ]
 
 
 def test_threads_router_exposes_system_mailbox_reports(tmp_path):

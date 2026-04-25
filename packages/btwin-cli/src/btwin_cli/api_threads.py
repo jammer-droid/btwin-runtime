@@ -862,6 +862,17 @@ def create_threads_router(
             raise HTTPException(status_code=404, detail=f"Delegation state for thread '{thread_id}' not found")
         return state.model_dump(exclude_none=True)
 
+    @router.post("/api/threads/{thread_id}/delegate/resume")
+    async def resume_delegate(thread_id: str):
+        if thread_store.get_thread(thread_id) is None:
+            raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")
+        if agent_runner is None or not hasattr(agent_runner, "resume_running_delegation"):
+            raise HTTPException(status_code=503, detail="Agent runner delegation resume not configured")
+        payload = await agent_runner.resume_running_delegation(thread_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail=f"Delegation state for thread '{thread_id}' not found")
+        return payload
+
     @router.get("/api/threads/{thread_id}/delegate/wait")
     def get_delegate_wait(thread_id: str):
         thread = thread_store.get_thread(thread_id)
