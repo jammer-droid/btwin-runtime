@@ -428,8 +428,11 @@ def test_thread_report_renders_interpreted_sections_and_collapsed_raw_appendix()
     )
 
     assert "Executive Summary" in html
-    assert "Instruction Flow" in html
-    assert "Protocol Journey" in html
+    assert "Protocol Flow" in html
+    assert "Instruction Flow" not in html
+    assert "Protocol Journey" not in html
+    assert 'class="protocol-flow-diagram"' in html
+    assert 'class="flow-node flow-node-request"' in html
     assert "Evidence" in html
     assert "Appendix" in html
     assert "Please show how my instruction moved through the protocol." in html
@@ -515,6 +518,10 @@ def test_thread_report_renders_repeated_protocol_cycles_from_recorded_phase_arti
     assert "Review · cycle 1" in html
     assert "Revise · cycle 1" in html
     assert "Review · cycle 2" in html
+    assert 'class="flow-connector"' in html
+    assert 'data-phase="review"' in html
+    assert 'data-outcome="request_changes"' in html
+    assert 'data-outcome="approve"' in html
     assert "request_changes" in html
     assert "approve" in html
     assert html.index("Review · cycle 1") < html.index("Revise · cycle 1") < html.index("Review · cycle 2")

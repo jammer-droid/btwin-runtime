@@ -43,8 +43,7 @@ def render_thread_report_html(snapshot: dict[str, object]) -> str:
     sections = [
         _render_overview(thread, status_summary, exported_at),
         _render_executive_summary(snapshot),
-        _render_instruction_flow(snapshot),
-        _render_protocol_journey(snapshot),
+        _render_protocol_flow(snapshot),
         _render_agents(snapshot),
         _render_evidence(snapshot),
         _render_delegation(snapshot),
@@ -104,7 +103,7 @@ def _render_executive_summary(snapshot: dict[str, object]) -> str:
     )
 
 
-def _render_instruction_flow(snapshot: dict[str, object]) -> str:
+def _render_protocol_flow(snapshot: dict[str, object]) -> str:
     entries: list[dict[str, object]] = []
     messages = [item for item in _as_list(snapshot.get("messages")) if isinstance(item, dict)]
 
@@ -113,7 +112,12 @@ def _render_instruction_flow(snapshot: dict[str, object]) -> str:
         entries.append(
             {
                 "label": "Original instruction",
+                "purpose": "User instruction",
                 "actor": first_message.get("from"),
+                "phase": "request",
+                "cycle": None,
+                "outcome": None,
+                "timestamp": first_message.get("created_at"),
                 "summary": first_message.get("tldr"),
                 "body": first_message.get("_content"),
             }
@@ -134,57 +138,58 @@ def _render_instruction_flow(snapshot: dict[str, object]) -> str:
             label = f"{label} {cycle}"
         entries.append(
             {
-                "label": label,
+                "label": item.get("label"),
+                "purpose": label,
                 "actor": item.get("agent"),
+                "phase": phase,
+                "cycle": cycle,
+                "outcome": item.get("outcome"),
+                "timestamp": item.get("timestamp"),
                 "summary": item.get("summary"),
                 "body": item.get("body"),
             }
         )
 
     if not entries:
-        return _section("Instruction Flow", '<p class="empty">No instruction or phase artifacts recorded.</p>')
+        return _section("Protocol Flow", '<p class="empty">No instruction or phase artifacts recorded.</p>')
 
-    cards = []
+    nodes = []
     seen_keys: set[tuple[object, object, object]] = set()
-    for entry in entries:
+    for index, entry in enumerate(entries, start=1):
         key = (entry.get("label"), entry.get("actor"), entry.get("summary"))
         if key in seen_keys:
             continue
         seen_keys.add(key)
-        cards.append(
-            '<article class="flow-step">'
+        phase = str(entry.get("phase") or "phase")
+        outcome = str(entry.get("outcome") or "none")
+        if nodes:
+            nodes.append('<div class="flow-connector" aria-hidden="true"></div>')
+        nodes.append(
+            '<article class="flow-node '
+            f'flow-node-{_esc_attr(phase)}" role="listitem" data-phase="{_esc_attr(phase)}" '
+            f'data-outcome="{_esc_attr(outcome)}">'
+            '<div class="node-topline">'
+            f'<span class="node-index">{index}</span>'
+            f'<span class="node-phase">{_esc(phase.replace("_", " "))}</span>'
+            "</div>"
             f"<h3>{_esc(entry.get('label'))}</h3>"
-            f'<div class="chips">{_chip("actor", entry.get("actor"))}</div>'
+            f'<p class="node-purpose">{_esc(entry.get("purpose"))}</p>'
+            '<div class="chips">'
+            f"{_chip('actor', entry.get('actor'))}"
+            f"{_chip('cycle', entry.get('cycle'))}"
+            f"{_chip('outcome', entry.get('outcome'))}"
+            "</div>"
             f"<p>{_esc(entry.get('summary') or _excerpt(entry.get('body'), 160))}</p>"
             f"{_details('Source excerpt', _excerpt(entry.get('body'), 700), open_by_default=False)}"
             "</article>"
         )
-    return _section("Instruction Flow", '<div class="flow">' + "".join(cards) + "</div>")
-
-
-def _render_protocol_journey(snapshot: dict[str, object]) -> str:
-    items = _phase_journey_items(snapshot)
-    if not items:
-        return _section("Protocol Journey", '<p class="empty">No phase artifacts recorded.</p>')
-
-    cards = []
-    for item in items:
-        chips = "".join(
-            [
-                _chip("agent", item.get("agent")),
-                _chip("outcome", item.get("outcome")),
-                _chip("time", item.get("timestamp")),
-            ]
-        )
-        cards.append(
-            '<article class="journey-step">'
-            f"<h3>{_esc(item.get('label'))}</h3>"
-            f'<div class="chips">{chips}</div>'
-            f"<p>{_esc(item.get('summary'))}</p>"
-            f"{_details('Artifact excerpt', _excerpt(item.get('body'), 900), open_by_default=False)}"
-            "</article>"
-        )
-    return _section("Protocol Journey", '<div class="journey">' + "".join(cards) + "</div>")
+    return _section(
+        "Protocol Flow",
+        '<p class="section-lede">The diagram shows how the request moved through protocol phases, cycles, actors, and outcomes.</p>'
+        '<div class="protocol-flow-diagram" role="list">'
+        + "".join(nodes)
+        + "</div>",
+    )
 
 
 def _render_evidence(snapshot: dict[str, object]) -> str:
@@ -742,6 +747,11 @@ def _esc(value: object) -> str:
     return escape(_plain(value), quote=True)
 
 
+def _esc_attr(value: object) -> str:
+    text = re.sub(r"[^a-zA-Z0-9_-]+", "-", _plain(value).strip().lower()).strip("-")
+    return escape(text or "none", quote=True)
+
+
 def _json_dump(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
 
@@ -834,19 +844,101 @@ th {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   margin-top: 14px;
 }
-.flow, .journey {
-  display: grid;
-  gap: 12px;
+.section-lede {
+  color: var(--muted);
+  margin-bottom: 16px;
 }
-.flow-step, .journey-step {
+.protocol-flow-diagram {
+  align-items: stretch;
+  display: flex;
+  gap: 0;
+  overflow-x: auto;
+  padding: 4px 2px 12px;
+}
+.flow-node {
   background: var(--soft);
   border: 1px solid var(--line);
-  border-left: 4px solid var(--accent);
+  border-top: 5px solid var(--accent);
   border-radius: 8px;
+  flex: 0 0 220px;
+  min-height: 190px;
   padding: 14px;
+  position: relative;
 }
-.journey-step {
-  border-left-color: #6e6ab7;
+.flow-node h3 {
+  min-height: 38px;
+}
+.flow-node-request {
+  border-top-color: #607085;
+}
+.flow-node-review {
+  border-top-color: #8a6bbf;
+}
+.flow-node-revise {
+  border-top-color: #bf7d3a;
+}
+.flow-node-final-approval,
+.flow-node-complete {
+  border-top-color: #32825b;
+}
+.flow-node[data-outcome="request_changes"] {
+  background: #fff8ef;
+}
+.flow-node[data-outcome="approve"],
+.flow-node[data-outcome="completed"] {
+  background: #f0faf4;
+}
+.node-topline {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.node-index {
+  align-items: center;
+  background: var(--ink);
+  border-radius: 999px;
+  color: #fff;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  height: 26px;
+  justify-content: center;
+  width: 26px;
+}
+.node-phase {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.node-purpose {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.flow-connector {
+  align-items: center;
+  display: flex;
+  flex: 0 0 42px;
+  justify-content: center;
+  min-height: 190px;
+  position: relative;
+}
+.flow-connector::before {
+  background: var(--line);
+  content: "";
+  height: 3px;
+  width: 100%;
+}
+.flow-connector::after {
+  border-bottom: 7px solid transparent;
+  border-left: 9px solid var(--line);
+  border-top: 7px solid transparent;
+  content: "";
+  position: absolute;
+  right: 4px;
 }
 .evidence-list li {
   margin-bottom: 8px;
@@ -909,5 +1001,32 @@ pre {
   h1 { font-size: 24px; }
   th, td { display: block; width: 100%; }
   th { border-bottom: 0; padding-bottom: 0; }
+  .protocol-flow-diagram {
+    display: grid;
+    overflow-x: visible;
+  }
+  .flow-node {
+    flex-basis: auto;
+    min-height: 0;
+  }
+  .flow-node h3 {
+    min-height: 0;
+  }
+  .flow-connector {
+    flex-basis: auto;
+    min-height: 34px;
+  }
+  .flow-connector::before {
+    height: 34px;
+    width: 3px;
+  }
+  .flow-connector::after {
+    border-bottom: 0;
+    border-left: 7px solid transparent;
+    border-right: 7px solid transparent;
+    border-top: 9px solid var(--line);
+    bottom: 2px;
+    right: auto;
+  }
 }
 """
