@@ -3559,13 +3559,13 @@ def test_agent_profiles_for_hud_merges_attached_payload_with_local_role_provider
     ]
 
 
-def test_agent_state_descriptor_prefers_runtime_working_status_over_participant_status():
+def test_agent_state_descriptor_shows_received_runtime_without_overstating_working():
     logical, transport = main._agent_state_descriptor(
         "joined",
         {"transport_mode": "live_process_transport", "status": "received"},
     )
 
-    assert logical == "working"
+    assert logical == "received"
     assert transport == "app-server"
 
 

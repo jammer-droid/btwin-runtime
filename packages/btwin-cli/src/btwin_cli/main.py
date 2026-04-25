@@ -3100,11 +3100,13 @@ _AGENT_WORKING_STATUSES = {
     "contributing",
     "active",
     "running",
-    "received",
     "thinking",
     "busy",
     "attempt",
     "attempting",
+}
+_AGENT_RECEIVED_STATUSES = {
+    "received",
 }
 _AGENT_WAITING_STATUSES = {
     "waiting",
@@ -3134,6 +3136,8 @@ def _agent_state_descriptor(
         if session.get("degraded") or session.get("fallback_transport_involved"):
             return "degraded", transport
         session_status = str(session.get("status") or "").strip().lower()
+        if session_status in _AGENT_RECEIVED_STATUSES:
+            return "received", transport
         if session_status in _AGENT_WORKING_STATUSES:
             return "working", transport
         if session_status in _AGENT_WAITING_STATUSES:
@@ -3141,6 +3145,8 @@ def _agent_state_descriptor(
         if session_status in _AGENT_IDLE_STATUSES or session_status == "done":
             return "idle", transport
     normalized = (status or "").strip().lower()
+    if normalized in _AGENT_RECEIVED_STATUSES:
+        return "received", transport
     if normalized in _AGENT_WORKING_STATUSES:
         return "working", transport
     if normalized in _AGENT_WAITING_STATUSES:
@@ -3250,6 +3256,8 @@ def _agent_glyph_text(logical_state: str, animation_phase: int) -> Text:
     if logical_state == "recovering":
         symbol = "↻" if animation_phase % 2 == 0 else "↺"
         return Text(symbol, style="bold yellow")
+    if logical_state == "received":
+        return Text("◌", style="cyan")
     return Text("○", style="dim")
 
 
@@ -3326,6 +3334,7 @@ def _compose_agent_rows(
         "waiting": "yellow",
         "degraded": "bold red",
         "recovering": "yellow",
+        "received": "cyan",
         "idle": "dim",
     }.get(logical_state, "")
     role = str((profile or {}).get("role") or "-").strip() or "-"

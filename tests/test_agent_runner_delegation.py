@@ -1,11 +1,13 @@
 from pathlib import Path
 
+import pytest
+
 from btwin_core.agent_runner import AgentRunner, InvocationResult, RuntimeOutput
 from btwin_core.agent_store import AgentStore
 from btwin_core.config import BTwinConfig
 from btwin_core.delegation_state import DelegationState
 from btwin_core.delegation_store import DelegationStore
-from btwin_core.event_bus import EventBus
+from btwin_core.event_bus import EventBus, SSEEvent
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.protocol_store import ProtocolStore, compile_protocol_definition
@@ -536,3 +538,68 @@ def test_helper_result_fails_when_auto_iteration_cap_is_exceeded(tmp_path: Path)
         if message.get("msg_type") == "delegation"
     ]
     assert delegation_messages == []
+
+
+@pytest.mark.asyncio
+async def test_direct_delegation_recovers_degraded_session_before_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    runner, thread_store, _protocol_store, _delegation_store, _phase_cycle_store = _build_runner(data_dir)
+    thread = thread_store.create_thread(
+        topic="Recoverable direct delegation",
+        protocol="delegate-review",
+        participants=["alice", "btwin"],
+        initial_phase="review",
+    )
+    session = runner._session_supervisor.ensure_session_nowait(
+        thread["thread_id"],
+        "alice",
+        provider="codex",
+    )
+    session.primary_transport_mode = "live_process_transport"
+    session.transport_mode = "resume_invocation_transport"
+    session.fallback_mode = "resume_invocation_transport"
+    session.status = "received"
+    session.degraded = True
+    session.recoverable = True
+    session.recovery_pending = False
+    session.last_transport_error = "live transport timed out after 180.00s"
+
+    recover_calls: list[tuple[str, str]] = []
+
+    async def fake_recover_for_thread(thread_id, agent_name, *, bypass_permissions=None, workspace_root=None):
+        del bypass_permissions, workspace_root
+        recover_calls.append((thread_id, agent_name))
+        session.recovery_pending = True
+        return {
+            "thread_id": thread_id,
+            "agent_name": agent_name,
+            "recovery_started": True,
+        }
+
+    async def fail_if_invoked(thread_id, agent_name, prompt):
+        del thread_id, agent_name, prompt
+        raise AssertionError("recoverable degraded sessions should recover before direct invoke")
+
+    monkeypatch.setattr(runner, "recover_for_thread", fake_recover_for_thread)
+    monkeypatch.setattr(runner, "invoke", fail_if_invoked)
+
+    await runner._handle_message(
+        SSEEvent(
+            type="message_sent",
+            resource_id=thread["thread_id"],
+            metadata={
+                "from_agent": "btwin",
+                "content": "Continue the implementation phase.",
+                "chain_depth": 0,
+                "delivery_mode": "direct",
+                "target_agents": ["alice"],
+            },
+        )
+    )
+
+    assert recover_calls == [(thread["thread_id"], "alice")]
+    queued = runner._inbox[(thread["thread_id"], "alice")]
+    assert queued.qsize() == 1

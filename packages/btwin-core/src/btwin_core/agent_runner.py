@@ -1067,7 +1067,8 @@ class AgentRunner:
                 phase_name=thread.get("current_phase"),
             )
 
-            if self._session_supervisor.get_session(thread_id, agent_name) is None:
+            session = self._session_supervisor.get_session(thread_id, agent_name)
+            if session is None:
                 spawned = await self.spawn_for_thread(
                     thread_id,
                     agent_name,
@@ -1082,6 +1083,24 @@ class AgentRunner:
                 continue
             if key not in self._managed_sessions:
                 self._managed_sessions.add(key)
+
+            self._refresh_session_recovery_state(session, log_event=True)
+            if session.recovery_pending:
+                if key not in self._inbox:
+                    self._inbox[key] = asyncio.Queue()
+                await self._inbox[key].put(relay)
+                self._emit_session_state(thread_id, agent_name, "queued")
+                continue
+            if session.recoverable:
+                recovered = await self.recover_for_thread(thread_id, agent_name)
+                if recovered is None:
+                    continue
+                if bool(recovered.get("recovery_started", False)):
+                    if key not in self._inbox:
+                        self._inbox[key] = asyncio.Queue()
+                    await self._inbox[key].put(relay)
+                    self._emit_session_state(thread_id, agent_name, "queued")
+                    continue
 
             self._emit_session_state(thread_id, agent_name, "queued")
 
