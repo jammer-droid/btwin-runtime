@@ -83,6 +83,7 @@ from btwin_core.protocol_store import (
     load_protocol_yaml,
 )
 from btwin_core.protocol_validator import ProtocolValidator
+from btwin_core.resource_usage_telemetry import ResourceUsageTelemetryStore
 from btwin_core.sources import SourceRegistry
 from btwin_core.system_mailbox_store import SystemMailboxStore
 from btwin_core.runtime_binding_store import RuntimeBinding, RuntimeBindingState, RuntimeBindingStore
@@ -260,6 +261,15 @@ def _validation_telemetry_rows(
     limit: int = 20,
 ) -> list[dict[str, object]]:
     store = ValidationTelemetryStore(_shared_runtime_data_dir(config))
+    return store.tail(limit=limit, thread_id=thread_id)
+
+
+def _resource_usage_rows(
+    thread_id: str,
+    config: BTwinConfig | None = None,
+    limit: int = 200,
+) -> list[dict[str, object]]:
+    store = ResourceUsageTelemetryStore(_shared_runtime_data_dir(config))
     return store.tail(limit=limit, thread_id=thread_id)
 
 
@@ -6057,6 +6067,7 @@ def _load_thread_report_snapshot(thread_id: str, config: BTwinConfig) -> dict[st
             "delegation_status": delegation_status,
             "agents": agents if isinstance(agents, list) else [],
             "runtime_sessions": runtime_sessions if isinstance(runtime_sessions, dict) else {},
+            "resource_usage": _resource_usage_rows(thread_id, config),
         }
 
     store = _get_thread_store()
@@ -6081,6 +6092,7 @@ def _load_thread_report_snapshot(thread_id: str, config: BTwinConfig) -> dict[st
         "delegation_status": delegation_state.model_dump(exclude_none=True) if delegation_state is not None else {},
         "agents": [sanitize_agent_for_output(agent) for agent in _get_agent_store().list_agents()],
         "runtime_sessions": {},
+        "resource_usage": _resource_usage_rows(thread_id, config),
     }
 
 

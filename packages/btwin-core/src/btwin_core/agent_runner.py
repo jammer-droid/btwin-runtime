@@ -36,6 +36,7 @@ from btwin_core.phase_cycle_engine import phase_cycle_procedure_actions
 from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.protocol_store import ProtocolStore
 from btwin_core.protocol_validator import ProtocolValidator
+from btwin_core.resource_usage_telemetry import ResourceUsageTelemetryStore
 from btwin_core.providers import CLIProvider, get_provider, get_provider_runtime_profile
 from btwin_core.resource_paths import resolve_workspace_root
 from btwin_core.runtime_logging import RuntimeEventLogger
@@ -65,6 +66,26 @@ SUBPROCESS_STREAM_LIMIT = 1024 * 1024
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _prompt_context_sections(prompt: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current = "preamble"
+    sections[current] = []
+    for line in prompt.splitlines():
+        if line.startswith("## "):
+            current = (
+                line[3:]
+                .strip()
+                .lower()
+                .replace(" ", "_")
+                .replace("/", "_")
+                or "section"
+            )
+            sections.setdefault(current, [])
+            continue
+        sections.setdefault(current, []).append(line)
+    return {name: "\n".join(lines).strip() for name, lines in sections.items() if "\n".join(lines).strip()}
 
 
 @dataclass
@@ -127,6 +148,7 @@ class AgentRunner:
         self._phase_cycles = PhaseCycleStore(self._config.data_dir)
         self._runtime_event_logger = runtime_event_logger
         self._validation_telemetry = ValidationTelemetryStore(self._config.data_dir)
+        self._resource_usage = ResourceUsageTelemetryStore(self._config.data_dir)
         self._providers_config = self._load_providers(providers_path)
         self._provider_cache: dict[str, CLIProvider] = {}
         self._message_router = MessageRouter()
@@ -250,6 +272,32 @@ class AgentRunner:
         )
         snapshot["thread_id"] = thread_id
         return snapshot
+
+    def _build_context_pack(self, thread_id: str, agent_name: str) -> dict:
+        thread = self._threads.get_thread(thread_id)
+        if thread is None:
+            return {
+                "thread_id": thread_id,
+                "topic": "",
+                "participants": [],
+                "control": {"current_phase": "none"},
+                "phase_contract": {},
+                "recent_messages": [],
+                "recent_contributions": [],
+                "active_feedback": [],
+                "agent_name": agent_name,
+            }
+        protocol = self._protocols.get_protocol(thread["protocol"])
+        proto_dict = protocol.model_dump() if protocol else {"name": thread["protocol"], "phases": []}
+        messages = self._threads.list_messages(thread_id)
+        contributions = self._threads.list_contributions(thread_id)
+        return ContextFormatter.build_context_pack(
+            thread=thread,
+            protocol=proto_dict,
+            messages=messages,
+            contributions=contributions,
+            agent_name=agent_name,
+        )
 
     def _emit_session_state(
         self,
@@ -547,16 +595,24 @@ class AgentRunner:
 
         final_result = InvocationResult(ok=False)
         typing_state = TurnTypingState()
+        delivered_prompt = prompt
+        delivered_prompt_truncated = False
 
         async def _deliver(runtime_session: AgentSession, runtime_prompt: str) -> SessionDeliveryResult:
-            nonlocal final_result
+            nonlocal delivered_prompt, delivered_prompt_truncated, final_result
             launch = self._resolve_launch_resolution(runtime_session)
             if launch is None:
                 logger.warning("Launch resolution failed for %s", runtime_session.provider)
                 return SessionDeliveryResult(ok=False)
             attempted_transport_mode = self._session_transport_mode_for_invoke(runtime_session)
             self._emit_session_state(thread_id, agent_name, "received")
+            original_prompt = runtime_prompt
             runtime_prompt = self._apply_prompt_budget(thread_id, agent_name, runtime_prompt)
+            delivered_prompt = runtime_prompt
+            delivered_prompt_truncated = (
+                len(original_prompt.encode("utf-8")) > PROMPT_MAX_BYTES
+                and len(runtime_prompt) < len(original_prompt)
+            )
 
             if self._should_use_live_transport(runtime_session):
                 result = await self._run_live_transport(
@@ -807,6 +863,13 @@ class AgentRunner:
         final_result.response_text = delivery.response_text
         final_result.outputs = tuple(delivery.outputs)
         final_result.session_id_captured = session.provider_session_id if session else None
+        self._record_resource_usage(
+            thread_id=thread_id,
+            agent_name=agent_name,
+            prompt=delivered_prompt,
+            response_text=final_result.response_text,
+            truncated=delivered_prompt_truncated,
+        )
         return final_result
 
     # --- Spawn ---
@@ -1077,9 +1140,9 @@ class AgentRunner:
         session = self._session_supervisor.get_session(thread_id, agent_name)
         prompt = batched
         if session is not None and session.invocation_count == 0:
-            snapshot = self._build_thread_snapshot(thread_id, agent_name)
-            prompt = ContextFormatter.render_oneshot_prompt(
-                snapshot=snapshot,
+            context_pack = self._build_context_pack(thread_id, agent_name)
+            prompt = ContextFormatter.render_context_pack_prompt(
+                context_pack=context_pack,
                 ask=batched,
             )
         result = await self.invoke(thread_id, agent_name, prompt)
@@ -1229,9 +1292,9 @@ class AgentRunner:
                 await self._inbox[key].put(queued_item)
                 continue
 
-            snapshot = self._build_thread_snapshot(thread_id, agent_name)
-            prompt = ContextFormatter.render_oneshot_prompt(
-                snapshot=snapshot,
+            context_pack = self._build_context_pack(thread_id, agent_name)
+            prompt = ContextFormatter.render_context_pack_prompt(
+                context_pack=context_pack,
                 ask=relay,
             )
             result = await self.invoke(thread_id, agent_name, prompt)
@@ -2837,21 +2900,9 @@ class AgentRunner:
         return None
 
     def _build_initial_context(self, thread_id: str, agent_name: str) -> str:
-        thread = self._threads.get_thread(thread_id)
-        if thread is None:
-            return ""
-
-        protocol = self._protocols.get_protocol(thread["protocol"])
-        proto_dict = protocol.model_dump() if protocol else {"name": thread["protocol"], "phases": []}
-        messages = self._threads.list_messages(thread_id)
-        contributions = self._threads.list_contributions(thread_id)
-
-        return ContextFormatter.format_initial_context(
-            thread=thread,
-            protocol=proto_dict,
-            messages=messages,
-            contributions=contributions,
-            agent_name=agent_name,
+        return ContextFormatter.render_context_pack_prompt(
+            context_pack=self._build_context_pack(thread_id, agent_name),
+            ask="Acknowledge the managed helper session and wait for the current assigned work.",
         )
 
     def _build_codex_launch_config_overrides(
@@ -2925,22 +2976,40 @@ class AgentRunner:
         if thread is None:
             return prompt.encode("utf-8")[:PROMPT_MAX_BYTES].decode("utf-8", errors="replace")
 
-        protocol = self._protocols.get_protocol(thread["protocol"])
-        proto_dict = protocol.model_dump() if protocol else {"name": thread["protocol"], "phases": []}
-        messages = self._threads.list_messages(thread_id)
-        contributions = self._threads.list_contributions(thread_id)
-
-        rebuilt = ContextFormatter.format_initial_context(
-            thread=thread,
-            protocol=proto_dict,
-            messages=messages[-8:],
-            contributions=contributions[-6:],
+        rebuilt = ContextFormatter.render_context_pack_prompt(
+            context_pack=self._build_context_pack(thread_id, agent_name),
+            ask="Continue with the current assigned work.",
         )
         if len(rebuilt.encode("utf-8")) <= PROMPT_MAX_BYTES:
             return rebuilt
 
         encoded = rebuilt.encode("utf-8")[:PROMPT_MAX_BYTES]
         return encoded.decode("utf-8", errors="replace")
+
+    def _record_resource_usage(
+        self,
+        *,
+        thread_id: str,
+        agent_name: str,
+        prompt: str,
+        response_text: str,
+        truncated: bool,
+    ) -> None:
+        thread = self._threads.get_thread(thread_id)
+        phase = thread.get("current_phase") if thread is not None else None
+        try:
+            self._resource_usage.record_prompt(
+                thread_id=thread_id,
+                agent_name=agent_name,
+                phase=phase if isinstance(phase, str) else None,
+                prompt=prompt,
+                response_text=response_text,
+                context_sections=_prompt_context_sections(prompt),
+                prompt_source="context_pack" if "## Context Pack" in prompt else "runtime_prompt",
+                truncated=truncated,
+            )
+        except Exception:
+            logger.warning("Failed to record resource usage telemetry", exc_info=True)
 
     @staticmethod
     def _load_providers(path: Path | None) -> list[dict]:

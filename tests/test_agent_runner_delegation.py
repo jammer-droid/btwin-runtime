@@ -11,6 +11,7 @@ from btwin_core.event_bus import EventBus, SSEEvent
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.protocol_store import ProtocolStore, compile_protocol_definition
+from btwin_core.resource_usage_telemetry import ResourceUsageTelemetryStore
 from btwin_core.thread_store import ThreadStore
 
 
@@ -136,6 +137,34 @@ def test_helper_result_advances_delegation_and_dispatches_next_work(tmp_path: Pa
     assert delegation_messages[0]["from"] == "btwin"
     assert delegation_messages[0]["target_agents"] == ["alice"]
     assert delegation_messages[0]["message_phase"] == "followup"
+
+
+def test_agent_runner_records_prompt_resource_usage(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    runner, thread_store, _protocol_store, _delegation_store, _phase_cycle_store = _build_runner(data_dir)
+    thread = thread_store.create_thread(
+        topic="Resource usage thread",
+        protocol="code-review",
+        participants=["alice"],
+        initial_phase="analysis",
+    )
+
+    runner._record_resource_usage(
+        thread_id=thread["thread_id"],
+        agent_name="alice",
+        prompt="## Context Pack\ncontrol\n\n## Current Ask\nDo the work.",
+        response_text="Done.",
+        truncated=False,
+    )
+
+    rows = ResourceUsageTelemetryStore(data_dir).tail(limit=10, thread_id=thread["thread_id"])
+
+    assert len(rows) == 1
+    assert rows[0]["event_type"] == "resource.prompt.estimated"
+    assert rows[0]["agent_name"] == "alice"
+    assert rows[0]["phase"] == "analysis"
+    assert rows[0]["prompt_source"] == "context_pack"
+    assert rows[0]["context_sections"]["context_pack"]["estimated_tokens"] > 0
 
 
 def test_helper_result_waits_for_human_when_outcome_is_ambiguous(tmp_path: Path) -> None:

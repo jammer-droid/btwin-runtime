@@ -45,6 +45,7 @@ def render_thread_report_html(snapshot: dict[str, object]) -> str:
         _render_executive_summary(snapshot),
         _render_protocol_flow(snapshot),
         _render_agents(snapshot),
+        _render_resource_usage(snapshot),
         _render_evidence(snapshot),
         _render_delegation(snapshot),
         _render_protocol(protocol),
@@ -198,6 +199,67 @@ def _render_evidence(snapshot: dict[str, object]) -> str:
         return _section("Evidence", '<p class="empty">No verification evidence extracted.</p>')
     items = "".join(f"<li>{_esc(item)}</li>" for item in evidence[:16])
     return _section("Evidence", f'<ul class="evidence-list">{items}</ul>')
+
+
+def _render_resource_usage(snapshot: dict[str, object]) -> str:
+    rows = [item for item in _as_list(snapshot.get("resource_usage")) if isinstance(item, dict)]
+    if not rows:
+        return _section("Resource Usage", '<p class="empty">No prompt resource telemetry recorded.</p>')
+
+    total_input = sum(int(item.get("estimated_input_tokens") or 0) for item in rows)
+    total_output = sum(int(item.get("estimated_output_tokens") or 0) for item in rows)
+    total = sum(int(item.get("estimated_total_tokens") or 0) for item in rows)
+    truncated = sum(1 for item in rows if item.get("truncated"))
+    summary = _table_rows(
+        [
+            ("Telemetry events", len(rows)),
+            ("Estimated input tokens", total_input),
+            ("Estimated output tokens", total_output),
+            ("Estimated total tokens", total),
+            ("Truncated prompts", truncated),
+        ]
+    )
+
+    groups: dict[tuple[str, str], dict[str, int]] = {}
+    section_totals: dict[str, int] = {}
+    for item in rows:
+        key = (str(item.get("agent_name") or "-"), str(item.get("phase") or "-"))
+        group = groups.setdefault(key, {"events": 0, "input": 0, "output": 0, "total": 0})
+        group["events"] += 1
+        group["input"] += int(item.get("estimated_input_tokens") or 0)
+        group["output"] += int(item.get("estimated_output_tokens") or 0)
+        group["total"] += int(item.get("estimated_total_tokens") or 0)
+        for name, section in _as_dict(item.get("context_sections")).items():
+            if isinstance(section, dict):
+                section_totals[name] = section_totals.get(name, 0) + int(section.get("estimated_tokens") or 0)
+
+    group_rows = "".join(
+        "<tr>"
+        f"<td>{_esc(agent)}</td><td>{_esc(phase)}</td><td>{values['events']}</td>"
+        f"<td>{values['input']}</td><td>{values['output']}</td><td>{values['total']}</td>"
+        "</tr>"
+        for (agent, phase), values in sorted(groups.items())
+    )
+    section_items = "".join(
+        f"<li>{_esc(name)}: {_esc(tokens)} estimated tokens</li>"
+        for name, tokens in sorted(section_totals.items(), key=lambda item: item[1], reverse=True)[:8]
+    )
+    recent_items = "".join(
+        "<li>"
+        f"{_esc(item.get('recorded_at'))} · {_esc(item.get('agent_name'))} · {_esc(item.get('phase'))} · "
+        f"{_esc(item.get('prompt_source'))} · {_esc(item.get('estimated_total_tokens'))} est. tokens"
+        "</li>"
+        for item in rows[:8]
+    )
+    return _section(
+        "Resource Usage",
+        f'<table class="meta">{summary}</table>'
+        '<table><thead><tr><th>Agent</th><th>Phase</th><th>Events</th><th>Input</th><th>Output</th><th>Total</th></tr></thead>'
+        f"<tbody>{group_rows}</tbody></table>"
+        '<div class="split">'
+        f'<div class="mini"><h4>Largest Context Sections</h4><ul>{section_items or "<li>-</li>"}</ul></div>'
+        f'<div class="mini"><h4>Recent Prompt Events</h4><ul>{recent_items}</ul></div></div>',
+    )
 
 
 def _render_overview(thread: dict[str, object], status_summary: dict[str, object], exported_at: str) -> str:
@@ -448,6 +510,7 @@ def _render_raw_appendix(snapshot: dict[str, object]) -> str:
         "protocol": snapshot.get("protocol"),
         "delegation_status": snapshot.get("delegation_status"),
         "phase_cycle": snapshot.get("phase_cycle"),
+        "resource_usage": snapshot.get("resource_usage"),
     }
     return _section("Appendix", _details("Source payload excerpt", payload, open_by_default=False))
 

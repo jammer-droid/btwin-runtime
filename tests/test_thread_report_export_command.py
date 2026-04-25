@@ -420,6 +420,26 @@ def test_thread_report_renders_interpreted_sections_and_collapsed_raw_appendix()
             ],
             "workflow_events": [],
             "mailbox_reports": [],
+            "resource_usage": [
+                {
+                    "recorded_at": "2026-04-25T00:02:30+00:00",
+                    "event_type": "resource.prompt.estimated",
+                    "thread_id": "thread-1",
+                    "agent_name": "developer",
+                    "phase": "implement",
+                    "prompt_source": "context_pack",
+                    "prompt_chars": 1200,
+                    "response_chars": 200,
+                    "estimated_input_tokens": 300,
+                    "estimated_output_tokens": 50,
+                    "estimated_total_tokens": 350,
+                    "truncated": False,
+                    "context_sections": {
+                        "control": {"chars": 120, "estimated_tokens": 30},
+                        "phase_contract": {"chars": 240, "estimated_tokens": 60},
+                    },
+                }
+            ],
             "agents": [
                 {"name": "developer", "role": "developer", "provider": "codex", "model": "gpt-5.5", "reasoning_level": "high"}
             ],
@@ -434,6 +454,10 @@ def test_thread_report_renders_interpreted_sections_and_collapsed_raw_appendix()
     assert 'class="protocol-flow-diagram"' in html
     assert 'class="flow-node flow-node-request"' in html
     assert "Evidence" in html
+    assert "Resource Usage" in html
+    assert "context_pack" in html
+    assert "350" in html
+    assert "phase_contract" in html
     assert "Appendix" in html
     assert "Please show how my instruction moved through the protocol." in html
     assert "Plan readable report" in html

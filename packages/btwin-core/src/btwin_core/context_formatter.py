@@ -10,6 +10,52 @@ def _participant_name(p: dict | str) -> str:
     return str(p)
 
 
+def _excerpt(value: object, limit: int = 360) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _first_content_line(value: object) -> str:
+    for line in str(value or "").splitlines():
+        clean = line.strip()
+        if clean and not clean.startswith("#"):
+            return _excerpt(clean, 180)
+    return ""
+
+
+def _compact_phase_contract(phase: dict | None) -> dict:
+    if not isinstance(phase, dict):
+        return {}
+    return {
+        "name": phase.get("name"),
+        "description": phase.get("description", ""),
+        "actions": list(phase.get("actions") or []),
+        "template": [
+            {
+                "section": section.get("section"),
+                "required": bool(section.get("required")),
+                "guidance": section.get("guidance", ""),
+            }
+            for section in phase.get("template") or []
+            if isinstance(section, dict)
+        ],
+        "procedure": [
+            {
+                "role": step.get("role"),
+                "action": step.get("action"),
+                "alias": step.get("alias"),
+                "guidance": step.get("guidance"),
+            }
+            for step in phase.get("procedure") or []
+            if isinstance(step, dict)
+        ],
+        "guard_set": phase.get("guard_set"),
+        "outcome_policy": phase.get("outcome_policy"),
+    }
+
+
 class ContextFormatter:
     @staticmethod
     def format_launch_developer_instructions(
@@ -74,6 +120,116 @@ class ContextFormatter:
 
         target_agents = msg.get("target_agents") or []
         return agent_name in target_agents
+
+    @staticmethod
+    def build_context_pack(
+        thread: dict,
+        protocol: dict,
+        messages: list[dict],
+        contributions: list[dict],
+        agent_name: str | None = None,
+    ) -> dict:
+        current_phase = thread.get("current_phase", "none")
+        phase = next(
+            (item for item in protocol.get("phases", []) if item.get("name") == current_phase),
+            None,
+        )
+        latest_contributions = [
+            {
+                "agent": contrib.get("agent", "unknown"),
+                "phase": contrib.get("phase", ""),
+                "tldr": contrib.get("tldr") or _first_content_line(contrib.get("_content")),
+            }
+            for contrib in contributions[:6]
+        ]
+        active_feedback = [
+            item
+            for item in latest_contributions
+            if item.get("phase") in {"review", "final_approval"}
+        ][-3:]
+        return {
+            "thread_id": thread["thread_id"],
+            "topic": thread["topic"],
+            "agent_name": agent_name,
+            "participants": [_participant_name(p) for p in thread.get("participants", [])],
+            "control": {
+                "protocol": protocol.get("name"),
+                "current_phase": current_phase,
+                "interaction_mode": thread.get("interaction_mode", "discuss"),
+            },
+            "phase_contract": _compact_phase_contract(phase),
+            "recent_messages": [
+                {
+                    "from": msg.get("from", "unknown"),
+                    "summary": _excerpt(msg.get("tldr") or msg.get("_content") or msg.get("content")),
+                }
+                for msg in messages[-6:]
+                if ContextFormatter._message_visible_to_agent(msg, agent_name)
+            ],
+            "recent_contributions": latest_contributions,
+            "active_feedback": active_feedback,
+            "agent_specific_summary": thread.get("agent_specific_summary", ""),
+        }
+
+    @staticmethod
+    def render_context_pack_prompt(context_pack: dict, ask: str) -> str:
+        control = context_pack.get("control", {})
+        phase_contract = context_pack.get("phase_contract") or {}
+        parts = [
+            "## Context Pack",
+            f"Thread: {context_pack.get('topic', '')}",
+            f"Thread ID: {context_pack.get('thread_id', '')}",
+            f"Current phase: {control.get('current_phase', 'none')}",
+            f"Protocol: {control.get('protocol', '')}",
+            f"Participants: {', '.join(context_pack.get('participants', []))}",
+        ]
+        if context_pack.get("agent_name"):
+            parts.extend(["", "## Your Identity", f'You are "{context_pack["agent_name"]}".'])
+
+        if phase_contract:
+            parts.extend(
+                [
+                    "",
+                    "## Current Phase Contract",
+                    f"Name: {phase_contract.get('name', '')}",
+                    f"Purpose: {phase_contract.get('description', '')}",
+                    f"Actions: {', '.join(phase_contract.get('actions', []))}",
+                ]
+            )
+            if phase_contract.get("template"):
+                parts.append("Required output sections:")
+                for section in phase_contract["template"]:
+                    req = " (required)" if section.get("required") else ""
+                    guidance = f": {section.get('guidance')}" if section.get("guidance") else ""
+                    parts.append(f"- {section.get('section')}{req}{guidance}")
+            if phase_contract.get("procedure"):
+                parts.append("Procedure:")
+                for step in phase_contract["procedure"]:
+                    alias = step.get("alias") or step.get("action") or ""
+                    role = step.get("role") or ""
+                    guidance = f": {step.get('guidance')}" if step.get("guidance") else ""
+                    parts.append(f"- {role} -> {alias}{guidance}")
+
+        if context_pack.get("active_feedback"):
+            parts.extend(["", "## Active Feedback"])
+            for item in context_pack["active_feedback"]:
+                parts.append(f"- {item.get('agent')} ({item.get('phase')}): {item.get('tldr')}")
+
+        if context_pack.get("recent_contributions"):
+            parts.extend(["", "## Recent Contribution Summaries"])
+            for item in context_pack["recent_contributions"]:
+                parts.append(f"- {item.get('agent')} ({item.get('phase')}): {item.get('tldr')}")
+
+        if context_pack.get("recent_messages"):
+            parts.extend(["", "## Recent Messages"])
+            for item in context_pack["recent_messages"]:
+                parts.append(f"- {item.get('from')}: {item.get('summary')}")
+
+        if context_pack.get("agent_specific_summary"):
+            parts.extend(["", "## Agent Summary", str(context_pack["agent_specific_summary"])])
+
+        parts.extend(["", "## Current Ask", ask])
+        return "\n".join(parts)
 
     @staticmethod
     def build_thread_snapshot(

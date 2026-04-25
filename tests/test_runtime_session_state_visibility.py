@@ -747,6 +747,7 @@ async def test_direct_message_resumes_inactive_thread_participant_from_thread_st
     assert session is not None
     assert (thread["thread_id"], "alice") in runner._managed_sessions
     assert len(invoke_calls) == 1
-    assert "## Thread: Resume inactive participant" in invoke_calls[0][2]
-    assert "Current ask:" in invoke_calls[0][2]
+    assert "## Context Pack" in invoke_calls[0][2]
+    assert "Thread: Resume inactive participant" in invoke_calls[0][2]
+    assert "## Current Ask" in invoke_calls[0][2]
     assert "Please continue from the saved context." in invoke_calls[0][2]
