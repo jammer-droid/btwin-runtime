@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 import btwin_cli.main as main
 from btwin_cli.main import app
+from btwin_cli.thread_report_export import render_thread_report_html
 from btwin_core.agent_store import AgentStore
 from btwin_core.config import BTwinConfig, RuntimeConfig
 from btwin_core.delegation_state import DelegationState
@@ -316,6 +317,7 @@ def test_thread_export_report_attached_uses_existing_shared_routes(tmp_path, mon
         if path == "/api/threads/thread-1/messages":
             return [{"message_id": "msg-1", "created_at": "2026-04-25T01:00:00+00:00", "from": "moderator", "tldr": "attached message", "_content": "Hello"}]
         if path == "/api/threads/thread-1/contributions":
+            assert params == {"includeHistory": True}
             return [{"contribution_id": "contrib-1", "created_at": "2026-04-25T01:01:00+00:00", "agent": "developer", "phase": "implement", "tldr": "attached contribution", "_content": "Done"}]
         if path == "/api/system-mailbox":
             return {"count": 1, "reports": [{"created_at": "2026-04-25T01:03:00+00:00", "thread_id": "thread-1", "report_type": "cycle_result", "summary": "Attached cycle"}]}
@@ -324,7 +326,17 @@ def test_thread_export_report_attached_uses_existing_shared_routes(tmp_path, mon
         if path == "/api/threads/thread-1/delegate/status":
             return {"thread_id": "thread-1", "status": "running", "resolved_agent": "developer"}
         if path == "/api/agents":
-            return [{"name": "developer", "model": "gpt-5.5", "provider": "codex", "reasoning_level": "high", "role": "developer"}]
+            return {
+                "agents": [
+                    {
+                        "name": "developer",
+                        "model": "gpt-5.5",
+                        "provider": "codex",
+                        "reasoning_level": "high",
+                        "role": "developer",
+                    }
+                ]
+            }
         if path == "/api/agent-runtime-status":
             return {"agents": {"developer": [{"thread_id": "thread-1", "provider": "codex", "status": "active"}]}}
         raise AssertionError(f"unexpected GET path: {path}")
@@ -345,19 +357,168 @@ def test_thread_export_report_attached_uses_existing_shared_routes(tmp_path, mon
     assert "attached contribution" in html
     assert "Attached dispatch event" in html
     assert "gpt-5.5" in html
+    assert "codex" in html
+    assert "high" in html
     assert ("/api/report", None) not in calls
     assert calls == [
         ("/api/threads/thread-1", None),
         ("/api/threads/thread-1/status", None),
         ("/api/protocols/report-flow", None),
         ("/api/threads/thread-1/messages", None),
-        ("/api/threads/thread-1/contributions", None),
+        ("/api/threads/thread-1/contributions", {"includeHistory": True}),
         ("/api/system-mailbox", {"threadId": "thread-1", "limit": 200}),
         ("/api/threads/thread-1/phase-cycle", None),
         ("/api/threads/thread-1/delegate/status", None),
         ("/api/agents", None),
         ("/api/agent-runtime-status", None),
     ]
+
+
+def test_thread_report_renders_interpreted_sections_and_collapsed_raw_appendix():
+    html = render_thread_report_html(
+        {
+            "thread": {
+                "thread_id": "thread-1",
+                "topic": "Readable report",
+                "protocol": "btwin-report-build",
+                "status": "completed",
+                "current_phase": "complete",
+                "participants": [{"name": "moderator"}, {"name": "developer"}, {"name": "reviewer"}],
+            },
+            "status_summary": {"thread_id": "thread-1", "current_phase": "complete", "agents": []},
+            "protocol": _report_protocol().model_dump(by_alias=True),
+            "messages": [
+                {
+                    "message_id": "msg-1",
+                    "created_at": "2026-04-25T00:00:00+00:00",
+                    "from": "user",
+                    "tldr": "Make the report readable",
+                    "_content": "Please show how my instruction moved through the protocol.",
+                    "msg_type": "message",
+                }
+            ],
+            "contributions": [
+                {
+                    "contribution_id": "contrib-plan",
+                    "created_at": "2026-04-25T00:01:00+00:00",
+                    "agent": "moderator",
+                    "phase": "plan",
+                    "tldr": "Plan readable report",
+                    "_content": "## plan\nSummarize the instruction flow.\n\n## acceptance_criteria\nReadable report exists.",
+                },
+                {
+                    "contribution_id": "contrib-impl",
+                    "created_at": "2026-04-25T00:02:00+00:00",
+                    "agent": "developer",
+                    "phase": "implement",
+                    "tldr": "Implemented readable report",
+                    "_content": (
+                        "## implementation\nAdded interpreted sections.\n\n"
+                        "## verification\n`uv run python scripts/run_tests.py unit` passed with 446 passed."
+                    ),
+                },
+            ],
+            "workflow_events": [],
+            "mailbox_reports": [],
+            "agents": [
+                {"name": "developer", "role": "developer", "provider": "codex", "model": "gpt-5.5", "reasoning_level": "high"}
+            ],
+            "runtime_sessions": {},
+        }
+    )
+
+    assert "Executive Summary" in html
+    assert "Instruction Flow" in html
+    assert "Protocol Journey" in html
+    assert "Evidence" in html
+    assert "Appendix" in html
+    assert "Please show how my instruction moved through the protocol." in html
+    assert "Plan readable report" in html
+    assert "Implemented readable report" in html
+    assert "446 passed" in html
+    assert "<details><summary>Source payload excerpt" in html
+    assert "<details open><summary>Source payload excerpt" not in html
+
+
+def test_thread_report_renders_repeated_protocol_cycles_from_recorded_phase_artifacts():
+    html = render_thread_report_html(
+        {
+            "thread": {
+                "thread_id": "thread-1",
+                "topic": "Cycle-aware report",
+                "protocol": "btwin-report-build",
+                "status": "completed",
+                "current_phase": "complete",
+                "participants": [{"name": "developer"}, {"name": "reviewer"}],
+            },
+            "status_summary": {},
+            "protocol": _report_protocol().model_dump(by_alias=True),
+            "messages": [],
+            "contributions": [
+                {
+                    "contribution_id": "impl-1",
+                    "created_at": "2026-04-25T00:01:00+00:00",
+                    "agent": "developer",
+                    "phase": "implement",
+                    "tldr": "Initial implementation",
+                    "_content": "## implementation\nInitial report.",
+                },
+                {
+                    "contribution_id": "review-1",
+                    "created_at": "2026-04-25T00:02:00+00:00",
+                    "agent": "reviewer",
+                    "phase": "review",
+                    "tldr": "Design review 1 requested changes",
+                    "_content": "## findings\nRaw data dominates the page.\n\n## verdict\nrequest_changes",
+                },
+                {
+                    "contribution_id": "revise-1",
+                    "created_at": "2026-04-25T00:03:00+00:00",
+                    "agent": "developer",
+                    "phase": "revise",
+                    "tldr": "Reduced raw sections",
+                    "_content": "## changes\nMoved raw data into appendix.",
+                },
+                {
+                    "contribution_id": "review-2",
+                    "created_at": "2026-04-25T00:04:00+00:00",
+                    "agent": "reviewer",
+                    "phase": "review",
+                    "tldr": "Design review 2 approved",
+                    "_content": "## findings\nThe report reads as a summary first.\n\n## verdict\napprove",
+                },
+            ],
+            "workflow_events": [
+                {
+                    "timestamp": "2026-04-25T00:02:30+00:00",
+                    "event_type": "cycle_gate_completed",
+                    "summary": "Phase `review` complete; advanced to `revise`.",
+                    "phase": "review",
+                    "target_phase": "revise",
+                    "outcome": "request_changes",
+                },
+                {
+                    "timestamp": "2026-04-25T00:04:30+00:00",
+                    "event_type": "cycle_gate_completed",
+                    "summary": "Phase `review` complete; advanced to `final_approval`.",
+                    "phase": "review",
+                    "target_phase": "final_approval",
+                    "outcome": "approve",
+                },
+            ],
+            "mailbox_reports": [],
+            "agents": [],
+            "runtime_sessions": {},
+        }
+    )
+
+    assert "Review · cycle 1" in html
+    assert "Revise · cycle 1" in html
+    assert "Review · cycle 2" in html
+    assert "request_changes" in html
+    assert "approve" in html
+    assert html.index("Review · cycle 1") < html.index("Revise · cycle 1") < html.index("Review · cycle 2")
+    assert html.index("Design/code review 1") < html.index("Revision after review 1") < html.index("Design/code review 2")
 
 
 def test_thread_export_report_attached_ignores_missing_optional_sources(tmp_path, monkeypatch, caplog):

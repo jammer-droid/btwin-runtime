@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from btwin_core.context_core import ContextCore
@@ -1080,8 +1080,18 @@ def create_threads_router(
         return contrib
 
     @router.get("/api/threads/{thread_id}/contributions")
-    def list_contributions(thread_id: str, phase: str | None = None, participant: str | None = None):
-        return thread_store.list_contributions(thread_id, phase=phase, participant=participant)
+    def list_contributions(
+        thread_id: str,
+        phase: str | None = None,
+        participant: str | None = None,
+        include_history: bool = Query(False, alias="includeHistory"),
+    ):
+        return thread_store.list_contributions(
+            thread_id,
+            phase=phase,
+            participant=participant,
+            include_history=include_history,
+        )
 
     @router.post("/api/threads/{thread_id}/advance-phase")
     async def advance_phase(thread_id: str, req: AdvancePhaseRequest):

@@ -973,6 +973,8 @@ def create_orchestration_router(
                 "capabilities": agent.get("capabilities", []),
                 "cli_config": agent.get("cli_config"),
                 "queue_length": len(queue),
+                "provider": agent.get("provider"),
+                "role": agent.get("role"),
                 "reasoning_level": agent.get("reasoning_level"),
                 "bypass_permissions": agent.get("bypass_permissions", False),
                 "memo": agent.get("memo", ""),

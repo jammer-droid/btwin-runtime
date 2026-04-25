@@ -42,10 +42,13 @@ def render_thread_report_html(snapshot: dict[str, object]) -> str:
 
     sections = [
         _render_overview(thread, status_summary, exported_at),
+        _render_executive_summary(snapshot),
+        _render_instruction_flow(snapshot),
+        _render_protocol_journey(snapshot),
+        _render_agents(snapshot),
+        _render_evidence(snapshot),
         _render_delegation(snapshot),
         _render_protocol(protocol),
-        _render_agents(snapshot),
-        _render_phase_cycle(snapshot),
         _render_timeline(snapshot),
         _render_artifacts(snapshot),
         _render_raw_appendix(snapshot),
@@ -70,6 +73,126 @@ def render_thread_report_html(snapshot: dict[str, object]) -> str:
             "</html>",
         ]
     )
+
+
+def _render_executive_summary(snapshot: dict[str, object]) -> str:
+    thread = _as_dict(snapshot.get("thread"))
+    protocol = _as_dict(snapshot.get("protocol"))
+    contributions = [item for item in _as_list(snapshot.get("contributions")) if isinstance(item, dict)]
+    evidence = _evidence_items(snapshot)
+    commit = _first_match(
+        "\n".join(str(item.get("_content") or "") for item in contributions),
+        r"\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b",
+    )
+    rows = [
+        ("Final status", thread.get("status")),
+        ("Current phase", thread.get("current_phase")),
+        ("Protocol used", thread.get("protocol") or protocol.get("name")),
+        ("Agents involved", ", ".join(_participant_names(thread))),
+        ("Phase artifacts", len(contributions)),
+        ("Commit evidence", commit or "-"),
+    ]
+    if evidence:
+        rows.append(("Verification highlights", "; ".join(evidence[:3])))
+    return _section(
+        "Executive Summary",
+        (
+            "<p>This report summarizes how the original request moved through the protocol, "
+            "which agents handled each step, and what evidence supports the final result.</p>"
+            f'<table class="meta">{_table_rows(rows)}</table>'
+        ),
+    )
+
+
+def _render_instruction_flow(snapshot: dict[str, object]) -> str:
+    entries: list[dict[str, object]] = []
+    messages = [item for item in _as_list(snapshot.get("messages")) if isinstance(item, dict)]
+
+    first_message = next((item for item in messages if item.get("_content") or item.get("tldr")), None)
+    if first_message:
+        entries.append(
+            {
+                "label": "Original instruction",
+                "actor": first_message.get("from"),
+                "summary": first_message.get("tldr"),
+                "body": first_message.get("_content"),
+            }
+        )
+
+    phase_labels = {
+        "plan": "Plan and acceptance criteria",
+        "implement": "Implementation and verification",
+        "revise": "Revision after review",
+        "review": "Design/code review",
+        "final_approval": "Final approval",
+    }
+    for item in _phase_journey_items(snapshot):
+        phase = str(item.get("phase") or "")
+        cycle = item.get("cycle")
+        label = phase_labels.get(phase, _title_case_phase(phase))
+        if phase in {"review", "revise"} and cycle:
+            label = f"{label} {cycle}"
+        entries.append(
+            {
+                "label": label,
+                "actor": item.get("agent"),
+                "summary": item.get("summary"),
+                "body": item.get("body"),
+            }
+        )
+
+    if not entries:
+        return _section("Instruction Flow", '<p class="empty">No instruction or phase artifacts recorded.</p>')
+
+    cards = []
+    seen_keys: set[tuple[object, object, object]] = set()
+    for entry in entries:
+        key = (entry.get("label"), entry.get("actor"), entry.get("summary"))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        cards.append(
+            '<article class="flow-step">'
+            f"<h3>{_esc(entry.get('label'))}</h3>"
+            f'<div class="chips">{_chip("actor", entry.get("actor"))}</div>'
+            f"<p>{_esc(entry.get('summary') or _excerpt(entry.get('body'), 160))}</p>"
+            f"{_details('Source excerpt', _excerpt(entry.get('body'), 700), open_by_default=False)}"
+            "</article>"
+        )
+    return _section("Instruction Flow", '<div class="flow">' + "".join(cards) + "</div>")
+
+
+def _render_protocol_journey(snapshot: dict[str, object]) -> str:
+    items = _phase_journey_items(snapshot)
+    if not items:
+        return _section("Protocol Journey", '<p class="empty">No phase artifacts recorded.</p>')
+
+    cards = []
+    for item in items:
+        chips = "".join(
+            [
+                _chip("agent", item.get("agent")),
+                _chip("outcome", item.get("outcome")),
+                _chip("time", item.get("timestamp")),
+            ]
+        )
+        cards.append(
+            '<article class="journey-step">'
+            f"<h3>{_esc(item.get('label'))}</h3>"
+            f'<div class="chips">{chips}</div>'
+            f"<p>{_esc(item.get('summary'))}</p>"
+            f"{_details('Artifact excerpt', _excerpt(item.get('body'), 900), open_by_default=False)}"
+            "</article>"
+        )
+    return _section("Protocol Journey", '<div class="journey">' + "".join(cards) + "</div>")
+
+
+def _render_evidence(snapshot: dict[str, object]) -> str:
+    evidence = _evidence_items(snapshot)
+    if not evidence:
+        return _section("Evidence", '<p class="empty">No verification evidence extracted.</p>')
+    items = "".join(f"<li>{_esc(item)}</li>" for item in evidence[:16])
+    return _section("Evidence", f'<ul class="evidence-list">{items}</ul>')
 
 
 def _render_overview(thread: dict[str, object], status_summary: dict[str, object], exported_at: str) -> str:
@@ -130,7 +253,7 @@ def _render_delegation(snapshot: dict[str, object]) -> str:
 
 def _render_protocol(protocol: dict[str, object]) -> str:
     if not protocol:
-        return _section("Protocol", '<p class="empty">Protocol definition was not available.</p>')
+        return _section("Protocol Reference", '<p class="empty">Protocol definition was not available.</p>')
 
     phases = _as_list(protocol.get("phases"))
     phase_cards = []
@@ -208,7 +331,7 @@ def _render_protocol(protocol: dict[str, object]) -> str:
         f'<div class="grid">{phase_grid}</div>'
         f'<div class="split">{transitions}{guard_sets}{gates}{policies}</div>'
     )
-    return _section("Protocol", content)
+    return _section("Protocol Reference", content)
 
 
 def _render_agents(snapshot: dict[str, object]) -> str:
@@ -223,9 +346,8 @@ def _render_agents(snapshot: dict[str, object]) -> str:
         thread.get("thread_id"),
     )
     names = _participant_names(thread)
-    for name in registered:
-        if name not in names:
-            names.append(name)
+    if not names:
+        names = list(registered)
     if not names:
         return _section("Agents", '<p class="empty">No participants recorded.</p>')
 
@@ -280,7 +402,7 @@ def _render_timeline(snapshot: dict[str, object]) -> str:
         )
     rendered = []
     for item in items:
-        body = f'<pre>{_esc(item.get("body"))}</pre>' if item.get("body") else ""
+        body = f'<p>{_esc(_excerpt(item.get("body"), 240))}</p>' if item.get("body") else ""
         rendered.append(
             '<article class="timeline-item">'
             f'<div class="time">{_esc(item.get("timestamp") or "-")}</div>'
@@ -288,10 +410,10 @@ def _render_timeline(snapshot: dict[str, object]) -> str:
             f'<h3>{_esc(item.get("title"))}</h3>'
             f'<p>{_esc(item.get("summary"))}</p>'
             f"{body}"
-            f'{_details("Metadata", item.get("metadata"))}'
+            f'{_details("Metadata", item.get("metadata"), open_by_default=False)}'
             "</article>"
         )
-    return _section("Work History", '<div class="timeline">' + "".join(rendered) + "</div>")
+    return _section("Detailed Timeline", '<div class="timeline">' + "".join(rendered) + "</div>")
 
 
 def _render_artifacts(snapshot: dict[str, object]) -> str:
@@ -304,20 +426,135 @@ def _render_artifacts(snapshot: dict[str, object]) -> str:
             '<article class="card">'
             f"<h3>{_esc(item.get('phase'))} / {_esc(item.get('agent'))}</h3>"
             f"<p>{_esc(item.get('tldr'))}</p>"
-            f"<pre>{_esc(item.get('_content'))}</pre>"
+            f"{_details('Full artifact', item.get('_content'), open_by_default=False)}"
             "</article>"
         )
-    return _section("Markdown Artifacts", '<div class="grid">' + "".join(cards) + "</div>")
+    return _section("Phase Artifacts", '<div class="grid">' + "".join(cards) + "</div>")
 
 
 def _render_raw_appendix(snapshot: dict[str, object]) -> str:
     payload = {
         "thread": snapshot.get("thread"),
         "status_summary": snapshot.get("status_summary"),
+        "messages": snapshot.get("messages"),
+        "contributions": snapshot.get("contributions"),
         "mailbox_reports": snapshot.get("mailbox_reports"),
         "workflow_events": snapshot.get("workflow_events"),
+        "protocol": snapshot.get("protocol"),
+        "delegation_status": snapshot.get("delegation_status"),
+        "phase_cycle": snapshot.get("phase_cycle"),
     }
     return _section("Appendix", _details("Source payload excerpt", payload, open_by_default=False))
+
+
+def _phase_journey_items(snapshot: dict[str, object]) -> list[dict[str, object]]:
+    contributions = [
+        item
+        for item in _as_list(snapshot.get("contributions"))
+        if isinstance(item, dict) and item.get("phase")
+    ]
+    events = [item for item in _as_list(snapshot.get("workflow_events")) if isinstance(item, dict)]
+    phase_counts: dict[str, int] = {}
+    result: list[dict[str, object]] = []
+    for contribution in sorted(contributions, key=lambda item: str(item.get("created_at") or "")):
+        phase = str(contribution.get("phase"))
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+        cycle = phase_counts[phase]
+        label = f"{_title_case_phase(phase)} · cycle {cycle}"
+        outcome = _outcome_for_phase_artifact(phase, str(contribution.get("created_at") or ""), contribution, events)
+        result.append(
+            {
+                "phase": phase,
+                "cycle": cycle,
+                "label": label,
+                "agent": contribution.get("agent"),
+                "timestamp": contribution.get("created_at"),
+                "summary": contribution.get("tldr") or _excerpt(contribution.get("_content"), 160),
+                "body": contribution.get("_content"),
+                "outcome": outcome,
+            }
+        )
+    return result
+
+
+def _outcome_for_phase_artifact(
+    phase: str,
+    timestamp: str,
+    contribution: dict[str, object],
+    events: list[dict[str, object]],
+) -> str | None:
+    content = str(contribution.get("_content") or "")
+    content_outcome = _outcome_from_text(content)
+    if content_outcome:
+        return content_outcome
+    matching_events = [
+        event
+        for event in events
+        if str(event.get("phase") or _phase_from_summary(event.get("summary")) or "") == phase
+        and str(event.get("timestamp") or event.get("created_at") or "") >= timestamp
+    ]
+    matching_events.sort(key=lambda item: str(item.get("timestamp") or item.get("created_at") or ""))
+    for event in matching_events:
+        outcome = event.get("outcome") or event.get("last_cycle_outcome") or event.get("result")
+        if outcome:
+            return str(outcome)
+        summary = str(event.get("summary") or "")
+        summary_outcome = _outcome_from_text(summary)
+        if summary_outcome:
+            return summary_outcome
+    return None
+
+
+def _outcome_from_text(text: str) -> str | None:
+    for line in text.splitlines():
+        clean = line.strip().strip("-* ").lower()
+        if not clean:
+            continue
+        direct = re.fullmatch(r"(request_changes|approve|retry|accept|completed)", clean)
+        if direct:
+            return direct.group(1)
+        labelled = re.match(r"(?:outcome|verdict|result)\s*:\s*(request_changes|approve|retry|accept|completed)\b", clean)
+        if labelled:
+            return labelled.group(1)
+    return None
+
+
+def _phase_from_summary(summary: object) -> str | None:
+    match = re.search(r"Phase `([^`]+)`", str(summary or ""))
+    return match.group(1) if match else None
+
+
+def _evidence_items(snapshot: dict[str, object]) -> list[str]:
+    result: list[str] = []
+    for contribution in _as_list(snapshot.get("contributions")):
+        if not isinstance(contribution, dict):
+            continue
+        if contribution.get("phase") not in {"implement", "revise", "final_approval"}:
+            continue
+        content = str(contribution.get("_content") or "")
+        for line in content.splitlines():
+            clean = line.strip("-* ")
+            lower = clean.lower()
+            if not clean:
+                continue
+            if clean.startswith("#"):
+                continue
+            if any(token in lower for token in ("passed", "smoke", "commit", "git diff", "pytest", "tests", "verification")):
+                result.append(clean)
+    for report in _as_list(snapshot.get("mailbox_reports")):
+        if isinstance(report, dict) and report.get("summary"):
+            result.append(str(report["summary"]))
+    for event in _as_list(snapshot.get("workflow_events")):
+        if not isinstance(event, dict):
+            continue
+        summary = str(event.get("summary") or "")
+        if "complete" in summary.lower() or "approve" in summary.lower():
+            result.append(summary)
+    deduped: list[str] = []
+    for item in result:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
 
 
 def _timeline_items(snapshot: dict[str, object]) -> list[dict[str, object]]:
@@ -469,6 +706,22 @@ def _first_session_value(sessions: list[dict[str, object]], key: str) -> object:
     return None
 
 
+def _excerpt(value: object, limit: int = 360) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _first_match(text: str, pattern: str) -> str | None:
+    match = re.search(pattern, text)
+    return match.group(0) if match else None
+
+
+def _title_case_phase(value: str) -> str:
+    return value.replace("_", " ").title()
+
+
 def _as_dict(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
@@ -580,6 +833,23 @@ th {
   gap: 12px;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   margin-top: 14px;
+}
+.flow, .journey {
+  display: grid;
+  gap: 12px;
+}
+.flow-step, .journey-step {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  padding: 14px;
+}
+.journey-step {
+  border-left-color: #6e6ab7;
+}
+.evidence-list li {
+  margin-bottom: 8px;
 }
 .card, .mini {
   background: var(--soft);

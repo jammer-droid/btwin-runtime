@@ -6035,12 +6035,16 @@ def _load_thread_report_snapshot(thread_id: str, config: BTwinConfig) -> dict[st
             else {}
         )
         messages = _attached_api_get_or_exit(f"/api/threads/{thread_id}/messages")
-        contributions = _attached_api_get_or_exit(f"/api/threads/{thread_id}/contributions")
+        contributions = _attached_api_get_or_exit(
+            f"/api/threads/{thread_id}/contributions",
+            {"includeHistory": True},
+        )
         mailbox_reports = _list_system_mailbox_reports(thread_id=thread_id, limit=200, config=config)
         phase_cycle = _optional_attached_api_get(f"/api/threads/{thread_id}/phase-cycle") or {}
         delegation_status = _optional_attached_api_get(f"/api/threads/{thread_id}/delegate/status") or {}
         agents_payload = _optional_attached_api_get("/api/agents")
         runtime_sessions = _optional_attached_api_get("/api/agent-runtime-status")
+        agents = agents_payload.get("agents", []) if isinstance(agents_payload, dict) else agents_payload
         return {
             "thread": thread,
             "status_summary": status_summary,
@@ -6051,7 +6055,7 @@ def _load_thread_report_snapshot(thread_id: str, config: BTwinConfig) -> dict[st
             "workflow_events": _workflow_event_log(thread_id).list_events(),
             "phase_cycle": phase_cycle,
             "delegation_status": delegation_status,
-            "agents": agents_payload if isinstance(agents_payload, list) else [],
+            "agents": agents if isinstance(agents, list) else [],
             "runtime_sessions": runtime_sessions if isinstance(runtime_sessions, dict) else {},
         }
 

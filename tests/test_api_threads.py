@@ -1137,6 +1137,48 @@ def test_attached_api_rejects_contribution_submit_when_phase_mismatches_current_
     assert "context" in detail["hint"]
 
 
+def test_attached_api_lists_contribution_history_when_requested(tmp_path):
+    thread_store = ThreadStore(tmp_path / "threads")
+    protocol_store = ProtocolStore(tmp_path / "protocols")
+    event_bus = EventBus()
+    thread = thread_store.create_thread(
+        topic="Review cycles",
+        protocol="workflow-check",
+        participants=["reviewer"],
+        initial_phase="review",
+    )
+    first = thread_store.submit_contribution(
+        thread["thread_id"],
+        "reviewer",
+        "review",
+        content="## findings\nNeeds another pass.\n\n## verdict\nrequest_changes",
+        tldr="review 1 requested changes",
+    )
+    second = thread_store.submit_contribution(
+        thread["thread_id"],
+        "reviewer",
+        "review",
+        content="## findings\nReadable now.\n\n## verdict\napprove",
+        tldr="review 2 approved",
+    )
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(create_threads_router(thread_store, protocol_store, event_bus))
+    client = TestClient(app)
+
+    latest_response = client.get(f"/api/threads/{thread['thread_id']}/contributions")
+    history_response = client.get(f"/api/threads/{thread['thread_id']}/contributions?includeHistory=true")
+
+    assert latest_response.status_code == 200
+    assert [item["contribution_id"] for item in latest_response.json()] == [second["contribution_id"]]
+    assert history_response.status_code == 200
+    history_ids = [item["contribution_id"] for item in history_response.json()]
+    assert second["contribution_id"] in history_ids
+    assert first["contribution_id"] in history_ids
+
+
 def test_spawn_agent_accepts_bypass_permissions_flag(tmp_path):
     thread_store = ThreadStore(tmp_path / "threads")
     protocol_store = ProtocolStore(tmp_path / "protocols")
