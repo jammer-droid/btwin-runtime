@@ -326,6 +326,44 @@ def test_delegate_wait_returns_resume_packet(tmp_path):
     assert "delegate respond" in payload["resume"]["suggested_next_command"]
 
 
+def test_delegate_status_redacts_active_assignment_fields_when_completed(tmp_path):
+    thread_store, protocol_store, event_bus, thread = _seed_waiting_delegate_thread(tmp_path)
+    DelegationStore(thread_store.data_dir).write(
+        DelegationState(
+            thread_id=thread["thread_id"],
+            status="completed",
+            updated_at="2026-04-20T00:01:00Z",
+            loop_iteration=1,
+            current_phase="review",
+            current_cycle_index=1,
+            target_role="reviewer",
+            resolved_agent="alice",
+            required_action="record_outcome",
+            expected_output="record outcome: retry, accept",
+            stop_reason="stopped_by_operator",
+        )
+    )
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(create_threads_router(thread_store, protocol_store, event_bus))
+    client = TestClient(app)
+
+    response = client.get(f"/api/threads/{thread['thread_id']}/delegate/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "completed"
+    assert payload["stop_reason"] == "stopped_by_operator"
+    assert "current_phase" not in payload
+    assert "current_cycle_index" not in payload
+    assert "target_role" not in payload
+    assert "resolved_agent" not in payload
+    assert "required_action" not in payload
+    assert "expected_output" not in payload
+
+
 def test_delegate_respond_reenters_loop_after_human_outcome(tmp_path):
     thread_store, protocol_store, event_bus, thread = _seed_waiting_delegate_thread(tmp_path)
 

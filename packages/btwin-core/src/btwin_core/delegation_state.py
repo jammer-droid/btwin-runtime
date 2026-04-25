@@ -34,3 +34,23 @@ class DelegationState(BaseModel):
     last_result_message_id: str | None = None
     last_resume_token: str | None = None
     stop_reason: str | None = None
+
+
+_COMPLETED_ACTIVE_ASSIGNMENT_FIELDS = {
+    "current_phase",
+    "current_cycle_index",
+    "target_role",
+    "resolved_agent",
+    "required_action",
+    "expected_output",
+    "reason_blocked",
+    "last_resume_token",
+}
+
+
+def delegation_status_payload(state: DelegationState) -> dict[str, object]:
+    payload = state.model_dump(exclude_none=True)
+    if state.status == "completed":
+        for field_name in _COMPLETED_ACTIVE_ASSIGNMENT_FIELDS:
+            payload.pop(field_name, None)
+    return payload

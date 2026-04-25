@@ -81,6 +81,12 @@ class InvocationResult:
 
 
 @dataclass(frozen=True)
+class QueuedInboxItem:
+    relay: str
+    message_id: str | None = None
+
+
+@dataclass(frozen=True)
 class RuntimeOutput:
     content: str
     phase: str = "unknown"
@@ -129,7 +135,7 @@ class AgentRunner:
         self._sessions = self._session_supervisor.sessions
         self._session_locks = self._session_supervisor.locks
         self._managed_sessions: set[tuple[str, str]] = set()
-        self._inbox: dict[tuple[str, str], asyncio.Queue[str]] = {}
+        self._inbox: dict[tuple[str, str], asyncio.Queue[str | QueuedInboxItem]] = {}
         self._active_pids: dict[int, dict] = {}  # pid -> {thread_id, agent_name, started_at}
         self._live_transport_adapters: dict[tuple[str, str], PersistentSessionAdapter] = {}
         self._live_transport_launch_contexts: dict[tuple[str, str], TransportLaunchContext] = {}
@@ -930,17 +936,25 @@ class AgentRunner:
 
         key = (thread_id, agent_name)
         pending_messages = self._threads.list_inbox(thread_id, agent_name) or []
-        if key not in self._inbox:
-            self._inbox[key] = asyncio.Queue()
-        thread = self._threads.get_thread(thread_id) or {}
-        for message in pending_messages:
-            relay = ContextFormatter.format_message_relay(
-                from_agent=str(message.get("from") or "unknown"),
-                content=str(message.get("_content") or message.get("content") or ""),
-                thread_id=thread_id,
-                phase_name=thread.get("current_phase"),
-            )
-            await self._inbox[key].put(relay)
+        queued_replay_item_ids: set[int] = set()
+        if pending_messages:
+            if key not in self._inbox:
+                self._inbox[key] = asyncio.Queue()
+            thread = self._threads.get_thread(thread_id) or {}
+            for message in pending_messages:
+                relay = ContextFormatter.format_message_relay(
+                    from_agent=str(message.get("from") or "unknown"),
+                    content=str(message.get("_content") or message.get("content") or ""),
+                    thread_id=thread_id,
+                    phase_name=thread.get("current_phase"),
+                )
+                message_id = message.get("message_id")
+                item = QueuedInboxItem(
+                    relay=relay,
+                    message_id=str(message_id) if message_id else None,
+                )
+                queued_replay_item_ids.add(id(item))
+                await self._inbox[key].put(item)
 
         attached = await self.attach_or_resume_for_thread(
             thread_id,
@@ -949,6 +963,7 @@ class AgentRunner:
             workspace_root=workspace_root,
         )
         if attached is None:
+            self._discard_queued_inbox_items(key, queued_replay_item_ids)
             return {
                 **payload,
                 "runtime_ensured": False,
@@ -966,6 +981,27 @@ class AgentRunner:
             "pending_replayed": len(pending_messages),
             "runtime_session": attached,
         }
+
+    def _discard_queued_inbox_items(self, key: tuple[str, str], item_ids: set[int]) -> None:
+        if not item_ids:
+            return
+        q = self._inbox.pop(key, None)
+        if q is None:
+            return
+
+        remaining: list[str | QueuedInboxItem] = []
+        while not q.empty():
+            item = q.get_nowait()
+            if id(item) not in item_ids:
+                remaining.append(item)
+
+        if not remaining:
+            return
+
+        next_q: asyncio.Queue[str | QueuedInboxItem] = asyncio.Queue()
+        for item in remaining:
+            next_q.put_nowait(item)
+        self._inbox[key] = next_q
 
     async def _background_spawn(self, thread_id: str, agent_name: str) -> None:
         """Background task: run initial invocation and save response."""
@@ -1023,8 +1059,15 @@ class AgentRunner:
             return
 
         prompts: list[str] = []
+        ack_message_ids: list[str] = []
         while not q.empty():
-            prompts.append(q.get_nowait())
+            item = q.get_nowait()
+            if isinstance(item, QueuedInboxItem):
+                prompts.append(item.relay)
+                if item.message_id:
+                    ack_message_ids.append(item.message_id)
+            else:
+                prompts.append(item)
 
         if not prompts:
             return
@@ -1047,6 +1090,8 @@ class AgentRunner:
                 result,
                 chain_depth=chain_depth,
             )
+            for message_id in dict.fromkeys(ack_message_ids):
+                self._threads.ack_message(thread_id, message_id, agent_name)
 
     # --- Event Handling ---
 
@@ -1134,6 +1179,10 @@ class AgentRunner:
                 thread_id=thread_id,
                 phase_name=thread.get("current_phase"),
             )
+            queued_item = QueuedInboxItem(
+                relay=relay,
+                message_id=str(message_id) if message_id else None,
+            )
 
             session = self._session_supervisor.get_session(thread_id, agent_name)
             if session is None:
@@ -1146,7 +1195,7 @@ class AgentRunner:
                     continue
                 if key not in self._inbox:
                     self._inbox[key] = asyncio.Queue()
-                await self._inbox[key].put(relay)
+                await self._inbox[key].put(queued_item)
                 self._emit_session_state(thread_id, agent_name, "queued")
                 continue
             if key not in self._managed_sessions:
@@ -1156,7 +1205,7 @@ class AgentRunner:
             if session.recovery_pending:
                 if key not in self._inbox:
                     self._inbox[key] = asyncio.Queue()
-                await self._inbox[key].put(relay)
+                await self._inbox[key].put(queued_item)
                 self._emit_session_state(thread_id, agent_name, "queued")
                 continue
             if session.recoverable:
@@ -1166,7 +1215,7 @@ class AgentRunner:
                 if bool(recovered.get("recovery_started", False)):
                     if key not in self._inbox:
                         self._inbox[key] = asyncio.Queue()
-                    await self._inbox[key].put(relay)
+                    await self._inbox[key].put(queued_item)
                     self._emit_session_state(thread_id, agent_name, "queued")
                     continue
 
@@ -1177,7 +1226,7 @@ class AgentRunner:
                 # Agent busy — queue the message
                 if key not in self._inbox:
                     self._inbox[key] = asyncio.Queue()
-                await self._inbox[key].put(relay)
+                await self._inbox[key].put(queued_item)
                 continue
 
             snapshot = self._build_thread_snapshot(thread_id, agent_name)
@@ -1193,6 +1242,8 @@ class AgentRunner:
                     result,
                     chain_depth=chain_depth + 1,
                 )
+                if message_id:
+                    self._threads.ack_message(thread_id, str(message_id), agent_name)
 
             # Drain inbox after invoke completes
             await self._drain_inbox(thread_id, agent_name, chain_depth + 1)

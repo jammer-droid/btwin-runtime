@@ -61,7 +61,7 @@ from btwin_core.delegation_engine import (
     build_delegation_resume_token,
     default_phase_participants,
 )
-from btwin_core.delegation_state import DelegationState
+from btwin_core.delegation_state import DelegationState, delegation_status_payload
 from btwin_core.delegation_store import DelegationStore
 from btwin_core.handoff_archive import get_handoff_record, list_handoff_records, write_handoff_record
 from btwin_core.locale_settings import LocaleSettingsStore
@@ -548,7 +548,7 @@ def _delegate_status_local(thread_id: str, config: BTwinConfig | None = None) ->
     if state is None:
         console.print(f"[red]Delegation state for thread not found:[/red] {thread_id}")
         raise typer.Exit(4)
-    return state.model_dump(exclude_none=True)
+    return delegation_status_payload(state)
 
 
 def _delegate_wait_local(thread_id: str, config: BTwinConfig | None = None) -> dict[str, object]:
@@ -737,7 +737,7 @@ def _delegate_stop_local(thread_id: str, config: BTwinConfig | None = None) -> d
         }
     )
     delegation_store.write(stopped_state)
-    return stopped_state.model_dump(exclude_none=True)
+    return delegation_status_payload(stopped_state)
 
 
 def _append_system_mailbox_report(

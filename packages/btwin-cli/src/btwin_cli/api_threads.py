@@ -18,7 +18,7 @@ from btwin_core.delegation_engine import (
     build_delegation_resume_token,
     default_phase_participants,
 )
-from btwin_core.delegation_state import DelegationState
+from btwin_core.delegation_state import DelegationState, delegation_status_payload
 from btwin_core.delegation_store import DelegationStore
 from btwin_core.event_bus import EventBus, SSEEvent
 from btwin_core.locale_settings import LocaleSettingsStore
@@ -866,7 +866,7 @@ def create_threads_router(
         state = delegation_store.read(thread_id)
         if state is None:
             raise HTTPException(status_code=404, detail=f"Delegation state for thread '{thread_id}' not found")
-        return state.model_dump(exclude_none=True)
+        return delegation_status_payload(state)
 
     @router.post("/api/threads/{thread_id}/delegate/resume")
     async def resume_delegate(thread_id: str, req: DelegateResumeRequest):

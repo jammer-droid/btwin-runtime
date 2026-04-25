@@ -450,3 +450,18 @@ def test_delegate_stop_marks_state_completed(tmp_path, monkeypatch):
     payload = _parse_json_output(result.output)
     assert payload["status"] == "completed"
     assert payload["stop_reason"] == "stopped_by_operator"
+    assert "current_phase" not in payload
+    assert "current_cycle_index" not in payload
+    assert "target_role" not in payload
+    assert "resolved_agent" not in payload
+    assert "required_action" not in payload
+    assert "expected_output" not in payload
+
+    status_result = runner.invoke(
+        app,
+        ["delegate", "status", "--thread", thread["thread_id"], "--json"],
+    )
+
+    assert status_result.exit_code == 0, status_result.output
+    status_payload = _parse_json_output(status_result.output)
+    assert status_payload == payload
