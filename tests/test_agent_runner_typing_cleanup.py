@@ -112,6 +112,15 @@ class _FakeSubprocess:
         self.killed = True
 
 
+class _NeverEndingStdout:
+    def __aiter__(self) -> _NeverEndingStdout:
+        return self
+
+    async def __anext__(self) -> bytes:
+        await asyncio.sleep(3600)
+        raise StopAsyncIteration
+
+
 class _FakeStreamingProvider(CLIProvider):
     @property
     def name(self) -> str:
@@ -287,6 +296,45 @@ async def test_run_subprocess_uses_raised_stream_limit(
 
     assert result.ok is True
     assert captured_kwargs["limit"] == 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_run_subprocess_timeout_returns_timed_out_without_name_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _build_runner(tmp_path)
+    event_queue = runner._event_bus.subscribe()
+    fake_proc = _FakeSubprocess([], returncode=1)
+    fake_proc.stdout = _NeverEndingStdout()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):  # noqa: ANN001, ANN202
+        del args, kwargs
+        return fake_proc
+
+    monkeypatch.setattr(
+        "btwin_core.agent_runner.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr("btwin_core.agent_runner.INVOKE_TIMEOUT", 0.01)
+
+    result = await runner._run_subprocess(
+        ["fake-codex"],
+        "prompt text",
+        _FakeStreamingProvider(),
+        thread_id="thread-123",
+        agent_name="agent-1",
+    )
+
+    events = _drain_events(event_queue)
+    failed_events = [
+        event
+        for event in events
+        if event.type == "agent_session_state" and event.metadata.get("state") == "failed"
+    ]
+    assert result.timed_out is True
+    assert fake_proc.killed is True
+    assert failed_events[-1].metadata["reason"] == "timeout"
 
 
 @pytest.mark.asyncio

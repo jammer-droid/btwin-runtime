@@ -515,7 +515,7 @@ class AgentRunner:
                 agent_name,
                 "failed",
                 reason="timeout",
-                last_transport_error=session.last_transport_error,
+                last_transport_error="subprocess timed out",
             )
             return InvocationResult(ok=False, timed_out=True)
         finally:
