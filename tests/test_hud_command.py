@@ -9,6 +9,8 @@ import btwin_cli.main as main
 from btwin_cli.main import app
 from btwin_core.agent_store import AgentStore
 from btwin_core.config import BTwinConfig, RuntimeConfig
+from btwin_core.delegation_state import DelegationState
+from btwin_core.delegation_store import DelegationStore
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.phase_cycle_store import PhaseCycleStore
 from btwin_core.protocol_store import (
@@ -48,7 +50,7 @@ def test_hud_without_binding_shows_runtime_summary(tmp_path, monkeypatch):
     project_root.mkdir()
 
     monkeypatch.setattr(main, "_project_root", lambda: project_root)
-    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(project_root / ".btwin"))
 
     result = runner.invoke(app, ["hud"])
 
@@ -90,7 +92,7 @@ def test_hud_with_binding_shows_bound_thread_and_recent_events(tmp_path, monkeyp
     )
 
     monkeypatch.setattr(main, "_project_root", lambda: project_root)
-    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(project_root / ".btwin"))
     monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
     monkeypatch.setattr(main, "_get_agent_store", lambda: agent_store)
 
@@ -101,6 +103,44 @@ def test_hud_with_binding_shows_bound_thread_and_recent_events(tmp_path, monkeyp
     assert thread["thread_id"] in result.output
     assert "phase=context" in result.output
     assert "Stop allowed." in result.output
+
+
+def test_hud_thread_detail_shows_managed_subagent_task_state(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    thread = thread_store.create_thread(
+        topic="HUD subagent thread",
+        protocol="debate",
+        participants=["review_parent"],
+        initial_phase="review",
+    )
+    DelegationStore(project_root / ".btwin").write(
+        DelegationState(
+            thread_id=thread["thread_id"],
+            status="running",
+            current_phase="review",
+            current_cycle_index=1,
+            target_role="reviewer",
+            resolved_agent="review_parent",
+            required_action="submit_contribution",
+            expected_output="review contribution",
+            fulfillment_mode="managed_agent_subagent",
+            parent_executor="review_parent",
+            subagent_profile="strict_reviewer",
+            executor_id="thread-1:review:1:reviewer:strict_reviewer",
+        )
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(project_root / ".btwin"))
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+
+    state = main._HudNavigatorState(selected_thread_id=thread["thread_id"])
+    renderable = main._render_hud_thread_detail_renderable(state, limit=20)
+    text = _renderable_to_text(renderable)
+
+    assert "task=spawn:strict_reviewer" in text
 
 
 def test_hud_thread_snapshot_shows_runtime_token_usage(tmp_path, monkeypatch):

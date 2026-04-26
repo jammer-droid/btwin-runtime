@@ -371,12 +371,27 @@ def _render_delegation(snapshot: dict[str, object]) -> str:
         ("Status", delegation.get("status")),
         ("Target role", delegation.get("target_role")),
         ("Resolved agent", delegation.get("resolved_agent")),
+        ("Fulfillment mode", delegation.get("fulfillment_mode")),
+        ("Parent executor", delegation.get("parent_executor")),
+        ("Sub-agent profile", delegation.get("subagent_profile")),
+        ("Sub-agent type", delegation.get("subagent_type")),
+        ("Executor id", delegation.get("executor_id")),
         ("Required action", delegation.get("required_action")),
         ("Expected output", delegation.get("expected_output")),
         ("Current phase", delegation.get("current_phase")),
         ("Stop reason", delegation.get("stop_reason")),
         ("Blocked reason", delegation.get("reason_blocked")),
     ]
+    spawn_packet = _as_dict(delegation.get("spawn_packet"))
+    codex_adapter = _as_dict(spawn_packet.get("codex_adapter"))
+    if codex_adapter:
+        fields.extend(
+            [
+                ("Codex adapter", codex_adapter.get("spawn_mechanism")),
+                ("agents.toml schema", codex_adapter.get("agents_toml_schema_status")),
+                ("Tool enforcement", codex_adapter.get("tool_policy_enforcement")),
+            ]
+        )
     return _section(
         "Delegation",
         f'<table class="meta">{_table_rows(fields)}</table>{_details("Raw delegation state", delegation)}',

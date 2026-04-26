@@ -302,6 +302,102 @@ def test_delegate_start_creates_running_delegation_state(tmp_path):
     assert status_response.json() == second_payload
 
 
+def test_delegate_start_returns_managed_subagent_packet_and_dispatches_parent(tmp_path):
+    thread_store = ThreadStore(tmp_path / "threads")
+    protocol_store = ProtocolStore(tmp_path / "protocols")
+    event_bus = EventBus()
+    protocol_store.save_protocol(
+        compile_protocol_definition(
+            {
+                "name": "delegate-subagent-review",
+                "phases": [
+                    {
+                        "name": "review",
+                        "actions": ["contribute", "review"],
+                        "template": [{"section": "completed", "required": True}],
+                        "procedure": [
+                            {"role": "reviewer", "action": "review", "alias": "Review"},
+                        ],
+                    }
+                ],
+                "role_fulfillment": {
+                    "reviewer": {
+                        "mode": "managed_agent_subagent",
+                        "parent": "review_parent",
+                        "profile": "strict_reviewer",
+                        "subagent_type": "explorer",
+                    }
+                },
+                "subagent_profiles": {
+                    "strict_reviewer": {
+                        "description": "Find correctness and regression risks",
+                        "persona": "Find correctness risks first.",
+                        "tools": {"allow": ["read_files"], "deny": ["edit_files"]},
+                        "context": {"include": ["phase_contract"]},
+                    }
+                },
+            }
+        )
+    )
+
+    thread = thread_store.create_thread(
+        topic="Delegate subagent thread",
+        protocol="delegate-subagent-review",
+        participants=["review_parent"],
+        initial_phase="review",
+    )
+    PhaseCycleStore(thread_store.data_dir).write(
+        PhaseCycleState.start(
+            thread_id=thread["thread_id"],
+            phase_name="review",
+            procedure_steps=["review"],
+        )
+    )
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(create_threads_router(thread_store, protocol_store, event_bus))
+    client = TestClient(app)
+
+    response = client.post(f"/api/threads/{thread['thread_id']}/delegate/start")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "running"
+    assert payload["fulfillment_mode"] == "managed_agent_subagent"
+    assert payload["resolved_agent"] == "review_parent"
+    assert payload["spawn_packet"]["dispatch"]["profile"] == "strict_reviewer"
+    assert payload["spawn_packet"]["executor"]["suggested_contribution_agent"] == "review_parent"
+
+    inbox_response = client.get(f"/api/threads/{thread['thread_id']}/inbox", params={"agent": "review_parent"})
+    assert inbox_response.status_code == 200
+    inbox_payload = inbox_response.json()
+    assert inbox_payload["pending_count"] == 1
+    assert "btwin.managed_agent_subagent.dispatch" in inbox_payload["messages"][0]["_content"]
+
+    contribution_response = client.post(
+        f"/api/threads/{thread['thread_id']}/contributions",
+        json={
+            "agentName": "review_parent",
+            "phase": "review",
+            "content": "## completed\n\nManaged subagent result.",
+            "tldr": "managed subagent result",
+            "executorType": "managed_agent_subagent",
+            "executorId": payload["spawn_packet"]["executor"]["executor_id"],
+            "subagentProfile": "strict_reviewer",
+            "parentExecutor": "review_parent",
+            "dispatchId": payload["spawn_packet"]["dispatch"]["dispatch_id"],
+        },
+    )
+    assert contribution_response.status_code == 200
+    contribution = contribution_response.json()
+    assert contribution["executor"]["type"] == "managed_agent_subagent"
+    assert contribution["executor"]["id"] == payload["spawn_packet"]["executor"]["executor_id"]
+    assert contribution["executor"]["subagent_profile"] == "strict_reviewer"
+    assert contribution["dispatch_id"] == payload["spawn_packet"]["dispatch"]["dispatch_id"]
+
+
 def test_delegate_wait_returns_resume_packet(tmp_path):
     thread_store, protocol_store, event_bus, thread = _seed_waiting_delegate_thread(tmp_path)
 
@@ -557,7 +653,7 @@ def test_delegate_start_prefers_phase_cycle_state_over_stale_thread_phase(tmp_pa
     assert client.get(f"/api/threads/{thread['thread_id']}/inbox", params={"agent": "alice"}).json()["pending_count"] == 1
 
 
-def test_delegate_start_rejects_when_direct_routing_is_disallowed(tmp_path):
+def test_delegate_start_allows_system_delegation_when_direct_chat_is_disallowed(tmp_path):
     thread_store = ThreadStore(tmp_path / "threads")
     protocol_store = ProtocolStore(tmp_path / "protocols")
     event_bus = EventBus()
@@ -601,11 +697,12 @@ def test_delegate_start_rejects_when_direct_routing_is_disallowed(tmp_path):
 
     response = client.post(f"/api/threads/{thread['thread_id']}/delegate/start")
 
-    assert response.status_code == 409
-    detail = response.json()["detail"]
-    assert detail["status"] == "blocked"
-    assert detail["reason_blocked"] == "direct_message_not_allowed_in_phase"
-    assert client.get(f"/api/threads/{thread['thread_id']}/inbox", params={"agent": "alice"}).json()["pending_count"] == 0
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "running"
+    inbox = client.get(f"/api/threads/{thread['thread_id']}/inbox", params={"agent": "alice"}).json()
+    assert inbox["pending_count"] == 1
+    assert inbox["messages"][0]["msg_type"] == "delegation"
 
 
 def test_delegate_start_reports_dispatch_failure_without_false_success(tmp_path, monkeypatch):

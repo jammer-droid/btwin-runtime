@@ -57,6 +57,7 @@ from btwin_core.context_core import ContextCore
 from btwin_core.delegation_engine import (
     DelegationAssignment,
     build_delegation_assignment,
+    build_subagent_spawn_packet,
     build_delegation_resume_packet,
     build_delegation_resume_token,
     default_phase_participants,
@@ -129,6 +130,7 @@ agent_app = typer.Typer(help="Manage B-TWIN agent definitions.")
 protocol_app = typer.Typer(help="Manage B-TWIN protocol definitions.")
 thread_app = typer.Typer(help="Manage B-TWIN protocol threads.")
 delegate_app = typer.Typer(help="Manage delegation start and status.")
+subagent_app = typer.Typer(help="Inspect and export B-TWIN sub-agent dispatch packets.")
 contribution_app = typer.Typer(help="Manage B-TWIN protocol contributions.")
 workflow_app = typer.Typer(help="Evaluate workflow contract hooks.")
 service_app = typer.Typer(help="Manage the macOS launchd service for B-TWIN API.")
@@ -147,6 +149,7 @@ app.add_typer(agent_app, name="agent")
 app.add_typer(protocol_app, name="protocol")
 app.add_typer(thread_app, name="thread")
 app.add_typer(delegate_app, name="delegate")
+app.add_typer(subagent_app, name="subagent")
 app.add_typer(contribution_app, name="contribution")
 app.add_typer(workflow_app, name="workflow")
 app.add_typer(service_app, name="service")
@@ -393,10 +396,18 @@ def _resolve_delegate_phase(
 
 def _delegation_state_from_assignment(
     *,
+    thread: dict[str, object],
+    protocol: Protocol,
     thread_id: str,
     phase_cycle_state: PhaseCycleState,
     assignment: DelegationAssignment,
 ) -> DelegationState:
+    spawn_packet = build_subagent_spawn_packet(
+        thread=thread,
+        protocol=protocol,
+        phase_cycle_state=phase_cycle_state,
+        assignment=assignment,
+    )
     return DelegationState(
         thread_id=thread_id,
         status=assignment.status,
@@ -408,6 +419,12 @@ def _delegation_state_from_assignment(
         resolved_agent=assignment.resolved_agent,
         required_action=assignment.required_action,
         expected_output=assignment.expected_output,
+        fulfillment_mode=assignment.fulfillment_mode,
+        parent_executor=assignment.parent_executor,
+        subagent_profile=assignment.subagent_profile,
+        subagent_type=assignment.subagent_type,
+        executor_id=assignment.executor_id,
+        spawn_packet=spawn_packet,
         reason_blocked=assignment.reason_blocked,
     )
 
@@ -438,6 +455,7 @@ def _delegate_dispatch_content(
     phase_cycle_state: PhaseCycleState,
     heading: str = "Delegation Start",
     human_summary: str | None = None,
+    spawn_packet: dict[str, object] | None = None,
 ) -> tuple[str, str]:
     target_role = assignment.target_role or "unassigned"
     resolved_agent = assignment.resolved_agent or "unassigned"
@@ -453,6 +471,12 @@ def _delegate_dispatch_content(
     )
     if human_summary:
         content += f"\nHuman input: {human_summary}\n"
+    if assignment.fulfillment_mode == "managed_agent_subagent":
+        content += "\nSub-agent dispatch: spawn the requested B-TWIN managed Codex sub-agent and pass through this packet.\n"
+    if spawn_packet is not None:
+        content += "\n```json\n"
+        content += json.dumps(spawn_packet, ensure_ascii=False, indent=2)
+        content += "\n```\n"
     tldr = f"delegate {phase_cycle_state.phase_name} -> {resolved_agent}"
     return content, tldr
 
@@ -483,15 +507,6 @@ def _dispatch_delegate_assignment(
     if assignment.status != "running" or not assignment.resolved_agent:
         return False, None
 
-    validation = validate_direct_message_targets(
-        thread={**thread, "current_phase": phase_cycle_state.phase_name},
-        protocol=protocol,
-        from_agent="btwin",
-        target_agents=[assignment.resolved_agent],
-    )
-    if validation is not None:
-        return False, validation
-
     client_message_id = _delegate_dispatch_client_message_id(
         thread_id=thread_id,
         phase_cycle_state=phase_cycle_state,
@@ -505,6 +520,12 @@ def _dispatch_delegate_assignment(
         phase_cycle_state=phase_cycle_state,
         heading="Delegation Resume" if human_summary else "Delegation Start",
         human_summary=human_summary,
+        spawn_packet=build_subagent_spawn_packet(
+            thread=thread,
+            protocol=protocol,
+            phase_cycle_state=phase_cycle_state,
+            assignment=assignment,
+        ),
     )
     try:
         msg = thread_store.send_message(
@@ -575,12 +596,14 @@ def _delegate_start_local(thread_id: str, config: BTwinConfig | None = None) -> 
         contributions=contributions,
     )
     state = _delegation_state_from_assignment(
+        thread=thread,
+        protocol=protocol,
         thread_id=thread_id,
         phase_cycle_state=phase_cycle_state,
         assignment=assignment,
     )
 
-    if assignment.status == "running":
+    if assignment.status == "running" and assignment.fulfillment_mode in {"registered_agent", "managed_agent_subagent"}:
         dispatched, dispatch_violation = _dispatch_delegate_assignment(
             thread_store,
             thread=thread,
@@ -758,12 +781,14 @@ def _delegate_respond_local(
     )
 
     next_state = _delegation_state_from_assignment(
+        thread=updated_thread,
+        protocol=protocol,
         thread_id=thread_id,
         phase_cycle_state=next_cycle_state,
         assignment=next_assignment,
     ).model_copy(update={"stop_reason": next_assignment.stop_reason, "last_resume_token": None})
 
-    if next_assignment.status == "running":
+    if next_assignment.status == "running" and next_assignment.fulfillment_mode in {"registered_agent", "managed_agent_subagent"}:
         dispatched, dispatch_violation = _dispatch_delegate_assignment(
             thread_store,
             thread=updated_thread,
@@ -805,6 +830,51 @@ def _delegate_stop_local(thread_id: str, config: BTwinConfig | None = None) -> d
     )
     delegation_store.write(stopped_state)
     return delegation_status_payload(stopped_state)
+
+
+def _subagent_packet_from_status(status: dict[str, object]) -> dict[str, object] | None:
+    packet = status.get("spawn_packet")
+    return dict(packet) if isinstance(packet, dict) else None
+
+
+def _subagent_packet_local(thread_id: str, config: BTwinConfig | None = None) -> dict[str, object]:
+    status = _delegate_status_local(thread_id, config=config)
+    packet = _subagent_packet_from_status(status)
+    if packet is None:
+        console.print(f"[red]Sub-agent spawn packet not found for thread:[/red] {thread_id}")
+        raise typer.Exit(4)
+    return packet
+
+
+def _subagent_packet(thread_id: str, config: BTwinConfig | None = None) -> dict[str, object]:
+    current_config = config or _get_config()
+    if _use_attached_api(current_config):
+        status = _attached_api_get_or_exit(f"/api/threads/{thread_id}/delegate/status")
+        packet = _subagent_packet_from_status(status if isinstance(status, dict) else {})
+        if packet is None:
+            console.print(f"[red]Sub-agent spawn packet not found for thread:[/red] {thread_id}")
+            raise typer.Exit(4)
+        return packet
+    return _subagent_packet_local(thread_id, config=current_config)
+
+
+def _subagent_spawn_request(thread_id: str, config: BTwinConfig | None = None) -> dict[str, object]:
+    packet = _subagent_packet(thread_id, config)
+    request = packet.get("codex_spawn_request")
+    if not isinstance(request, dict):
+        console.print(f"[red]Codex spawn request not found for thread:[/red] {thread_id}")
+        raise typer.Exit(4)
+    return dict(request)
+
+
+def _unsupported_agents_toml_payload(thread_id: str) -> dict[str, object]:
+    return {
+        "thread_id": thread_id,
+        "error": "codex_agents_toml_schema_unverified",
+        "message": "Codex agents.toml export is blocked until the schema is verified for the installed Codex version.",
+        "agents_toml_schema_status": "unverified",
+        "supported_formats": ["codex-spawn-json"],
+    }
 
 
 def _append_system_mailbox_report(
@@ -3300,10 +3370,15 @@ def _agent_profile_lookup(agent_profiles: object) -> dict[str, dict[str, object]
 def _delegation_task_state(agent_name: str, delegation_status: dict[str, object] | None) -> str:
     if not isinstance(delegation_status, dict):
         return "-"
+    fulfillment_mode = str(delegation_status.get("fulfillment_mode") or "").strip()
+    parent_executor = str(delegation_status.get("parent_executor") or "").strip()
+    status = str(delegation_status.get("status") or "").strip().lower()
+    if fulfillment_mode == "managed_agent_subagent" and parent_executor == agent_name and status == "running":
+        profile = str(delegation_status.get("subagent_profile") or "").strip()
+        return f"spawn:{profile}" if profile else "spawn:subagent"
     resolved_agent = str(delegation_status.get("resolved_agent") or "").strip()
     if resolved_agent != agent_name:
         return "-"
-    status = str(delegation_status.get("status") or "").strip().lower()
     if status == "running":
         return "assigned"
     if status:
@@ -8815,6 +8890,64 @@ def delegate_stop(
     _emit_payload(payload, as_json=as_json)
 
 
+@subagent_app.command("packet")
+def subagent_packet(
+    thread_id: str = typer.Option(..., "--thread", help="Thread id"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Return the B-TWIN managed Codex sub-agent dispatch packet for a delegated thread."""
+    packet = _subagent_packet(thread_id, _get_config())
+    _emit_payload(packet, as_json=as_json)
+
+
+@subagent_app.command("spawn-request")
+def subagent_spawn_request(
+    thread_id: str = typer.Option(..., "--thread", help="Thread id"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Return only the Codex spawn_agent request from a managed sub-agent packet."""
+    request = _subagent_spawn_request(thread_id, _get_config())
+    _emit_payload(request, as_json=as_json)
+
+
+@subagent_app.command("export")
+def subagent_export(
+    thread_id: str = typer.Option(..., "--thread", help="Thread id"),
+    export_format: str = typer.Option("codex-spawn-json", "--format", help="Export format: codex-spawn-json or codex-agents-toml"),
+    output: Path | None = typer.Option(None, "--output", help="Output file path"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Export a generated sub-agent adapter packet."""
+    if export_format == "codex-agents-toml":
+        payload = _unsupported_agents_toml_payload(thread_id)
+        _emit_payload(payload, as_json=as_json)
+        raise typer.Exit(2)
+    if export_format != "codex-spawn-json":
+        payload = {
+            "thread_id": thread_id,
+            "error": "unsupported_subagent_export_format",
+            "format": export_format,
+            "supported_formats": ["codex-spawn-json"],
+        }
+        _emit_payload(payload, as_json=as_json)
+        raise typer.Exit(2)
+
+    packet = _subagent_packet(thread_id, _get_config())
+    export_path = output or (_project_root() / ".btwin" / "generated" / "codex" / f"{thread_id}-spawn-packet.json")
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    export_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _emit_payload(
+        {
+            "thread_id": thread_id,
+            "format": export_format,
+            "path": str(export_path),
+            "packet_type": packet.get("packet_type"),
+            "codex_adapter": packet.get("codex_adapter"),
+        },
+        as_json=as_json,
+    )
+
+
 @thread_app.command("ack-message")
 def thread_ack_message(
     thread_id: str = typer.Option(..., "--thread", help="Thread id"),
@@ -8845,6 +8978,11 @@ def contribution_submit(
     phase: str = typer.Option(..., "--phase", help="Protocol phase"),
     content: str | None = typer.Option(None, "--content", help="Contribution markdown"),
     tldr: str = typer.Option(..., "--tldr", help="One-line contribution summary"),
+    executor_type: str | None = typer.Option(None, "--executor-type", help="Executor type for delegated/sub-agent results"),
+    executor_id: str | None = typer.Option(None, "--executor-id", help="Task-scoped executor id for delegated/sub-agent results"),
+    subagent_profile: str | None = typer.Option(None, "--subagent-profile", help="Sub-agent profile that produced the result"),
+    parent_executor: str | None = typer.Option(None, "--parent-executor", help="Foreground or parent executor that spawned the sub-agent"),
+    dispatch_id: str | None = typer.Option(None, "--dispatch-id", help="Delegation dispatch id this result satisfies"),
     as_json: bool = typer.Option(False, "--json", help="Output JSON"),
 ):
     """Persist a structured contribution for the current protocol phase."""
@@ -8861,14 +8999,24 @@ def contribution_submit(
             current_config,
         )
     if _use_attached_api(current_config):
+        payload = {
+            "agentName": agent_name,
+            "phase": phase,
+            "content": resolved_content,
+            "tldr": tldr,
+        }
+        for key, value in (
+            ("executorType", executor_type),
+            ("executorId", executor_id),
+            ("subagentProfile", subagent_profile),
+            ("parentExecutor", parent_executor),
+            ("dispatchId", dispatch_id),
+        ):
+            if value is not None:
+                payload[key] = value
         contribution = _attached_api_call_or_exit(
             f"/api/threads/{thread_id}/contributions",
-            {
-                "agentName": agent_name,
-                "phase": phase,
-                "content": resolved_content,
-                "tldr": tldr,
-            },
+            payload,
         )
     else:
         violation = validate_contribution_submission(
@@ -8886,6 +9034,11 @@ def contribution_submit(
             phase=phase,
             content=resolved_content,
             tldr=tldr,
+            executor_type=executor_type,
+            executor_id=executor_id,
+            subagent_profile=subagent_profile,
+            parent_executor=parent_executor,
+            dispatch_id=dispatch_id,
         )
     if contribution is None:
         console.print(f"[red]Thread not found or closed:[/red] {thread_id}")

@@ -1,7 +1,11 @@
 from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.protocol_store import Protocol, ProtocolOutcomePolicy, ProtocolPhase, ProtocolSection
 
-from btwin_core.delegation_engine import build_delegation_assignment, default_phase_participants
+from btwin_core.delegation_engine import (
+    build_delegation_assignment,
+    build_subagent_spawn_packet,
+    default_phase_participants,
+)
 
 
 def _review_protocol() -> Protocol:
@@ -58,6 +62,142 @@ def test_build_delegation_assignment_uses_compiled_phase_and_role():
     assert assignment.resolved_agent == "alice"
     assert assignment.required_action == "submit_contribution"
     assert assignment.expected_output == "review contribution"
+
+
+def test_build_delegation_assignment_blocks_foreground_subagent_role_fulfillment():
+    protocol = Protocol.model_validate(
+        {
+            **_review_protocol().model_dump(),
+            "role_fulfillment": {
+                "reviewer": {
+                    "mode": "foreground_subagent",
+                    "parent": "foreground",
+                    "profile": "strict_reviewer",
+                    "subagent_type": "explorer",
+                }
+            },
+            "subagent_profiles": {
+                "strict_reviewer": {
+                    "description": "Find correctness and regression risks",
+                    "model": "gpt-5.4-mini",
+                    "reasoning_effort": "medium",
+                    "persona": "Find correctness risks first.",
+                    "tools": {"allow": ["read_files", "run_tests"], "deny": ["edit_files"]},
+                    "context": {"include": ["phase_contract", "recent_contributions"]},
+                }
+            },
+        }
+    )
+
+    assignment = build_delegation_assignment(
+        thread=_review_thread(),
+        protocol=protocol,
+        phase_cycle_state=_review_cycle_state(),
+        role_bindings={},
+    )
+
+    assert assignment.status == "blocked"
+    assert assignment.target_role == "reviewer"
+    assert assignment.resolved_agent is None
+    assert assignment.fulfillment_mode == "foreground_subagent"
+    assert assignment.parent_executor == "foreground"
+    assert assignment.subagent_profile == "strict_reviewer"
+    assert assignment.subagent_type == "explorer"
+    assert assignment.reason_blocked == "foreground_subagent_requires_managed_parent"
+    assert assignment.stop_reason == "foreground_subagent_requires_managed_parent"
+
+
+def test_build_delegation_assignment_resolves_managed_subagent_parent_without_role_binding():
+    protocol = Protocol.model_validate(
+        {
+            **_review_protocol().model_dump(),
+            "role_fulfillment": {
+                "reviewer": {
+                    "mode": "managed_agent_subagent",
+                    "parent": "review_parent",
+                    "profile": "strict_reviewer",
+                    "subagent_type": "explorer",
+                }
+            },
+            "subagent_profiles": {
+                "strict_reviewer": {
+                    "description": "Find correctness and regression risks",
+                    "model": "gpt-5.4-mini",
+                    "reasoning_effort": "medium",
+                    "persona": "Find correctness risks first.",
+                    "tools": {"allow": ["read_files", "run_tests"], "deny": ["edit_files"]},
+                    "context": {"include": ["phase_contract", "recent_contributions"]},
+                }
+            },
+        }
+    )
+
+    assignment = build_delegation_assignment(
+        thread=_review_thread(),
+        protocol=protocol,
+        phase_cycle_state=_review_cycle_state(),
+        role_bindings={},
+    )
+
+    assert assignment.status == "running"
+    assert assignment.target_role == "reviewer"
+    assert assignment.resolved_agent == "review_parent"
+    assert assignment.fulfillment_mode == "managed_agent_subagent"
+    assert assignment.parent_executor == "review_parent"
+    assert assignment.subagent_profile == "strict_reviewer"
+    assert assignment.subagent_type == "explorer"
+    assert assignment.executor_id == "thread-1:review:1:reviewer:strict_reviewer"
+
+
+def test_build_subagent_spawn_packet_includes_parent_ready_codex_spawn_request():
+    protocol = Protocol.model_validate(
+        {
+            **_review_protocol().model_dump(),
+            "role_fulfillment": {
+                "reviewer": {
+                    "mode": "managed_agent_subagent",
+                    "parent": "review_parent",
+                    "profile": "strict_reviewer",
+                    "subagent_type": "explorer",
+                }
+            },
+            "subagent_profiles": {
+                "strict_reviewer": {
+                    "description": "Find correctness and regression risks",
+                    "model": "gpt-5.4-mini",
+                    "reasoning_effort": "medium",
+                    "persona": "Find correctness risks first.",
+                    "tools": {"allow": ["read_files"], "deny": ["edit_files"]},
+                    "context": {"include": ["phase_contract"]},
+                }
+            },
+        }
+    )
+    assignment = build_delegation_assignment(
+        thread=_review_thread(),
+        protocol=protocol,
+        phase_cycle_state=_review_cycle_state(),
+        role_bindings={},
+    )
+
+    packet = build_subagent_spawn_packet(
+        thread=_review_thread(),
+        protocol=protocol,
+        phase_cycle_state=_review_cycle_state(),
+        assignment=assignment,
+    )
+
+    assert packet is not None
+    spawn_request = packet["codex_spawn_request"]
+    assert spawn_request["agent_type"] == "explorer"
+    assert spawn_request["model"] == "gpt-5.4-mini"
+    assert spawn_request["reasoning_effort"] == "medium"
+    assert spawn_request["fork_context"] is False
+    assert "Find correctness risks first." in spawn_request["message"]
+    assert "--agent review_parent" in spawn_request["message"]
+    assert "--executor-type managed_agent_subagent" in spawn_request["message"]
+    assert "--parent-executor review_parent" in spawn_request["message"]
+    assert "Do not invent a separate B-TWIN agent identity" in spawn_request["message"]
 
 
 def test_default_phase_participants_prefers_agent_names_matching_procedure_roles():

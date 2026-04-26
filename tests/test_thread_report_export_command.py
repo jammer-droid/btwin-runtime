@@ -199,6 +199,59 @@ def test_thread_export_report_standalone_writes_self_contained_html(tmp_path, mo
     assert "href=\"http" not in html.lower()
 
 
+def test_thread_report_renders_subagent_delegation_and_executor_metadata():
+    html = render_thread_report_html(
+        {
+            "thread": {
+                "thread_id": "thread-1",
+                "topic": "Subagent report",
+                "participants": [{"name": "review_parent"}],
+            },
+            "status_summary": {},
+            "protocol": {},
+            "delegation_status": {
+                "status": "running",
+                "target_role": "reviewer",
+                "resolved_agent": "review_parent",
+                "fulfillment_mode": "managed_agent_subagent",
+                "parent_executor": "review_parent",
+                "subagent_profile": "strict_reviewer",
+                "executor_id": "thread-1:review:1:reviewer:strict_reviewer",
+                "spawn_packet": {
+                    "codex_adapter": {
+                        "agents_toml_schema_status": "unverified",
+                        "tool_policy_enforcement": "not_claimed",
+                    }
+                },
+            },
+            "contributions": [
+                {
+                    "contribution_id": "contrib-1",
+                    "created_at": "2026-04-26T00:00:00+00:00",
+                    "agent": "review_parent",
+                    "phase": "review",
+                    "tldr": "subagent result",
+                    "executor": {
+                        "type": "managed_agent_subagent",
+                        "id": "thread-1:review:1:reviewer:strict_reviewer",
+                        "subagent_profile": "strict_reviewer",
+                        "parent_executor": "review_parent",
+                    },
+                    "dispatch_id": "thread-1:review:1:reviewer:strict_reviewer",
+                }
+            ],
+        }
+    )
+
+    assert "Fulfillment mode" in html
+    assert "managed_agent_subagent" in html
+    assert "Sub-agent profile" in html
+    assert "strict_reviewer" in html
+    assert "Tool enforcement" in html
+    assert "not_claimed" in html
+    assert "thread-1:review:1:reviewer:strict_reviewer" in html
+
+
 def test_thread_report_command_uses_planned_positional_cli_shape(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"

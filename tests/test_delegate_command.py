@@ -59,6 +59,60 @@ def _seed_delegate_thread(data_dir: Path):
     return thread_store, thread
 
 
+def _seed_managed_subagent_thread(data_dir: Path):
+    thread_store = ThreadStore(data_dir / "threads")
+    protocol_store = ProtocolStore(data_dir / "protocols")
+    protocol_store.save_protocol(
+        compile_protocol_definition(
+            {
+                "name": "delegate-subagent-review",
+                "phases": [
+                    {
+                        "name": "review",
+                        "actions": ["contribute", "review"],
+                        "template": [{"section": "completed", "required": True}],
+                        "procedure": [
+                            {"role": "reviewer", "action": "review", "alias": "Review"},
+                        ],
+                    }
+                ],
+                "role_fulfillment": {
+                    "reviewer": {
+                        "mode": "managed_agent_subagent",
+                        "parent": "review_parent",
+                        "profile": "strict_reviewer",
+                        "subagent_type": "explorer",
+                    }
+                },
+                "subagent_profiles": {
+                    "strict_reviewer": {
+                        "description": "Find correctness and regression risks",
+                        "model": "gpt-5.4-mini",
+                        "reasoning_effort": "medium",
+                        "persona": "Find correctness risks first.",
+                        "tools": {"allow": ["read_files", "run_tests"], "deny": ["edit_files"]},
+                        "context": {"include": ["phase_contract", "recent_contributions"]},
+                    }
+                },
+            }
+        )
+    )
+    thread = thread_store.create_thread(
+        topic="Delegate subagent thread",
+        protocol="delegate-subagent-review",
+        participants=["review_parent"],
+        initial_phase="review",
+    )
+    PhaseCycleStore(data_dir).write(
+        PhaseCycleState.start(
+            thread_id=thread["thread_id"],
+            phase_name="review",
+            procedure_steps=["review"],
+        )
+    )
+    return thread_store, thread
+
+
 def _seed_waiting_delegate_thread(data_dir: Path):
     thread_store = ThreadStore(data_dir / "threads")
     protocol_store = ProtocolStore(data_dir / "protocols")
@@ -173,6 +227,246 @@ def test_delegate_start_outputs_running_state(tmp_path, monkeypatch):
     assert status_result.exit_code == 0, status_result.output
     status_payload = _parse_json_output(status_result.output)
     assert status_payload == start_payload
+
+
+def test_delegate_start_outputs_managed_subagent_spawn_packet_and_dispatches_parent(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / "custom-runtime-data"
+    thread_store, thread = _seed_managed_subagent_thread(data_dir)
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    start_result = runner.invoke(
+        app,
+        ["delegate", "start", "--thread", thread["thread_id"], "--json"],
+    )
+
+    assert start_result.exit_code == 0, start_result.output
+    payload = _parse_json_output(start_result.output)
+    assert payload["status"] == "running"
+    assert payload["target_role"] == "reviewer"
+    assert payload["resolved_agent"] == "review_parent"
+    assert payload["fulfillment_mode"] == "managed_agent_subagent"
+    assert payload["parent_executor"] == "review_parent"
+    assert payload["subagent_profile"] == "strict_reviewer"
+    assert payload["subagent_type"] == "explorer"
+    assert payload["executor_id"].endswith(":reviewer:strict_reviewer")
+
+    packet = payload["spawn_packet"]
+    assert packet["packet_type"] == "btwin.managed_agent_subagent.dispatch"
+    assert packet["dispatch"]["thread_id"] == thread["thread_id"]
+    assert packet["dispatch"]["role"] == "reviewer"
+    assert packet["dispatch"]["fulfillment_mode"] == "managed_agent_subagent"
+    assert packet["executor"]["parent_executor"] == "review_parent"
+    assert packet["executor"]["suggested_contribution_agent"] == "review_parent"
+    assert packet["profile"]["name"] == "strict_reviewer"
+    assert packet["profile"]["tools"]["policy_level"] == "declared"
+    assert packet["codex_adapter"]["spawn_mechanism"] == "managed_parent_spawn_agent_tool"
+    assert packet["codex_adapter"]["agents_toml_schema_status"] == "unverified"
+    assert packet["codex_adapter"]["tool_policy_enforcement"] == "not_claimed"
+    assert "agent_type" in packet["codex_adapter"]["supported_spawn_fields"]
+    assert packet["codex_spawn_request"]["agent_type"] == "explorer"
+    assert packet["codex_spawn_request"]["model"] == "gpt-5.4-mini"
+    assert "btwin contribution submit" in packet["codex_spawn_request"]["message"]
+    assert "--agent review_parent" in packet["codex_spawn_request"]["message"]
+    assert "btwin contribution submit" in packet["completion_contract"]["command"]
+    assert "--agent review_parent" in packet["completion_contract"]["command"]
+    assert "--executor-type managed_agent_subagent" in packet["completion_contract"]["command"]
+    assert "--subagent-profile strict_reviewer" in packet["completion_contract"]["command"]
+    assert "--parent-executor review_parent" in packet["completion_contract"]["command"]
+    assert "Find correctness risks first." in packet["instructions"]
+
+    inbox = thread_store.list_inbox(thread["thread_id"], "review_parent")
+    assert len(inbox) == 1
+    assert "spawn the requested B-TWIN managed Codex sub-agent" in inbox[0]["_content"]
+    assert "codex_spawn_request" in inbox[0]["_content"]
+    assert "btwin.managed_agent_subagent.dispatch" in inbox[0]["_content"]
+
+    status_result = runner.invoke(
+        app,
+        ["delegate", "status", "--thread", thread["thread_id"], "--json"],
+    )
+
+    assert status_result.exit_code == 0, status_result.output
+    assert _parse_json_output(status_result.output) == payload
+
+
+def test_contribution_submit_persists_subagent_executor_metadata(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / "custom-runtime-data"
+    _thread_store, thread = _seed_managed_subagent_thread(data_dir)
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_thread_store", lambda: ThreadStore(data_dir / "threads"))
+    monkeypatch.setattr(main, "_get_protocol_store", lambda: ProtocolStore(data_dir / "protocols"))
+
+    start_result = runner.invoke(
+        app,
+        ["delegate", "start", "--thread", thread["thread_id"], "--json"],
+    )
+    assert start_result.exit_code == 0, start_result.output
+    start_payload = _parse_json_output(start_result.output)
+    packet = start_payload["spawn_packet"]
+
+    submit_result = runner.invoke(
+        app,
+        [
+            "contribution",
+            "submit",
+            "--thread",
+            thread["thread_id"],
+            "--agent",
+            packet["executor"]["suggested_contribution_agent"],
+            "--phase",
+            "review",
+            "--content",
+            "## completed\n\nSubagent result.",
+            "--tldr",
+            "subagent result",
+            "--executor-type",
+            packet["executor"]["executor_type"],
+            "--executor-id",
+            packet["executor"]["executor_id"],
+            "--subagent-profile",
+            packet["dispatch"]["profile"],
+            "--parent-executor",
+            packet["executor"]["parent_executor"],
+            "--dispatch-id",
+            packet["dispatch"]["dispatch_id"],
+            "--json",
+        ],
+    )
+
+    assert submit_result.exit_code == 0, submit_result.output
+    contribution = _parse_json_output(submit_result.output)
+    assert contribution["agent"] == "review_parent"
+    assert contribution["executor"]["type"] == "managed_agent_subagent"
+    assert contribution["executor"]["id"] == packet["executor"]["executor_id"]
+    assert contribution["executor"]["subagent_profile"] == "strict_reviewer"
+    assert contribution["executor"]["parent_executor"] == "review_parent"
+    assert contribution["dispatch_id"] == packet["dispatch"]["dispatch_id"]
+
+
+def test_subagent_packet_outputs_current_spawn_packet(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / "custom-runtime-data"
+    _thread_store, thread = _seed_managed_subagent_thread(data_dir)
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    start_result = runner.invoke(
+        app,
+        ["delegate", "start", "--thread", thread["thread_id"], "--json"],
+    )
+    assert start_result.exit_code == 0, start_result.output
+    expected_packet = _parse_json_output(start_result.output)["spawn_packet"]
+
+    packet_result = runner.invoke(
+        app,
+        ["subagent", "packet", "--thread", thread["thread_id"], "--json"],
+    )
+
+    assert packet_result.exit_code == 0, packet_result.output
+    assert _parse_json_output(packet_result.output) == expected_packet
+
+
+def test_subagent_spawn_request_outputs_codex_spawn_payload(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / "custom-runtime-data"
+    _thread_store, thread = _seed_managed_subagent_thread(data_dir)
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    start_result = runner.invoke(
+        app,
+        ["delegate", "start", "--thread", thread["thread_id"], "--json"],
+    )
+    assert start_result.exit_code == 0, start_result.output
+    expected_spawn_request = _parse_json_output(start_result.output)["spawn_packet"]["codex_spawn_request"]
+
+    request_result = runner.invoke(
+        app,
+        ["subagent", "spawn-request", "--thread", thread["thread_id"], "--json"],
+    )
+
+    assert request_result.exit_code == 0, request_result.output
+    assert _parse_json_output(request_result.output) == expected_spawn_request
+
+
+def test_subagent_export_writes_codex_spawn_json(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / "custom-runtime-data"
+    _thread_store, thread = _seed_managed_subagent_thread(data_dir)
+    output_path = tmp_path / "packet.json"
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    start_result = runner.invoke(
+        app,
+        ["delegate", "start", "--thread", thread["thread_id"], "--json"],
+    )
+    assert start_result.exit_code == 0, start_result.output
+
+    export_result = runner.invoke(
+        app,
+        [
+            "subagent",
+            "export",
+            "--thread",
+            thread["thread_id"],
+            "--format",
+            "codex-spawn-json",
+            "--output",
+            str(output_path),
+            "--json",
+        ],
+    )
+
+    assert export_result.exit_code == 0, export_result.output
+    payload = _parse_json_output(export_result.output)
+    assert payload["format"] == "codex-spawn-json"
+    assert payload["path"] == str(output_path)
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert written["packet_type"] == "btwin.managed_agent_subagent.dispatch"
+    assert written["codex_adapter"]["spawn_mechanism"] == "managed_parent_spawn_agent_tool"
+
+
+def test_subagent_export_blocks_unverified_agents_toml(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / "custom-runtime-data"
+    _thread_store, thread = _seed_managed_subagent_thread(data_dir)
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    start_result = runner.invoke(
+        app,
+        ["delegate", "start", "--thread", thread["thread_id"], "--json"],
+    )
+    assert start_result.exit_code == 0, start_result.output
+
+    export_result = runner.invoke(
+        app,
+        [
+            "subagent",
+            "export",
+            "--thread",
+            thread["thread_id"],
+            "--format",
+            "codex-agents-toml",
+            "--json",
+        ],
+    )
+
+    assert export_result.exit_code == 2
+    payload = _parse_json_output(export_result.output)
+    assert payload["error"] == "codex_agents_toml_schema_unverified"
+    assert payload["agents_toml_schema_status"] == "unverified"
 
 
 def test_delegate_commands_use_attached_api_when_attached(tmp_path, monkeypatch):

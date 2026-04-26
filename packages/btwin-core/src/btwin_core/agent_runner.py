@@ -52,6 +52,9 @@ from btwin_core.thread_store import ThreadStore
 from btwin_core.validation_telemetry import ValidationTelemetryStore
 from btwin_core.workflow_constraints import validate_direct_message_targets
 from btwin_core.prototypes.persistent_sessions.base import PersistentSessionAdapter
+from btwin_core.prototypes.persistent_sessions.codex_app_server_adapter import (
+    is_codex_app_server_idle_status,
+)
 from btwin_core.prototypes.persistent_sessions.types import SessionConfig, SessionTurn
 
 logger = logging.getLogger(__name__)
@@ -1996,10 +1999,7 @@ class AgentRunner:
         params = raw.get("params")
         if not isinstance(params, dict):
             return False
-        status = params.get("status")
-        if not isinstance(status, dict):
-            return False
-        return status.get("type") == "idle"
+        return is_codex_app_server_idle_status(params.get("status"))
 
     async def _run_live_transport(
         self,
@@ -2121,12 +2121,19 @@ class AgentRunner:
                 if idle_timeout is not None:
                     idle_deadline = loop.time() + idle_timeout
                 raw_method = None
+                raw_status = None
                 if isinstance(event.metadata, dict):
                     raw = event.metadata.get("raw")
                     if isinstance(raw, dict):
                         method = raw.get("method")
                         if isinstance(method, str) and method:
                             raw_method = method
+                        params = raw.get("params")
+                        status = params.get("status") if isinstance(params, dict) else None
+                        if isinstance(status, str):
+                            raw_status = status
+                        elif isinstance(status, dict):
+                            raw_status = json.dumps(status, ensure_ascii=False, sort_keys=True)[:240]
                 self._log_runtime_event(
                     "runtime_event_observed",
                     thread_id=thread_id,
@@ -2138,6 +2145,7 @@ class AgentRunner:
                         "kind": event.kind,
                         "contentPreview": (event.content or "")[:120],
                         "rawMethod": raw_method,
+                        "rawStatus": raw_status,
                     },
                 )
                 if event.kind == "turn_error":
@@ -2593,6 +2601,7 @@ class AgentRunner:
             token_ref=token_ref if isinstance(token_ref, str) and token_ref else None,
             requested_model=self._agent_requested_model(session.agent_name),
             requested_effort=self._agent_requested_effort(session.agent_name),
+            bypass_permissions=session.bypass_permissions,
             gateway_metadata=gateway_metadata,
             env=dict(launch.env),
             cwd=str(self._prepare_helper_workspace(

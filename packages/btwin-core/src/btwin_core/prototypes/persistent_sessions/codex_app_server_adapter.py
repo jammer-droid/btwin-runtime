@@ -24,6 +24,18 @@ _RequestId = int | str
 _RequestKey = str
 
 
+def is_codex_app_server_idle_status(status: Any) -> bool:
+    if isinstance(status, str):
+        return status == "idle"
+    if not isinstance(status, dict):
+        return False
+    for key in ("type", "status", "state"):
+        value = status.get(key)
+        if value == "idle":
+            return True
+    return False
+
+
 class CodexAppServerPersistentAdapter(PersistentSessionAdapter):
     provider = "codex-app-server"
     capability = "live_persistent"
@@ -58,6 +70,7 @@ class CodexAppServerPersistentAdapter(PersistentSessionAdapter):
         self._requested_effort: str | None = None
         self._effective_model: str | None = None
         self._effective_effort: str | None = None
+        self._auto_approve_requests = False
         self._last_command: list[str] = []
         self._stderr_lines: list[str] = []
         self._closed = False
@@ -74,6 +87,7 @@ class CodexAppServerPersistentAdapter(PersistentSessionAdapter):
         self._closed = False
         self._requested_model = self._resolve_requested_value(config, "model")
         self._requested_effort = self._resolve_requested_value(config, "effort")
+        self._auto_approve_requests = bool(config.options.get("auto_approve_requests"))
         command = self._build_launch_command(config)
         self._last_command = command
 
@@ -282,6 +296,10 @@ class CodexAppServerPersistentAdapter(PersistentSessionAdapter):
                     )
                     continue
 
+                if self._is_server_request(payload):
+                    await self._handle_server_request(payload)
+                    continue
+
                 response_key = self._request_id_key(payload.get("id"))
                 if response_key is not None:
                     future = self._pending_responses.pop(response_key, None)
@@ -434,6 +452,88 @@ class CodexAppServerPersistentAdapter(PersistentSessionAdapter):
 
         return SessionEvent(kind="unsupported", content=method, metadata=metadata)
 
+    def _is_server_request(self, payload: dict[str, Any]) -> bool:
+        return self._request_id_key(payload.get("id")) is not None and isinstance(payload.get("method"), str)
+
+    async def _handle_server_request(self, payload: dict[str, Any]) -> None:
+        method = payload.get("method")
+        request_id = payload.get("id")
+        params = payload.get("params")
+        if method == "item/commandExecution/requestApproval":
+            decision = self._command_execution_approval_decision(params if isinstance(params, dict) else {})
+            await self._send_response(request_id, {"decision": decision})
+            await self._event_queue.put(
+                SessionEvent(
+                    kind="command_execution_approval",
+                    content=decision if isinstance(decision, str) else "accept",
+                    metadata={
+                        **self._runtime_debug_metadata(),
+                        "provider": self.provider,
+                        "raw": payload,
+                        "auto_approved": self._auto_approve_requests,
+                    },
+                )
+            )
+            return
+        if method == "execCommandApproval":
+            decision = "approved" if self._auto_approve_requests else "denied"
+            await self._send_response(request_id, {"decision": decision})
+            await self._event_queue.put(
+                SessionEvent(
+                    kind="command_execution_approval",
+                    content=decision,
+                    metadata={
+                        **self._runtime_debug_metadata(),
+                        "provider": self.provider,
+                        "raw": payload,
+                        "auto_approved": self._auto_approve_requests,
+                    },
+                )
+            )
+            return
+        if method == "mcpServer/elicitation/request":
+            # Elicitation asks for interactive user input. Managed live transports
+            # are intentionally non-interactive, so answer with a protocol-level
+            # decline instead of surfacing this as an unsupported JSON-RPC method.
+            action = "decline"
+            await self._send_response(request_id, {"action": action, "content": None, "_meta": None})
+            await self._event_queue.put(
+                SessionEvent(
+                    kind="mcp_elicitation_response",
+                    content=action,
+                    metadata={
+                        **self._runtime_debug_metadata(),
+                        "provider": self.provider,
+                        "raw": payload,
+                    },
+                )
+            )
+            return
+        await self._send_response(
+            request_id,
+            {},
+            error={"code": -32601, "message": f"Unsupported server request: {method}"},
+        )
+        await self._event_queue.put(
+            SessionEvent(
+                kind="server_request_unsupported",
+                content=method if isinstance(method, str) else None,
+                metadata={
+                    **self._runtime_debug_metadata(),
+                    "provider": self.provider,
+                    "raw": payload,
+                },
+            )
+        )
+
+    def _command_execution_approval_decision(self, params: dict[str, Any]) -> object:
+        available = params.get("availableDecisions")
+        if not self._auto_approve_requests:
+            return "decline"
+        if isinstance(available, list) and "accept" not in available and "acceptForSession" in available:
+            return "acceptForSession"
+        return "accept"
+
     def _extract_output_text(self, content: Any) -> str | None:
         if not isinstance(content, list):
             return None
@@ -479,6 +579,26 @@ class CodexAppServerPersistentAdapter(PersistentSessionAdapter):
             await drained
 
         return await asyncio.wait_for(future, timeout=self._start_timeout)
+
+    async def _send_response(
+        self,
+        request_id: object,
+        result: dict[str, Any],
+        *,
+        error: dict[str, Any] | None = None,
+    ) -> None:
+        process = self._require_process()
+        if process.stdin is None:
+            raise RuntimeError("codex app-server stdin is unavailable")
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id}
+        if error is not None:
+            payload["error"] = error
+        else:
+            payload["result"] = result
+        process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
+        drained = process.stdin.drain()
+        if asyncio.iscoroutine(drained):
+            await drained
 
     async def _send_notification(self, method: str, params: dict[str, Any]) -> None:
         process = self._require_process()

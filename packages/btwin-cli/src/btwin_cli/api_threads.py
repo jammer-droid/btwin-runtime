@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ from btwin_core.context_core import ContextCore
 from btwin_core.delegation_engine import (
     DelegationAssignment,
     build_delegation_assignment,
+    build_subagent_spawn_packet,
     build_delegation_resume_packet,
     build_delegation_resume_token,
     default_phase_participants,
@@ -291,6 +293,7 @@ def _delegate_dispatch_content(
     phase_cycle_state: PhaseCycleState,
     heading: str = "Delegation Start",
     human_summary: str | None = None,
+    spawn_packet: dict[str, object] | None = None,
 ) -> tuple[str, str]:
     target_role = assignment.target_role or "unassigned"
     resolved_agent = assignment.resolved_agent or "unassigned"
@@ -306,6 +309,12 @@ def _delegate_dispatch_content(
     )
     if human_summary:
         content += f"\nHuman input: {human_summary}\n"
+    if assignment.fulfillment_mode == "managed_agent_subagent":
+        content += "\nSub-agent dispatch: spawn the requested B-TWIN managed Codex sub-agent and pass through this packet.\n"
+    if spawn_packet is not None:
+        content += "\n```json\n"
+        content += json.dumps(spawn_packet, ensure_ascii=False, indent=2)
+        content += "\n```\n"
     tldr = f"delegate {phase_cycle_state.phase_name} -> {resolved_agent}"
     return content, tldr
 
@@ -336,16 +345,6 @@ def _dispatch_delegate_assignment(
     if assignment.status != "running" or not assignment.resolved_agent:
         return False, None
 
-    validation = _validate_delegate_direct_message(
-        thread=thread,
-        protocol=protocol,
-        from_agent="btwin",
-        target_agents=[assignment.resolved_agent],
-        phase_name=phase_cycle_state.phase_name,
-    )
-    if validation is not None:
-        return False, validation
-
     client_message_id = _delegate_dispatch_client_message_id(
         thread_id=thread_id,
         phase_cycle_state=phase_cycle_state,
@@ -359,6 +358,12 @@ def _dispatch_delegate_assignment(
         phase_cycle_state=phase_cycle_state,
         heading="Delegation Resume" if human_summary else "Delegation Start",
         human_summary=human_summary,
+        spawn_packet=build_subagent_spawn_packet(
+            thread=thread,
+            protocol=protocol,
+            phase_cycle_state=phase_cycle_state,
+            assignment=assignment,
+        ),
     )
     try:
         msg = thread_store.send_message(
@@ -407,10 +412,18 @@ def _resolve_delegate_phase(
 
 def _delegation_state_from_assignment(
     *,
+    thread: dict[str, object],
+    protocol: Protocol,
     thread_id: str,
     phase_cycle_state: PhaseCycleState,
     assignment: DelegationAssignment,
 ) -> DelegationState:
+    spawn_packet = build_subagent_spawn_packet(
+        thread=thread,
+        protocol=protocol,
+        phase_cycle_state=phase_cycle_state,
+        assignment=assignment,
+    )
     return DelegationState(
         thread_id=thread_id,
         status=assignment.status,
@@ -422,6 +435,12 @@ def _delegation_state_from_assignment(
         resolved_agent=assignment.resolved_agent,
         required_action=assignment.required_action,
         expected_output=assignment.expected_output,
+        fulfillment_mode=assignment.fulfillment_mode,
+        parent_executor=assignment.parent_executor,
+        subagent_profile=assignment.subagent_profile,
+        subagent_type=assignment.subagent_type,
+        executor_id=assignment.executor_id,
+        spawn_packet=spawn_packet,
         reason_blocked=assignment.reason_blocked,
     )
 
@@ -464,6 +483,11 @@ class ContributionSubmitRequest(BaseModel):
     phase: str
     content: str
     tldr: str
+    executor_type: str | None = Field(default=None, alias="executorType")
+    executor_id: str | None = Field(default=None, alias="executorId")
+    subagent_profile: str | None = Field(default=None, alias="subagentProfile")
+    parent_executor: str | None = Field(default=None, alias="parentExecutor")
+    dispatch_id: str | None = Field(default=None, alias="dispatchId")
 
 
 class AdvancePhaseRequest(BaseModel):
@@ -823,11 +847,14 @@ def create_threads_router(
             contributions=contributions,
         )
         state = _delegation_state_from_assignment(
+            thread=thread,
+            protocol=protocol,
             thread_id=thread_id,
             phase_cycle_state=phase_cycle_state,
             assignment=assignment,
         )
-        if assignment.status == "running":
+        dispatched = False
+        if assignment.status == "running" and assignment.fulfillment_mode in {"registered_agent", "managed_agent_subagent"}:
             dispatched, dispatch_violation = _dispatch_delegate_assignment(
                 thread_store,
                 thread=thread,
@@ -1019,12 +1046,14 @@ def create_threads_router(
             contributions=next_contributions,
         )
         next_state = _delegation_state_from_assignment(
+            thread=updated_thread,
+            protocol=protocol,
             thread_id=thread_id,
             phase_cycle_state=next_cycle_state,
             assignment=next_assignment,
         ).model_copy(update={"stop_reason": next_assignment.stop_reason, "last_resume_token": None})
 
-        if next_assignment.status == "running":
+        if next_assignment.status == "running" and next_assignment.fulfillment_mode in {"registered_agent", "managed_agent_subagent"}:
             dispatched, dispatch_violation = _dispatch_delegate_assignment(
                 thread_store,
                 thread=updated_thread,
@@ -1067,6 +1096,11 @@ def create_threads_router(
             phase=req.phase,
             content=req.content,
             tldr=req.tldr,
+            executor_type=req.executor_type,
+            executor_id=req.executor_id,
+            subagent_profile=req.subagent_profile,
+            parent_executor=req.parent_executor,
+            dispatch_id=req.dispatch_id,
         )
         if contrib is None:
             raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found")

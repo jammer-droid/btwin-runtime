@@ -420,6 +420,11 @@ class ThreadStore:
         tldr: str,
         *,
         source_message_id: str | None = None,
+        executor_type: str | None = None,
+        executor_id: str | None = None,
+        subagent_profile: str | None = None,
+        parent_executor: str | None = None,
+        dispatch_id: str | None = None,
     ) -> dict | None:
         meta = self._load_meta(thread_id)
         if meta is None:
@@ -444,6 +449,20 @@ class ThreadStore:
         }
         if source_message_id:
             contrib["source_message_id"] = source_message_id
+        if dispatch_id:
+            contrib["dispatch_id"] = dispatch_id
+        executor = {
+            key: value
+            for key, value in {
+                "type": executor_type,
+                "id": executor_id,
+                "subagent_profile": subagent_profile,
+                "parent_executor": parent_executor,
+            }.items()
+            if value
+        }
+        if executor:
+            contrib["executor"] = executor
 
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         filename = f"{agent_name}-{phase}-{timestamp}.md"

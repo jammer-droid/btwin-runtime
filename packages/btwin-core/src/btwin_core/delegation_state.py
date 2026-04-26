@@ -29,6 +29,12 @@ class DelegationState(BaseModel):
     resolved_agent: str | None = None
     required_action: str | None = None
     expected_output: str | None = None
+    fulfillment_mode: str = "registered_agent"
+    parent_executor: str | None = None
+    subagent_profile: str | None = None
+    subagent_type: str | None = None
+    executor_id: str | None = None
+    spawn_packet: dict[str, object] | None = None
     reason_blocked: str | None = None
     last_dispatch_message_id: str | None = None
     last_result_message_id: str | None = None
@@ -43,6 +49,12 @@ _COMPLETED_ACTIVE_ASSIGNMENT_FIELDS = {
     "resolved_agent",
     "required_action",
     "expected_output",
+    "fulfillment_mode",
+    "parent_executor",
+    "subagent_profile",
+    "subagent_type",
+    "executor_id",
+    "spawn_packet",
     "reason_blocked",
     "last_resume_token",
 }

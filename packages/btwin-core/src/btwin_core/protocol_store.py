@@ -9,6 +9,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from btwin_core.subagent_fulfillment import RoleFulfillment, SubagentProfile
+
 logger = logging.getLogger(__name__)
 SUPPORTED_PROTOCOL_GUARDS = {
     "contribution_required",
@@ -196,6 +198,8 @@ class Protocol(BaseModel):
     outcome_policies: list[ProtocolOutcomePolicy] = []
     transitions: list[ProtocolTransition] = []
     outcomes: list[str] = []
+    role_fulfillment: dict[str, RoleFulfillment] = Field(default_factory=dict)
+    subagent_profiles: dict[str, SubagentProfile] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_authoring_references(self) -> "Protocol":
@@ -324,6 +328,8 @@ class ProtocolAuthoringDocument(BaseModel):
     outcome_policies: list[ProtocolOutcomePolicy] = []
     transitions: list[ProtocolTransition] = []
     outcomes: list[str] = []
+    role_fulfillment: dict[str, RoleFulfillment] = Field(default_factory=dict)
+    subagent_profiles: dict[str, SubagentProfile] = Field(default_factory=dict)
 
 
 class ProtocolValidationLayerError(ValueError):

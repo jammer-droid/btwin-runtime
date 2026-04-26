@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,11 @@ class _FakeStream:
 
 
 class _FakeStdin:
+    def __init__(self) -> None:
+        self.writes: list[bytes] = []
+
     def write(self, _data: bytes) -> None:
+        self.writes.append(_data)
         return None
 
     async def drain(self) -> None:
@@ -94,6 +99,81 @@ def test_live_transport_session_config_carries_cwd() -> None:
     assert config.options["env"] == {"FOO": "bar"}
     assert config.options["cwd"] == "/tmp/project-root"
     assert config.options["config_overrides"] == {"developer_instructions": "Stay brief."}
+
+
+def test_live_transport_session_config_carries_auto_approve_flag() -> None:
+    launch_context = TransportLaunchContext(
+        provider_name="codex",
+        transport_mode="live_process_transport",
+        bypass_permissions=True,
+    )
+
+    config = launch_context.build_session_config()
+
+    assert config.options["auto_approve_requests"] is True
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_auto_approves_command_execution_request() -> None:
+    adapter = CodexAppServerPersistentAdapter()
+    process = _FakeProcess()
+    adapter._process = process
+    adapter._auto_approve_requests = True
+
+    await adapter._handle_server_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "item/commandExecution/requestApproval",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "availableDecisions": ["accept", "decline"],
+            },
+        }
+    )
+
+    payload = json.loads(process.stdin.writes[-1].decode("utf-8"))
+    assert payload == {"jsonrpc": "2.0", "id": 42, "result": {"decision": "accept"}}
+    event = await adapter._event_queue.get()
+    assert event.kind == "command_execution_approval"
+    assert event.content == "accept"
+    assert event.metadata["auto_approved"] is True
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_declines_mcp_elicitation_request() -> None:
+    adapter = CodexAppServerPersistentAdapter()
+    process = _FakeProcess()
+    adapter._process = process
+
+    await adapter._handle_server_request(
+        {
+            "jsonrpc": "2.0",
+            "id": "elicit-1",
+            "method": "mcpServer/elicitation/request",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "serverName": "btwin",
+                "mode": "form",
+                "message": "Need interactive input",
+                "requestedSchema": {"type": "object", "properties": {}},
+                "_meta": None,
+            },
+        }
+    )
+
+    payload = json.loads(process.stdin.writes[-1].decode("utf-8"))
+    assert payload == {
+        "jsonrpc": "2.0",
+        "id": "elicit-1",
+        "result": {"action": "decline", "content": None, "_meta": None},
+    }
+    event = await adapter._event_queue.get()
+    assert event.kind == "mcp_elicitation_response"
+    assert event.content == "decline"
 
 
 @pytest.mark.asyncio

@@ -236,6 +236,74 @@ async def test_live_transport_treats_codex_idle_status_as_turn_complete(
 
 
 @pytest.mark.asyncio
+async def test_live_transport_treats_codex_string_idle_status_as_turn_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    threads_dir = data_dir / "threads"
+    threads_dir.mkdir(parents=True)
+
+    runner = AgentRunner(
+        ThreadStore(threads_dir),
+        ProtocolStore(data_dir / "protocols"),
+        AgentStore(data_dir),
+        EventBus(),
+        config=BTwinConfig(data_dir=data_dir),
+    )
+
+    adapter = _FakeLiveTransportAdapter(
+        [
+            SessionEvent(kind="turn_started", content="turn-1"),
+            SessionEvent(kind="text_delta", content="BTWIN STRING IDLE OK"),
+            SessionEvent(
+                kind="unsupported",
+                content="thread/status/changed",
+                metadata={
+                    "provider": "codex-app-server",
+                    "raw": {
+                        "method": "thread/status/changed",
+                        "params": {"status": "idle"},
+                    },
+                },
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "btwin_core.agent_runner.build_transport_for_provider",
+        lambda *args, **kwargs: _FakeLiveTransport(adapter),
+    )
+
+    session = RuntimeSession(
+        thread_id="thread-123",
+        agent_name="agent-1",
+        provider="codex",
+        transport_mode="live_process_transport",
+    )
+    launch = LaunchResolution(
+        provider=CodexProvider(),
+        auth=ResolvedLaunchAuth(
+            provider_name="codex",
+            mode="cli_environment",
+        ),
+        env={},
+        metadata={},
+    )
+
+    result = await runner._run_live_transport(
+        session,
+        "prompt text",
+        launch,
+        thread_id="thread-123",
+        agent_name="agent-1",
+    )
+
+    assert result.ok is True
+    assert result.response_text == "BTWIN STRING IDLE OK"
+    assert adapter.closed is False
+
+
+@pytest.mark.asyncio
 async def test_live_transport_collects_commentary_and_final_outputs_from_completed_messages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

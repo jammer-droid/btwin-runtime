@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict
@@ -11,6 +12,7 @@ from btwin_core.phase_cycle import PhaseCycleState
 from btwin_core.phase_cycle_engine import build_phase_cycle_context_core, resolve_phase_cycle_current_step
 from btwin_core.protocol_flow import ProtocolNextPlan, describe_next, resolve_protocol_phase
 from btwin_core.protocol_store import Protocol, ensure_protocol_compiled
+from btwin_core.subagent_fulfillment import RoleFulfillment, SubagentProfile
 
 DEFAULT_MAX_AUTO_ITERATIONS = 5
 
@@ -24,6 +26,11 @@ class DelegationAssignment(BaseModel):
     resolved_agent: str | None = None
     required_action: str | None = None
     expected_output: str | None = None
+    fulfillment_mode: str = "registered_agent"
+    parent_executor: str | None = None
+    subagent_profile: str | None = None
+    subagent_type: str | None = None
+    executor_id: str | None = None
     reason_blocked: str | None = None
     stop_reason: str | None = None
 
@@ -107,7 +114,104 @@ def build_delegation_assignment(
             stop_reason="missing_target_role",
         )
 
-    resolved_agent = (role_bindings or {}).get(target_role)
+    fulfillment = _role_fulfillment(compiled_protocol, target_role)
+    if fulfillment.mode == "foreground_subagent":
+        return DelegationAssignment(
+            status="blocked",
+            next_phase=next_plan.next_phase,
+            target_role=target_role,
+            required_action=next_plan.suggested_action,
+            expected_output=expected_output,
+            fulfillment_mode=fulfillment.mode,
+            parent_executor=fulfillment.parent or "foreground",
+            subagent_profile=fulfillment.profile,
+            subagent_type=fulfillment.subagent_type,
+            reason_blocked="foreground_subagent_requires_managed_parent",
+            stop_reason="foreground_subagent_requires_managed_parent",
+        )
+    if fulfillment.mode == "managed_agent_subagent":
+        profile_name = fulfillment.profile
+        if not profile_name or profile_name not in compiled_protocol.subagent_profiles:
+            return DelegationAssignment(
+                status="blocked",
+                next_phase=next_plan.next_phase,
+                target_role=target_role,
+                required_action=next_plan.suggested_action,
+                expected_output=expected_output,
+                fulfillment_mode=fulfillment.mode,
+                parent_executor=fulfillment.parent,
+                subagent_profile=profile_name,
+                subagent_type=fulfillment.subagent_type,
+                reason_blocked="missing_subagent_profile",
+                stop_reason="missing_subagent_profile",
+            )
+        parent_executor = fulfillment.parent or fulfillment.agent or (role_bindings or {}).get(target_role)
+        if not parent_executor:
+            return DelegationAssignment(
+                status="blocked",
+                next_phase=next_plan.next_phase,
+                target_role=target_role,
+                required_action=next_plan.suggested_action,
+                expected_output=expected_output,
+                fulfillment_mode=fulfillment.mode,
+                subagent_profile=profile_name,
+                subagent_type=fulfillment.subagent_type,
+                reason_blocked="missing_parent_executor",
+                stop_reason="missing_parent_executor",
+            )
+        if _runtime_recovery_failed(runtime_session):
+            return DelegationAssignment(
+                status="blocked",
+                next_phase=next_plan.next_phase,
+                target_role=target_role,
+                resolved_agent=parent_executor,
+                required_action=next_plan.suggested_action,
+                expected_output=expected_output,
+                fulfillment_mode=fulfillment.mode,
+                parent_executor=parent_executor,
+                subagent_profile=profile_name,
+                subagent_type=fulfillment.subagent_type,
+                reason_blocked="failed_recovery",
+                stop_reason="failed_recovery",
+            )
+        if _loop_iteration_limit_reached(
+            loop_iteration=loop_iteration,
+            max_auto_iterations=max_auto_iterations,
+        ):
+            return DelegationAssignment(
+                status="failed",
+                next_phase=next_plan.next_phase,
+                target_role=target_role,
+                resolved_agent=parent_executor,
+                required_action=next_plan.suggested_action,
+                expected_output=expected_output,
+                fulfillment_mode=fulfillment.mode,
+                parent_executor=parent_executor,
+                subagent_profile=profile_name,
+                subagent_type=fulfillment.subagent_type,
+                stop_reason="max_auto_iterations_reached",
+            )
+        return DelegationAssignment(
+            status="running",
+            next_phase=next_plan.next_phase,
+            target_role=target_role,
+            resolved_agent=parent_executor,
+            required_action=next_plan.suggested_action,
+            expected_output=expected_output,
+            fulfillment_mode=fulfillment.mode,
+            parent_executor=parent_executor,
+            subagent_profile=profile_name,
+            subagent_type=fulfillment.subagent_type,
+            executor_id=_dispatch_executor_id(
+                thread_id=str(thread.get("thread_id") or ""),
+                phase_name=phase_cycle_state.phase_name,
+                cycle_index=phase_cycle_state.cycle_index,
+                role=target_role,
+                profile=profile_name,
+            ),
+        )
+
+    resolved_agent = fulfillment.agent or (role_bindings or {}).get(target_role)
     if not resolved_agent:
         return DelegationAssignment(
             status="blocked",
@@ -115,6 +219,7 @@ def build_delegation_assignment(
             target_role=target_role,
             required_action=next_plan.suggested_action,
             expected_output=expected_output,
+            fulfillment_mode=fulfillment.mode,
             reason_blocked="missing_role_binding",
             stop_reason="missing_role_binding",
         )
@@ -126,6 +231,7 @@ def build_delegation_assignment(
             resolved_agent=resolved_agent,
             required_action=next_plan.suggested_action,
             expected_output=expected_output,
+            fulfillment_mode=fulfillment.mode,
             reason_blocked="failed_recovery",
             stop_reason="failed_recovery",
         )
@@ -140,6 +246,7 @@ def build_delegation_assignment(
             resolved_agent=resolved_agent,
             required_action=next_plan.suggested_action,
             expected_output=expected_output,
+            fulfillment_mode=fulfillment.mode,
             stop_reason="max_auto_iterations_reached",
         )
 
@@ -150,7 +257,115 @@ def build_delegation_assignment(
         resolved_agent=resolved_agent,
         required_action=next_plan.suggested_action,
         expected_output=expected_output,
+        fulfillment_mode=fulfillment.mode,
     )
+
+
+def build_subagent_spawn_packet(
+    *,
+    thread: dict[str, object],
+    protocol: Protocol,
+    phase_cycle_state: PhaseCycleState,
+    assignment: DelegationAssignment,
+) -> dict[str, object] | None:
+    if assignment.fulfillment_mode != "managed_agent_subagent":
+        return None
+    if not assignment.target_role or not assignment.subagent_profile:
+        return None
+    compiled_protocol = ensure_protocol_compiled(protocol)
+    profile = compiled_protocol.subagent_profiles.get(assignment.subagent_profile)
+    if profile is None:
+        return None
+
+    thread_id = str(thread.get("thread_id") or "")
+    phase_name = phase_cycle_state.phase_name
+    parent_executor = assignment.parent_executor or assignment.resolved_agent
+    if not parent_executor:
+        return None
+    executor_id = assignment.executor_id or _dispatch_executor_id(
+        thread_id=thread_id,
+        phase_name=phase_name,
+        cycle_index=phase_cycle_state.cycle_index,
+        role=assignment.target_role,
+        profile=assignment.subagent_profile,
+    )
+    command = _completion_command(
+        thread_id=thread_id,
+        agent=parent_executor,
+        phase=phase_name,
+        executor_type=assignment.fulfillment_mode,
+        executor_id=executor_id,
+        subagent_profile=assignment.subagent_profile,
+        parent_executor=parent_executor,
+        dispatch_id=executor_id,
+    )
+    instructions = _managed_subagent_instructions(
+        thread_id=thread_id,
+        phase_name=phase_name,
+        role=assignment.target_role,
+        profile_name=assignment.subagent_profile,
+        profile=profile,
+        parent_executor=parent_executor,
+        completion_command=command,
+    )
+    codex_spawn_request: dict[str, object] = {
+        "agent_type": assignment.subagent_type or "default",
+        "message": instructions,
+        "fork_context": False,
+    }
+    if profile.model:
+        codex_spawn_request["model"] = profile.model
+    if profile.reasoning_effort:
+        codex_spawn_request["reasoning_effort"] = profile.reasoning_effort
+    return {
+        "packet_type": "btwin.managed_agent_subagent.dispatch",
+        "version": 1,
+        "dispatch": {
+            "dispatch_id": executor_id,
+            "thread_id": thread_id,
+            "protocol": compiled_protocol.name,
+            "phase": phase_name,
+            "cycle_index": phase_cycle_state.cycle_index,
+            "role": assignment.target_role,
+            "required_action": assignment.required_action,
+            "expected_output": assignment.expected_output,
+            "fulfillment_mode": assignment.fulfillment_mode,
+            "parent_executor": parent_executor,
+            "subagent_type": assignment.subagent_type,
+            "profile": assignment.subagent_profile,
+            "status": "pending_result",
+        },
+        "executor": {
+            "executor_type": assignment.fulfillment_mode,
+            "executor_id": executor_id,
+            "parent_executor": parent_executor,
+            "suggested_contribution_agent": parent_executor,
+        },
+        "profile": _profile_payload(assignment.subagent_profile, profile),
+        "codex_adapter": {
+            "spawn_mechanism": "managed_parent_spawn_agent_tool",
+            "agents_toml_schema_status": "unverified",
+            "tool_policy_enforcement": "not_claimed",
+            "supported_spawn_fields": [
+                "agent_type",
+                "message",
+                "items",
+                "model",
+                "reasoning_effort",
+                "fork_context",
+            ],
+        },
+        "codex_spawn_request": codex_spawn_request,
+        "completion_contract": {
+            "result_shape": "btwin_protocol_contribution",
+            "command": command,
+            "blocked_reporting": (
+                "Return a blocked summary to the foreground operator if the "
+                "contribution cannot be recorded."
+            ),
+        },
+        "instructions": instructions,
+    }
 
 
 def build_delegate_role_bindings(
@@ -168,6 +383,111 @@ def build_delegate_role_bindings(
         if isinstance(step.role, str) and step.role and isinstance(participant, str) and participant:
             bindings[step.role] = participant
     return bindings
+
+
+def _role_fulfillment(protocol: Protocol, role: str) -> RoleFulfillment:
+    return protocol.role_fulfillment.get(role) or RoleFulfillment()
+
+
+def _dispatch_executor_id(
+    *,
+    thread_id: str,
+    phase_name: str,
+    cycle_index: int,
+    role: str,
+    profile: str,
+) -> str:
+    return ":".join([thread_id, phase_name, str(cycle_index), role, profile])
+
+
+def _completion_command(
+    *,
+    thread_id: str,
+    agent: str,
+    phase: str,
+    executor_type: str | None = None,
+    executor_id: str | None = None,
+    subagent_profile: str | None = None,
+    parent_executor: str | None = None,
+    dispatch_id: str | None = None,
+) -> str:
+    parts = [
+        "btwin",
+        "contribution",
+        "submit",
+        "--thread",
+        shlex.quote(thread_id),
+        "--agent",
+        shlex.quote(agent),
+        "--phase",
+        shlex.quote(phase),
+        "--tldr",
+        shlex.quote("<summary>"),
+    ]
+    for option, value in (
+        ("--executor-type", executor_type),
+        ("--executor-id", executor_id),
+        ("--subagent-profile", subagent_profile),
+        ("--parent-executor", parent_executor),
+        ("--dispatch-id", dispatch_id),
+    ):
+        if value:
+            parts.extend([option, shlex.quote(value)])
+    return " ".join(parts)
+
+
+def _profile_payload(name: str, profile: SubagentProfile) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "name": name,
+        "description": profile.description,
+        "persona": profile.persona,
+        "tools": {
+            "policy_level": "declared",
+            "allow": list(profile.tools.allow),
+            "deny": list(profile.tools.deny),
+        },
+        "context": {"include": list(profile.context.include)},
+    }
+    if profile.model:
+        payload["model"] = profile.model
+    if profile.reasoning_effort:
+        payload["reasoning_effort"] = profile.reasoning_effort
+    return payload
+
+
+def _managed_subagent_instructions(
+    *,
+    thread_id: str,
+    phase_name: str,
+    role: str,
+    profile_name: str,
+    profile: SubagentProfile,
+    parent_executor: str,
+    completion_command: str,
+) -> str:
+    parts = [
+        "You are a B-TWIN managed Codex sub-agent.",
+        f"Parent executor: {parent_executor}",
+        f"Thread: {thread_id}",
+        f"Phase: {phase_name}",
+        f"Role: {role}",
+        f"Profile: {profile_name}",
+    ]
+    if profile.persona:
+        parts.extend(["", "Persona:", profile.persona])
+    parts.extend(
+        [
+            "",
+            "Tool policy is declared by B-TWIN profile metadata; do not treat it as runtime enforcement unless Codex enforces it.",
+            "",
+            "Completion contract:",
+            completion_command,
+            "",
+            "Do not invent a separate B-TWIN agent identity; record the result through the parent executor identity and executor metadata above.",
+            "If blocked, return a concise blocked summary to the parent executor.",
+        ]
+    )
+    return "\n".join(parts)
 
 
 def default_phase_participants(

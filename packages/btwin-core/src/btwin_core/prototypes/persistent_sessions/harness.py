@@ -12,6 +12,7 @@ from btwin_core.prototypes.persistent_sessions.base import PersistentSessionAdap
 from btwin_core.prototypes.persistent_sessions.claude_adapter import ClaudePersistentAdapter
 from btwin_core.prototypes.persistent_sessions.codex_app_server_adapter import (
     CodexAppServerPersistentAdapter,
+    is_codex_app_server_idle_status,
 )
 from btwin_core.prototypes.persistent_sessions.codex_adapter import CodexPersistentAdapter
 from btwin_core.prototypes.persistent_sessions.types import (
@@ -304,10 +305,7 @@ class PrototypeHarness:
         params = raw.get("params")
         if not isinstance(params, dict):
             return False
-        status = params.get("status")
-        if not isinstance(status, dict):
-            return False
-        return status.get("type") == "idle"
+        return is_codex_app_server_idle_status(params.get("status"))
 
     def _make_codex_idle_fallback_completion(self, started_turn_id: str | None) -> SessionEvent:
         return SessionEvent(
