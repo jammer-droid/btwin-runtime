@@ -651,6 +651,69 @@ def test_delegate_wait_outputs_resume_packet(tmp_path, monkeypatch):
     assert "delegate respond" in payload["resume"]["suggested_next_command"]
 
 
+def test_delegate_status_and_wait_include_block_details(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / "custom-runtime-data"
+    thread_store = ThreadStore(data_dir / "threads")
+    protocol_store = ProtocolStore(data_dir / "protocols")
+    protocol_store.save_protocol(
+        compile_protocol_definition(
+            {
+                "name": "blocked-details",
+                "phases": [
+                    {
+                        "name": "review",
+                        "actions": ["contribute"],
+                        "template": [{"section": "findings", "required": True}],
+                    }
+                ],
+            }
+        )
+    )
+    thread = thread_store.create_thread(
+        topic="Blocked details thread",
+        protocol="blocked-details",
+        participants=["moderator"],
+        initial_phase="review",
+    )
+    DelegationStore(data_dir).write(
+        DelegationState(
+            thread_id=thread["thread_id"],
+            status="blocked",
+            current_phase="review",
+            target_role="reviewer",
+            resolved_agent="planner",
+            required_action="submit_contribution",
+            expected_output="review contribution",
+            reason_blocked="role_fulfillment_participant_missing",
+            stop_reason="role_fulfillment_participant_missing",
+            block_details={
+                "error": "role_fulfillment_participant_missing",
+                "role": "reviewer",
+                "phase": "review",
+                "participant_kind": "parent",
+                "participant": "planner",
+                "hint": "Add --participant planner or update role_fulfillment for role 'reviewer'.",
+            },
+        )
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    status_result = runner.invoke(app, ["delegate", "status", "--thread", thread["thread_id"], "--json"])
+    assert status_result.exit_code == 0, status_result.output
+    status_payload = _parse_json_output(status_result.output)
+    assert status_payload["block_details"]["participant"] == "planner"
+    assert "Add --participant planner" in status_payload["resolution_hint"]
+
+    wait_result = runner.invoke(app, ["delegate", "wait", "--thread", thread["thread_id"], "--json"])
+    assert wait_result.exit_code == 0, wait_result.output
+    wait_payload = _parse_json_output(wait_result.output)
+    assert wait_payload["resume"]["block_details"]["role"] == "reviewer"
+    assert "Add --participant planner" in wait_payload["resume"]["resolution_hint"]
+
+
 def test_delegate_respond_reenters_loop_after_outcome(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     data_dir = tmp_path / "custom-runtime-data"

@@ -1953,6 +1953,27 @@ def _render_detail_agent_session_rows(
     return rows
 
 
+def _delegation_block_detail_lines(delegation_status: dict[str, object] | None) -> list[str]:
+    if not isinstance(delegation_status, dict):
+        return []
+    if str(delegation_status.get("status") or "").strip().lower() != "blocked":
+        return []
+    lines: list[str] = []
+    reason = str(delegation_status.get("reason_blocked") or "").strip()
+    if reason:
+        lines.append(f"Delegation blocked: {reason}")
+    details = delegation_status.get("block_details")
+    if isinstance(details, dict):
+        role = str(details.get("role") or "").strip()
+        participant = str(details.get("participant") or "").strip()
+        hint = str(details.get("hint") or "").strip()
+        if role or participant:
+            lines.append(f"Missing fulfillment participant: role={role or '-'} participant={participant or '-'}")
+        if hint:
+            lines.append(f"Resolution hint: {hint}")
+    return lines
+
+
 def _humanize_hud_action(action: object) -> str:
     return str(action or "").strip().replace("_", " ")
 
@@ -4437,6 +4458,9 @@ def _render_hud_thread_detail_renderable(
     )
     if not agent_rows:
         agent_rows = ["No agent sessions"]
+    block_lines = _delegation_block_detail_lines(delegation_status)
+    if block_lines:
+        agent_rows.extend([Text(""), *block_lines])
 
     body = Layout(name="thread-detail-body")
     body.split_column(

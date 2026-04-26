@@ -36,6 +36,7 @@ class DelegationState(BaseModel):
     executor_id: str | None = None
     spawn_packet: dict[str, object] | None = None
     reason_blocked: str | None = None
+    block_details: dict[str, object] | None = None
     last_dispatch_message_id: str | None = None
     last_result_message_id: str | None = None
     last_resume_token: str | None = None
@@ -56,6 +57,7 @@ _COMPLETED_ACTIVE_ASSIGNMENT_FIELDS = {
     "executor_id",
     "spawn_packet",
     "reason_blocked",
+    "block_details",
     "last_resume_token",
 }
 
@@ -65,4 +67,8 @@ def delegation_status_payload(state: DelegationState) -> dict[str, object]:
     if state.status == "completed":
         for field_name in _COMPLETED_ACTIVE_ASSIGNMENT_FIELDS:
             payload.pop(field_name, None)
+    elif state.block_details:
+        hint = state.block_details.get("hint")
+        if isinstance(hint, str) and hint:
+            payload["resolution_hint"] = hint
     return payload

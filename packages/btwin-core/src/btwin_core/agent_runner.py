@@ -1734,6 +1734,7 @@ class AgentRunner:
                     update={
                         "status": "blocked",
                         "reason_blocked": reason,
+                        "block_details": dict(violation),
                         "stop_reason": reason,
                         "last_result_message_id": message_id,
                         "updated_at": _now_iso(),

@@ -426,6 +426,94 @@ def test_confirmation_final_answer_does_not_supersede_existing_valid_contributio
     assert state.resolved_agent == "developer"
 
 
+def test_helper_result_blocked_by_missing_role_fulfillment_participant_stores_details(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    runner, thread_store, protocol_store, delegation_store, phase_cycle_store = _build_runner(data_dir)
+
+    protocol_store.save_protocol(
+        compile_protocol_definition(
+            {
+                "name": "delegate-missing-parent",
+                "phases": [
+                    {
+                        "name": "plan",
+                        "actions": ["contribute"],
+                        "template": [{"section": "plan", "required": True}],
+                        "procedure": [{"role": "moderator", "action": "plan"}],
+                    },
+                    {
+                        "name": "review",
+                        "actions": ["contribute"],
+                        "template": [{"section": "findings", "required": True}],
+                        "procedure": [{"role": "reviewer", "action": "review"}],
+                    },
+                ],
+                "role_fulfillment": {
+                    "reviewer": {
+                        "mode": "managed_agent_subagent",
+                        "parent": "planner",
+                        "profile": "strict_reviewer",
+                        "subagent_type": "explorer",
+                    }
+                },
+                "subagent_profiles": {
+                    "strict_reviewer": {"description": "Review risks"},
+                },
+            }
+        )
+    )
+    thread = thread_store.create_thread(
+        topic="Missing planner auto advance",
+        protocol="delegate-missing-parent",
+        participants=["moderator"],
+        initial_phase="plan",
+        phase_participants=["moderator"],
+    )
+    phase_cycle_store.write(
+        PhaseCycleState.start(
+            thread_id=thread["thread_id"],
+            phase_name="plan",
+            procedure_steps=["plan"],
+        )
+    )
+    delegation_store.write(
+        DelegationState(
+            thread_id=thread["thread_id"],
+            status="running",
+            loop_iteration=1,
+            current_phase="plan",
+            current_cycle_index=1,
+            target_role="moderator",
+            resolved_agent="moderator",
+            required_action="submit_contribution",
+            expected_output="plan contribution",
+        )
+    )
+    saved_message = runner._save_agent_message(
+        thread["thread_id"],
+        "moderator",
+        "## plan\nReady.\n",
+        1,
+        message_phase="final_answer",
+        state_affecting=True,
+    )
+
+    runner._maybe_continue_delegation_from_saved_message(
+        thread["thread_id"],
+        "moderator",
+        saved_message,
+    )
+
+    state = delegation_store.read(thread["thread_id"])
+    assert state is not None
+    assert state.status == "blocked"
+    assert state.reason_blocked == "role_fulfillment_participant_missing"
+    assert state.block_details is not None
+    assert state.block_details["role"] == "reviewer"
+    assert state.block_details["participant"] == "planner"
+    assert "Add --participant planner" in str(state.block_details["hint"])
+
+
 def test_helper_result_blocks_when_runtime_recovery_has_failed(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     runner, thread_store, protocol_store, delegation_store, phase_cycle_store = _build_runner(data_dir)

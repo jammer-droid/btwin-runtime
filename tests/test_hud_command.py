@@ -143,6 +143,47 @@ def test_hud_thread_detail_shows_managed_subagent_task_state(tmp_path, monkeypat
     assert "task=spawn:strict_reviewer" in text
 
 
+def test_hud_thread_detail_shows_delegation_block_hint(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    thread = thread_store.create_thread(
+        topic="HUD blocked delegation thread",
+        protocol="debate",
+        participants=["moderator"],
+        initial_phase="review",
+    )
+    DelegationStore(project_root / ".btwin").write(
+        DelegationState(
+            thread_id=thread["thread_id"],
+            status="blocked",
+            current_phase="review",
+            target_role="reviewer",
+            resolved_agent="planner",
+            required_action="submit_contribution",
+            expected_output="review contribution",
+            reason_blocked="role_fulfillment_participant_missing",
+            stop_reason="role_fulfillment_participant_missing",
+            block_details={
+                "error": "role_fulfillment_participant_missing",
+                "role": "reviewer",
+                "participant": "planner",
+                "hint": "Add --participant planner or update role_fulfillment for role 'reviewer'.",
+            },
+        )
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(project_root / ".btwin"))
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+
+    state = main._HudNavigatorState(selected_thread_id=thread["thread_id"])
+    renderable = main._render_hud_thread_detail_renderable(state, limit=20)
+    text = _renderable_to_text(renderable)
+
+    assert "role_fulfillment_participant_missing" in text
+    assert "Add --participant planner" in text
+
+
 def test_hud_thread_snapshot_shows_runtime_token_usage(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"

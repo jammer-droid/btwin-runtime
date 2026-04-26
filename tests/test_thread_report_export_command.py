@@ -252,6 +252,42 @@ def test_thread_report_renders_subagent_delegation_and_executor_metadata():
     assert "thread-1:review:1:reviewer:strict_reviewer" in html
 
 
+def test_thread_report_renders_delegation_block_details():
+    html = render_thread_report_html(
+        {
+            "thread": {
+                "thread_id": "thread-1",
+                "topic": "Blocked report",
+                "participants": [{"name": "moderator"}],
+            },
+            "status_summary": {},
+            "protocol": {},
+            "delegation_status": {
+                "status": "blocked",
+                "target_role": "reviewer",
+                "resolved_agent": "planner",
+                "reason_blocked": "role_fulfillment_participant_missing",
+                "block_details": {
+                    "role": "reviewer",
+                    "phase": "review",
+                    "participant": "planner",
+                    "participant_kind": "parent",
+                    "hint": "Add --participant planner or update role_fulfillment for role 'reviewer'.",
+                },
+            },
+            "contributions": [],
+            "messages": [],
+            "workflow_events": [],
+            "system_reports": [],
+        }
+    )
+
+    assert "Block hint" in html
+    assert "Add --participant planner" in html
+    assert "Missing participant" in html
+    assert "planner" in html
+
+
 def test_thread_report_command_uses_planned_positional_cli_shape(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"

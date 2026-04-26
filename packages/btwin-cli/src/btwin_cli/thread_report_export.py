@@ -382,6 +382,17 @@ def _render_delegation(snapshot: dict[str, object]) -> str:
         ("Stop reason", delegation.get("stop_reason")),
         ("Blocked reason", delegation.get("reason_blocked")),
     ]
+    block_details = _as_dict(delegation.get("block_details"))
+    if block_details:
+        fields.extend(
+            [
+                ("Block hint", block_details.get("hint")),
+                ("Missing role", block_details.get("role")),
+                ("Missing phase", block_details.get("phase")),
+                ("Missing participant kind", block_details.get("participant_kind")),
+                ("Missing participant", block_details.get("participant")),
+            ]
+        )
     spawn_packet = _as_dict(delegation.get("spawn_packet"))
     codex_adapter = _as_dict(spawn_packet.get("codex_adapter"))
     if codex_adapter:

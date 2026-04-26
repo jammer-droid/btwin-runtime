@@ -696,6 +696,12 @@ def build_delegation_resume_packet(
         resume["valid_outcomes"] = list(valid_outcomes)
     if state.reason_blocked:
         resume["reason_blocked"] = state.reason_blocked
+    block_details = getattr(state, "block_details", None)
+    if isinstance(block_details, dict) and block_details:
+        resume["block_details"] = dict(block_details)
+        hint = block_details.get("hint")
+        if isinstance(hint, str) and hint:
+            resume["resolution_hint"] = hint
 
     payload = {
         "status": state.status,
@@ -712,6 +718,11 @@ def build_delegation_resume_packet(
     }
     if state.reason_blocked:
         payload["reason_blocked"] = state.reason_blocked
+    if isinstance(block_details, dict) and block_details:
+        payload["block_details"] = dict(block_details)
+        hint = block_details.get("hint")
+        if isinstance(hint, str) and hint:
+            payload["resolution_hint"] = hint
     return payload
 
 
