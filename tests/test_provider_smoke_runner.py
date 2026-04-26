@@ -478,6 +478,37 @@ def _run_scaffolded_managed_subagent_provider_smoke(
         str(protocol_path),
         "--json",
     )
+    protocol_definition = yaml.safe_load(protocol_path.read_text(encoding="utf-8"))
+    protocol_definition["roles"] = ["architect", "risk_auditor"]
+    protocol_definition["phases"][0]["procedure"][0]["role"] = "architect"
+    protocol_definition["phases"][0]["procedure"][0]["action"] = "plan"
+    protocol_definition["phases"][0]["procedure"][0]["guidance"] = "CUSTOM_ARCHITECT_PLAN_GUIDANCE_TOKEN"
+    protocol_definition["phases"][1]["procedure"][0]["role"] = "risk_auditor"
+    protocol_definition["phases"][1]["procedure"][0]["action"] = "risk_audit"
+    protocol_definition["phases"][1]["procedure"][0]["guidance"] = "CUSTOM_RISK_AUDIT_GUIDANCE_TOKEN"
+    protocol_definition["role_fulfillment"] = {
+        "architect": {"mode": "registered_agent", "agent": "planner"},
+        "risk_auditor": {
+            "mode": "managed_agent_subagent",
+            "parent": "planner",
+            "profile": "smoke_auditor",
+            "subagent_type": "explorer",
+        },
+    }
+    protocol_definition["subagent_profiles"] = {
+        "smoke_auditor": {
+            "description": "Audit provider smoke custom role bindings.",
+            "model": "gpt-5.4-mini",
+            "reasoning_effort": "medium",
+            "persona": "CUSTOM_SMOKE_AUDITOR_PERSONA_TOKEN",
+            "tools": {"allow": ["read_files", "run_tests"], "deny": ["edit_files", "git_commit"]},
+            "context": {"include": ["phase_contract", "recent_contributions"]},
+        }
+    }
+    protocol_path.write_text(
+        yaml.safe_dump(protocol_definition, sort_keys=False),
+        encoding="utf-8",
+    )
     validate = _run_btwin(
         provider_smoke_env,
         "protocol",
@@ -915,27 +946,33 @@ def test_provider_smoke_scaffolded_custom_protocol_managed_subagent_path(provide
     assert result["validate"]["role_fulfillment_count"] == 2
     assert result["validate"]["subagent_profile_count"] == 1
     roles = {item["role"]: item for item in result["preview"]["roles"]}
-    assert roles["reviewer"]["fulfillment_mode"] == "managed_agent_subagent"
-    assert roles["reviewer"]["profile"] == "strict_reviewer"
+    assert roles["architect"]["fulfillment_mode"] == "registered_agent"
+    assert roles["architect"]["agent"] == "planner"
+    assert roles["risk_auditor"]["fulfillment_mode"] == "managed_agent_subagent"
+    assert roles["risk_auditor"]["profile"] == "smoke_auditor"
     assert result["create"]["saved"] is True
     assert result["first_start"]["status"] == "running"
-    assert result["first_start"]["target_role"] == "planner"
+    assert result["first_start"]["target_role"] == "architect"
     assert result["first_start"]["fulfillment_mode"] == "registered_agent"
     assert result["applied"]["applied"] is True
     assert result["applied"]["thread"]["current_phase"] == "review"
+    assert result["applied"]["thread"]["phase_participants"] == ["planner"]
     assert result["subagent_start"]["status"] == "running"
-    assert result["subagent_start"]["target_role"] == "reviewer"
+    assert result["subagent_start"]["target_role"] == "risk_auditor"
     assert result["subagent_start"]["resolved_agent"] == "planner"
     assert result["subagent_start"]["fulfillment_mode"] == "managed_agent_subagent"
-    assert result["subagent_start"]["subagent_profile"] == "strict_reviewer"
+    assert result["subagent_start"]["subagent_profile"] == "smoke_auditor"
     assert result["subagent_start"]["spawn_packet"]["packet_type"] == "btwin.managed_agent_subagent.dispatch"
     assert result["subagent_start"]["spawn_packet"]["profile"]["tools"]["policy_level"] == "declared"
+    assert "CUSTOM_SMOKE_AUDITOR_PERSONA_TOKEN" in result["subagent_start"]["spawn_packet"]["instructions"]
+    assert "Required action: submit_contribution" in result["subagent_start"]["spawn_packet"]["instructions"]
+    assert "Expected output: risk_audit contribution" in result["subagent_start"]["spawn_packet"]["instructions"]
     assert any(
         "btwin.managed_agent_subagent.dispatch" in str(message.get("_content"))
         for message in result["planner_inbox"]["messages"]
     )
     assert result["contribution"]["executor"]["type"] == "managed_agent_subagent"
-    assert result["contribution"]["executor"]["subagent_profile"] == "strict_reviewer"
+    assert result["contribution"]["executor"]["subagent_profile"] == "smoke_auditor"
     assert result["contribution"]["executor"]["parent_executor"] == "planner"
     assert result["reevaluate_after_subagent"]["status"] == "completed"
     assert result["final_status"]["status"] == "completed"

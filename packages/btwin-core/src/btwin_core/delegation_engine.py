@@ -306,6 +306,8 @@ def build_subagent_spawn_packet(
         profile_name=assignment.subagent_profile,
         profile=profile,
         parent_executor=parent_executor,
+        required_action=assignment.required_action,
+        expected_output=assignment.expected_output,
         completion_command=command,
     )
     codex_spawn_request: dict[str, object] = {
@@ -463,6 +465,8 @@ def _managed_subagent_instructions(
     profile_name: str,
     profile: SubagentProfile,
     parent_executor: str,
+    required_action: str | None,
+    expected_output: str | None,
     completion_command: str,
 ) -> str:
     parts = [
@@ -475,6 +479,12 @@ def _managed_subagent_instructions(
     ]
     if profile.persona:
         parts.extend(["", "Persona:", profile.persona])
+    if required_action or expected_output:
+        parts.extend(["", "Assignment:"])
+        if required_action:
+            parts.append(f"Required action: {required_action}")
+        if expected_output:
+            parts.append(f"Expected output: {expected_output}")
     parts.extend(
         [
             "",

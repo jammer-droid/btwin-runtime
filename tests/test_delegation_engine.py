@@ -194,6 +194,8 @@ def test_build_subagent_spawn_packet_includes_parent_ready_codex_spawn_request()
     assert spawn_request["reasoning_effort"] == "medium"
     assert spawn_request["fork_context"] is False
     assert "Find correctness risks first." in spawn_request["message"]
+    assert "Required action: submit_contribution" in spawn_request["message"]
+    assert "Expected output: review contribution" in spawn_request["message"]
     assert "--agent review_parent" in spawn_request["message"]
     assert "--executor-type managed_agent_subagent" in spawn_request["message"]
     assert "--parent-executor review_parent" in spawn_request["message"]
