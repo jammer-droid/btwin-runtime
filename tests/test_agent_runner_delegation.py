@@ -899,3 +899,81 @@ async def test_resume_running_delegation_discards_replay_queue_when_attach_fails
     assert payload["reason"] == "runtime_attach_failed"
     assert (thread["thread_id"], "alice") not in runner._inbox
     assert len(thread_store.list_inbox(thread["thread_id"], "alice")) == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_running_delegation_blocks_when_replayed_runtime_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    runner, thread_store, _protocol_store, delegation_store, _phase_cycle_store = _build_runner(data_dir)
+    thread = thread_store.create_thread(
+        topic="Runtime failure replay",
+        protocol="delegate-review",
+        participants=["alice", "btwin"],
+        initial_phase="review",
+    )
+    thread_store.send_message(
+        thread_id=thread["thread_id"],
+        from_agent="btwin",
+        content="## Delegation Continue\n\nPhase: review\n",
+        tldr="delegate review -> alice",
+        msg_type="delegation",
+        delivery_mode="direct",
+        target_agents=["alice"],
+    )
+    delegation_store.write(
+        DelegationState(
+            thread_id=thread["thread_id"],
+            status="running",
+            loop_iteration=1,
+            current_phase="review",
+            current_cycle_index=1,
+            target_role="reviewer",
+            resolved_agent="alice",
+            required_action="submit_contribution",
+            expected_output="review contribution",
+        )
+    )
+
+    async def fake_attach_or_resume(thread_id, agent_name, *, bypass_permissions=None, workspace_root=None):
+        del bypass_permissions, workspace_root
+        return {
+            "thread_id": thread_id,
+            "agent_name": agent_name,
+            "status": "thinking",
+            "recovery_started": False,
+            "reused_session": True,
+            "resumed_from_state": False,
+        }
+
+    async def fake_drain_inbox(thread_id, agent_name, chain_depth):
+        del thread_id, agent_name, chain_depth
+
+    statuses = [
+        {
+            "thread_id": thread["thread_id"],
+            "agent_name": "alice",
+            "status": "failed",
+            "last_transport_error": "Helper overlay preflight requires a workspace inside a git repo.",
+            "recoverable": False,
+        }
+    ]
+
+    monkeypatch.setattr(runner, "attach_or_resume_for_thread", fake_attach_or_resume)
+    monkeypatch.setattr(runner, "_drain_inbox", fake_drain_inbox)
+    monkeypatch.setattr(runner, "get_runtime_session_status", lambda _thread_id, _agent_name: statuses[-1])
+
+    payload = await runner.resume_running_delegation(thread["thread_id"])
+
+    assert payload is not None
+    assert payload["status"] == "blocked"
+    assert payload["reason_blocked"] == "runtime_session_failed"
+    assert payload["runtime_status"] == "failed"
+    assert "Helper overlay preflight" in payload["runtime_error"]
+    assert "btwin live recover --thread" in payload["suggested_next_command"]
+    stored = delegation_store.read(thread["thread_id"])
+    assert stored is not None
+    assert stored.status == "blocked"
+    assert stored.reason_blocked == "runtime_session_failed"

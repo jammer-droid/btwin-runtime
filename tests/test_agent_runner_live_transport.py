@@ -625,6 +625,7 @@ def test_build_transport_launch_context_includes_managed_codex_developer_instruc
         provider="codex",
         role="moderator",
         reasoning_level="high",
+        memo="Use the custom debate rubric before submitting a contribution.",
     )
     thread = runner._threads.create_thread(
         topic="Managed launch profile",
@@ -666,6 +667,8 @@ def test_build_transport_launch_context_includes_managed_codex_developer_instruc
     assert session_config.options["requested_effort"] == "high"
     developer_instructions = launch_context.config_overrides["developer_instructions"]
     assert 'You are "alice".' in developer_instructions
+    assert "Role: moderator" in developer_instructions
+    assert "Use the custom debate rubric" in developer_instructions
     assert f"Thread ID: {thread['thread_id']}" in developer_instructions
     assert "Current ask:" not in developer_instructions
 

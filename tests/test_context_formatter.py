@@ -140,3 +140,22 @@ def test_format_initial_context_prefers_cli_contribution_command_for_spawned_hel
     )
 
     assert "btwin contribution submit --thread thread-123 --agent alice --phase context" in rendered
+
+
+def test_launch_developer_instructions_include_role_and_agent_memo() -> None:
+    thread = {
+        "thread_id": "thread-123",
+        "topic": "Custom protocol dispatch",
+        "protocol": "custom-review",
+    }
+
+    rendered = ContextFormatter.format_launch_developer_instructions(
+        thread=thread,
+        agent_name="sam",
+        role_name="critic",
+        agent_memo="Apply the house rubric before submitting a required contribution.",
+    )
+
+    assert "Role: critic" in rendered
+    assert "## Agent Instructions" in rendered
+    assert "Apply the house rubric before submitting" in rendered

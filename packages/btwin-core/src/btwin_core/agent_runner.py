@@ -1052,6 +1052,32 @@ class AgentRunner:
         self._emit_session_state(thread_id, agent_name, "queued")
         if bool(attached.get("reused_session")) and not bool(attached.get("recovery_started")):
             await self._drain_inbox(thread_id, agent_name, chain_depth=1)
+            refreshed = self.get_runtime_session_status(thread_id, agent_name)
+            if refreshed is not None:
+                attached = refreshed
+
+        if str(attached.get("status") or "") == "failed":
+            blocked_state = state.model_copy(
+                update={
+                    "status": "blocked",
+                    "updated_at": _now_iso(),
+                    "reason_blocked": "runtime_session_failed",
+                    "stop_reason": "runtime_session_failed",
+                }
+            )
+            self._delegations.write(blocked_state)
+            runtime_error = str(attached.get("last_transport_error") or "").strip()
+            return {
+                **blocked_state.model_dump(exclude_none=True),
+                "runtime_ensured": True,
+                "pending_replayed": len(pending_messages),
+                "runtime_session": attached,
+                "runtime_status": "failed",
+                "runtime_error": runtime_error or None,
+                "suggested_next_command": (
+                    f"btwin live recover --thread {thread_id} --agent {agent_name} --json"
+                ),
+            }
 
         return {
             **payload,
@@ -2977,6 +3003,8 @@ class AgentRunner:
             "developer_instructions": ContextFormatter.format_launch_developer_instructions(
                 thread=thread,
                 agent_name=agent_name,
+                role_name=self._agent_requested_role(agent_name),
+                agent_memo=self._agent_requested_memo(agent_name),
             )
         }
         requested_model = self._agent_requested_model(agent_name)
@@ -3003,6 +3031,24 @@ class AgentRunner:
         reasoning_level = agent.get("reasoning_level")
         if isinstance(reasoning_level, str) and reasoning_level.strip():
             return reasoning_level.strip()
+        return None
+
+    def _agent_requested_role(self, agent_name: str) -> str | None:
+        agent = self._agents.get_agent(agent_name)
+        if agent is None:
+            return None
+        role = agent.get("role")
+        if isinstance(role, str) and role.strip():
+            return role.strip()
+        return None
+
+    def _agent_requested_memo(self, agent_name: str) -> str | None:
+        agent = self._agents.get_agent(agent_name)
+        if agent is None:
+            return None
+        memo = agent.get("memo")
+        if isinstance(memo, str) and memo.strip():
+            return memo.strip()
         return None
 
     def _apply_codex_launch_config_overrides(

@@ -61,6 +61,8 @@ class ContextFormatter:
     def format_launch_developer_instructions(
         thread: dict,
         agent_name: str | None = None,
+        role_name: str | None = None,
+        agent_memo: str | None = None,
     ) -> str:
         """Render stable launch-time instructions for Codex managed helper sessions."""
         parts = []
@@ -87,6 +89,20 @@ class ContextFormatter:
             parts.append(f"Thread ID: {thread['thread_id']}")
         if thread.get("protocol"):
             parts.append(f"Protocol: {thread['protocol']}")
+
+        if role_name:
+            parts.extend([
+                "",
+                "## Assigned Role",
+                f"Role: {role_name}",
+            ])
+
+        if agent_memo:
+            parts.extend([
+                "",
+                "## Agent Instructions",
+                str(agent_memo).strip(),
+            ])
 
         if agent_name and thread.get("thread_id"):
             parts.extend([
