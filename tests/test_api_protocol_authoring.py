@@ -88,10 +88,11 @@ def test_protocol_authoring_api_preview_returns_authoring_summary_and_compiled_p
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["authoring"] == {
-        "name": "review-loop",
-        "phase_count": 2,
-        "gate_count": 1,
-        "outcome_policy_count": 1,
-    }
+    assert payload["authoring"]["name"] == "review-loop"
+    assert payload["authoring"]["phase_count"] == 2
+    assert payload["authoring"]["gate_count"] == 1
+    assert payload["authoring"]["outcome_policy_count"] == 1
+    assert payload["authoring"]["role_count"] == 0
+    assert payload["authoring"]["role_fulfillment_count"] == 0
+    assert payload["authoring"]["subagent_profile_count"] == 0
     assert payload["compiled"]["outcomes"] == ["retry", "accept"]

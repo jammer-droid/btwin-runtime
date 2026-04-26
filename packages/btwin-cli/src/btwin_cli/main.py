@@ -220,6 +220,71 @@ def _emit_payload(payload: object, as_json: bool) -> None:
     console.print(str(payload))
 
 
+def _emit_protocol_preview(payload: dict[str, object], as_json: bool) -> None:
+    if as_json:
+        _emit_payload(payload, as_json=True)
+        return
+
+    authoring = payload.get("authoring") if isinstance(payload.get("authoring"), dict) else {}
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    roles = payload.get("roles") if isinstance(payload.get("roles"), list) else []
+    profiles = payload.get("subagent_profiles") if isinstance(payload.get("subagent_profiles"), list) else []
+
+    protocol_name = authoring.get("name") or payload.get("name") or "<unknown>"
+    console.print(f"Protocol: {protocol_name}")
+    phase_count = authoring.get("phase_count")
+    role_count = authoring.get("role_count")
+    if phase_count is not None or role_count is not None:
+        parts = []
+        if phase_count is not None:
+            parts.append(f"phases={phase_count}")
+        if role_count is not None:
+            parts.append(f"roles={role_count}")
+        console.print(" ".join(parts))
+
+    console.print("")
+    console.print("Roles")
+    if roles:
+        for item in roles:
+            if not isinstance(item, dict):
+                continue
+            details = [
+                str(item.get("fulfillment_mode") or "unconfigured"),
+            ]
+            for key in ("agent", "parent", "profile", "subagent_type"):
+                value = item.get(key)
+                if value:
+                    details.append(f"{key}={value}")
+            console.print(f"- {item.get('role', '<unknown>')}  {' '.join(details)}")
+    else:
+        console.print("- none")
+
+    console.print("")
+    console.print("Subagent Profiles")
+    if profiles:
+        for item in profiles:
+            if not isinstance(item, dict):
+                continue
+            details = [f"tool_policy={item.get('tool_policy') or 'declared'}"]
+            if item.get("model"):
+                details.append(f"model={item['model']}")
+            if item.get("reasoning_effort"):
+                details.append(f"reasoning_effort={item['reasoning_effort']}")
+            console.print(f"- {item.get('name', '<unknown>')}  {' '.join(details)}")
+    else:
+        console.print("- none")
+
+    console.print("")
+    console.print("Next")
+    if source.get("kind") == "file" and source.get("file"):
+        file_path = source["file"]
+        console.print(f"btwin protocol create --file {file_path}")
+    else:
+        console.print(f"btwin thread create --protocol {protocol_name} ...")
+    console.print(f"btwin thread create --protocol {protocol_name} ...")
+    console.print("btwin delegate start --thread ...")
+
+
 def _resolve_content(content: str | None) -> str:
     if content is not None:
         return content
@@ -7702,17 +7767,22 @@ def protocol_validate(
     try:
         data = load_protocol_yaml(path)
         protocol = compile_protocol_definition(data)
+        preview = build_protocol_preview(data)
     except Exception as exc:
         payload = {"valid": False, "file": str(path), "error": str(exc)}
         _emit_payload(payload, as_json=as_json)
         raise typer.Exit(2)
 
+    authoring = preview.get("authoring") if isinstance(preview.get("authoring"), dict) else {}
     payload = {
         "valid": True,
         "file": str(path),
         "name": protocol.name,
         "description": protocol.description,
         "phase_count": len(protocol.phases),
+        "role_count": authoring.get("role_count", 0),
+        "role_fulfillment_count": authoring.get("role_fulfillment_count", 0),
+        "subagent_profile_count": authoring.get("subagent_profile_count", 0),
     }
     _emit_payload(payload, as_json=as_json)
 
@@ -7722,6 +7792,86 @@ def _protocol_file_payload(path: Path) -> dict[str, object]:
     if not isinstance(data, dict):
         raise typer.BadParameter("Protocol YAML must decode to a mapping object.")
     return data
+
+
+def _review_protocol_scaffold(name: str) -> dict[str, object]:
+    return {
+        "name": name,
+        "description": "Review protocol with managed subagent fulfillment",
+        "roles": ["planner", "reviewer"],
+        "phases": [
+            {
+                "name": "plan",
+                "actions": ["contribute"],
+                "procedure": [
+                    {
+                        "role": "planner",
+                        "action": "contribute",
+                        "guidance": "Define the implementation plan and handoff context.",
+                    }
+                ],
+                "template": [
+                    {
+                        "section": "Plan",
+                        "required": True,
+                        "guidance": "Summarize the intended implementation path.",
+                    }
+                ],
+            },
+            {
+                "name": "review",
+                "actions": ["contribute"],
+                "procedure": [
+                    {
+                        "role": "reviewer",
+                        "action": "contribute",
+                        "guidance": "Review the plan or implementation for correctness risks.",
+                    }
+                ],
+                "template": [
+                    {
+                        "section": "Findings",
+                        "required": True,
+                        "guidance": "List correctness, regression, or verification risks first.",
+                    }
+                ],
+            },
+        ],
+        "role_fulfillment": {
+            "planner": {"mode": "registered_agent", "agent": "planner"},
+            "reviewer": {
+                "mode": "managed_agent_subagent",
+                "parent": "planner",
+                "profile": "strict_reviewer",
+                "subagent_type": "explorer",
+            },
+        },
+        "subagent_profiles": {
+            "strict_reviewer": {
+                "description": "Find correctness and regression risks.",
+                "model": "gpt-5.4-mini",
+                "reasoning_effort": "medium",
+                "persona": "You are a strict reviewer. Findings first.",
+                "tools": {
+                    "allow": ["read_files", "run_tests"],
+                    "deny": ["edit_files", "git_commit"],
+                },
+                "context": {
+                    "include": [
+                        "phase_contract",
+                        "changed_files",
+                        "recent_contributions",
+                    ]
+                },
+            }
+        },
+    }
+
+
+def _protocol_scaffold_payload(name: str, template: str) -> dict[str, object]:
+    if template != "review":
+        raise typer.BadParameter("Unsupported template. Supported templates: review")
+    return _review_protocol_scaffold(name)
 
 
 def _protocol_saved_payload(
@@ -7739,6 +7889,38 @@ def _protocol_saved_payload(
     if saved_path is not None:
         payload["path"] = str(saved_path)
     return payload
+
+
+@protocol_app.command("scaffold")
+def protocol_scaffold(
+    name: str = typer.Argument(..., help="Protocol name for the generated YAML"),
+    template: str = typer.Option("review", "--template", help="Scaffold template name"),
+    out: str = typer.Option(..., "--out", help="Output YAML path"),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing file"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Create an editable protocol YAML scaffold."""
+    path = Path(out).expanduser()
+    if path.exists() and not force:
+        console.print(f"[red]Output file already exists:[/red] {path}")
+        raise typer.Exit(2)
+
+    data = _protocol_scaffold_payload(name, template)
+    compile_protocol_definition(data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    payload = {
+        "created": True,
+        "name": name,
+        "template": template,
+        "file": str(path),
+        "next": [
+            f"btwin protocol validate --file {path}",
+            f"btwin protocol preview --file {path}",
+            f"btwin protocol create --file {path}",
+        ],
+    }
+    _emit_payload(payload, as_json=as_json)
 
 
 @protocol_app.command("create")
@@ -7817,20 +7999,20 @@ def protocol_preview(
             _protocol_file_payload(path),
             source={"kind": "file", "file": str(path)},
         )
-        _emit_payload(payload, as_json=as_json)
+        _emit_protocol_preview(payload, as_json=as_json)
         return
 
     assert name is not None
     if _use_attached_api(config):
         payload = _attached_api_get_or_exit(f"/api/protocols/{name}/preview")
-        _emit_payload(payload, as_json=as_json)
+        _emit_protocol_preview(payload, as_json=as_json)
         return
 
     protocol = _get_protocol_store().get_protocol(name)
     if protocol is None:
         console.print(f"[red]Protocol not found:[/red] {name}")
         raise typer.Exit(4)
-    _emit_payload(
+    _emit_protocol_preview(
         build_protocol_preview(protocol, source={"kind": "store", "name": name}),
         as_json=as_json,
     )

@@ -52,4 +52,7 @@ def test_protocol_validate_accepts_authoring_only_protocol_yaml(tmp_path):
         "name": "review-loop",
         "description": "",
         "phase_count": 2,
+        "role_count": 0,
+        "role_fulfillment_count": 0,
+        "subagent_profile_count": 0,
     }

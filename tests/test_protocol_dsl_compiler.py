@@ -3,6 +3,7 @@ import pytest
 from btwin_core.protocol_store import (
     ProtocolStore,
     ProtocolValidationLayerError,
+    build_protocol_preview,
     compile_protocol_definition,
 )
 
@@ -159,6 +160,33 @@ def test_compile_protocol_definition_reports_semantic_layer_errors():
         compile_protocol_definition(definition)
 
 
+def test_compile_protocol_definition_rejects_unknown_subagent_profile_reference():
+    definition = {
+        "name": "subagent-review",
+        "roles": ["reviewer"],
+        "phases": [
+            {
+                "name": "review",
+                "actions": ["contribute"],
+                "procedure": [{"role": "reviewer", "action": "contribute"}],
+            }
+        ],
+        "role_fulfillment": {
+            "reviewer": {
+                "mode": "managed_agent_subagent",
+                "profile": "missing_profile",
+                "parent": "planner",
+            }
+        },
+    }
+
+    with pytest.raises(
+        ProtocolValidationLayerError,
+        match="semantic validation failed: role_fulfillment 'reviewer' references unknown subagent profile 'missing_profile'",
+    ):
+        compile_protocol_definition(definition)
+
+
 def test_protocol_store_loads_authoring_only_yaml_as_compiled_protocol(tmp_path):
     store = ProtocolStore(tmp_path / "protocols")
     store.save_protocol(compile_protocol_definition(_authoring_protocol_definition()))
@@ -170,4 +198,79 @@ def test_protocol_store_loads_authoring_only_yaml_as_compiled_protocol(tmp_path)
     assert protocol.phases[0].declared_guards == [
         "contribution_required",
         "transition_precondition",
+    ]
+
+
+def test_build_protocol_preview_summarizes_role_fulfillment_for_authoring_ux():
+    definition = {
+        "name": "subagent-review",
+        "description": "Review protocol with a managed Codex subagent",
+        "roles": ["planner", "reviewer"],
+        "phases": [
+            {
+                "name": "plan",
+                "actions": ["contribute"],
+                "procedure": [{"role": "planner", "action": "contribute"}],
+            },
+            {
+                "name": "review",
+                "actions": ["contribute"],
+                "procedure": [{"role": "reviewer", "action": "contribute"}],
+            },
+        ],
+        "role_fulfillment": {
+            "planner": {"mode": "registered_agent", "agent": "planner"},
+            "reviewer": {
+                "mode": "managed_agent_subagent",
+                "parent": "planner",
+                "profile": "strict_reviewer",
+                "subagent_type": "explorer",
+            },
+        },
+        "subagent_profiles": {
+            "strict_reviewer": {
+                "description": "Find correctness risks",
+                "model": "gpt-5.4-mini",
+                "reasoning_effort": "medium",
+                "persona": "Find correctness risks first.",
+                "tools": {"allow": ["read_files", "run_tests"], "deny": ["edit_files"]},
+                "context": {"include": ["phase_contract", "changed_files"]},
+            }
+        },
+    }
+
+    preview = build_protocol_preview(definition)
+
+    assert preview["authoring"]["role_count"] == 2
+    assert preview["authoring"]["role_fulfillment_count"] == 2
+    assert preview["authoring"]["subagent_profile_count"] == 1
+    assert preview["roles"] == [
+        {
+            "role": "planner",
+            "fulfillment_mode": "registered_agent",
+            "agent": "planner",
+            "profile": None,
+            "parent": None,
+            "subagent_type": None,
+        },
+        {
+            "role": "reviewer",
+            "fulfillment_mode": "managed_agent_subagent",
+            "agent": None,
+            "profile": "strict_reviewer",
+            "parent": "planner",
+            "subagent_type": "explorer",
+        },
+    ]
+    assert preview["subagent_profiles"] == [
+        {
+            "name": "strict_reviewer",
+            "description": "Find correctness risks",
+            "model": "gpt-5.4-mini",
+            "reasoning_effort": "medium",
+            "tool_policy": "declared",
+            "tools_allow": ["read_files", "run_tests"],
+            "tools_deny": ["edit_files"],
+            "context_include": ["phase_contract", "changed_files"],
+        }
     ]

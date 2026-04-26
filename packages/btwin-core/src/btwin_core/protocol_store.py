@@ -393,6 +393,20 @@ def _validate_protocol_semantics(protocol: ProtocolAuthoringDocument) -> None:
             "semantic",
             "duplicate outcome_policy name values are not allowed",
         )
+    subagent_profile_names = set(protocol.subagent_profiles)
+    for role, fulfillment in protocol.role_fulfillment.items():
+        if fulfillment.mode not in {"foreground_subagent", "managed_agent_subagent"}:
+            continue
+        if not fulfillment.profile:
+            raise ProtocolValidationLayerError(
+                "semantic",
+                f"role_fulfillment '{role}' requires a subagent profile",
+            )
+        if fulfillment.profile not in subagent_profile_names:
+            raise ProtocolValidationLayerError(
+                "semantic",
+                f"role_fulfillment '{role}' references unknown subagent profile '{fulfillment.profile}'",
+            )
 
     explicit_transitions: dict[tuple[str, str], list[ProtocolTransition]] = {}
     for transition in protocol.transitions:
@@ -595,6 +609,61 @@ def ensure_protocol_compiled(protocol: Protocol) -> Protocol:
     return compile_protocol_definition(protocol)
 
 
+def _authoring_role_names(protocol: ProtocolAuthoringDocument) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(name: str | None) -> None:
+        if not name or name in seen:
+            return
+        seen.add(name)
+        names.append(name)
+
+    for role in protocol.roles:
+        add(role)
+    for phase in protocol.phases:
+        for step in phase.procedure or []:
+            add(step.role)
+    for role in protocol.role_fulfillment:
+        add(role)
+    return names
+
+
+def _preview_role_summaries(protocol: ProtocolAuthoringDocument) -> list[dict[str, object]]:
+    summaries: list[dict[str, object]] = []
+    for role in _authoring_role_names(protocol):
+        fulfillment = protocol.role_fulfillment.get(role)
+        summaries.append(
+            {
+                "role": role,
+                "fulfillment_mode": fulfillment.mode if fulfillment else None,
+                "agent": fulfillment.agent if fulfillment else None,
+                "profile": fulfillment.profile if fulfillment else None,
+                "parent": fulfillment.parent if fulfillment else None,
+                "subagent_type": fulfillment.subagent_type if fulfillment else None,
+            }
+        )
+    return summaries
+
+
+def _preview_subagent_profile_summaries(
+    protocol: ProtocolAuthoringDocument,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "name": name,
+            "description": profile.description,
+            "model": profile.model,
+            "reasoning_effort": profile.reasoning_effort,
+            "tool_policy": "declared",
+            "tools_allow": list(profile.tools.allow),
+            "tools_deny": list(profile.tools.deny),
+            "context_include": list(profile.context.include),
+        }
+        for name, profile in sorted(protocol.subagent_profiles.items())
+    ]
+
+
 def build_protocol_preview(
     data: Any,
     *,
@@ -603,13 +672,20 @@ def build_protocol_preview(
     authoring = _coerce_authoring_document(data)
     _validate_protocol_semantics(authoring)
     compiled = _compile_protocol(authoring)
+    roles = _preview_role_summaries(authoring)
+    subagent_profiles = _preview_subagent_profile_summaries(authoring)
     payload: dict[str, object] = {
         "authoring": {
             "name": authoring.name,
             "phase_count": len(authoring.phases),
+            "role_count": len(roles),
             "gate_count": len(authoring.gates),
             "outcome_policy_count": len(authoring.outcome_policies),
+            "role_fulfillment_count": len(authoring.role_fulfillment),
+            "subagent_profile_count": len(authoring.subagent_profiles),
         },
+        "roles": roles,
+        "subagent_profiles": subagent_profiles,
         "compiled": compiled.model_dump(exclude_none=True, by_alias=True),
     }
     if source:

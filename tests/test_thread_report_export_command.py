@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import date
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -175,7 +175,7 @@ def test_thread_export_report_standalone_writes_self_contained_html(tmp_path, mo
     assert result.exit_code == 0, result.output
     payload = _parse_json_output(result.output)
     report_path = Path(payload["path"])
-    today = date.today().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
     assert report_path == project_root / "docs" / "local" / "reports" / f"{today}-static-report-export-report.html"
     assert report_path.exists()
     html = report_path.read_text(encoding="utf-8")
