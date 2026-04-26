@@ -561,7 +561,7 @@ def create_threads_router(
         initial_phase = proto.phases[0].name if proto.phases else None
         initial_phase_def = proto.phases[0] if proto.phases else None
         phase_participants = (
-            default_phase_participants({"participants": req.participants or []}, initial_phase_def)
+            default_phase_participants({"participants": req.participants or []}, initial_phase_def, protocol=proto)
             if initial_phase_def is not None
             else None
         )
@@ -1016,7 +1016,7 @@ def create_threads_router(
         updated_thread = thread_store.advance_phase(
             thread_id,
             next_phase=plan.next_phase,
-            phase_participants=default_phase_participants(thread, next_phase),
+            phase_participants=default_phase_participants(thread, next_phase, protocol=protocol),
         )
         if updated_thread is None:
             raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found or closed")
@@ -1167,7 +1167,7 @@ def create_threads_router(
         updated = thread_store.advance_phase(
             thread_id,
             next_phase=req.next_phase,
-            phase_participants=default_phase_participants(meta, next_phase_def) if next_phase_def is not None else None,
+            phase_participants=default_phase_participants(meta, next_phase_def, protocol=proto) if next_phase_def is not None else None,
         )
         if updated is None:
             raise HTTPException(status_code=404, detail=f"Thread '{thread_id}' not found or closed")

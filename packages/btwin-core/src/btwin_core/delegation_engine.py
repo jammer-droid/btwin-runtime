@@ -493,6 +493,8 @@ def _managed_subagent_instructions(
 def default_phase_participants(
     thread: dict[str, object],
     phase,
+    *,
+    protocol: Protocol | None = None,
 ) -> list[str]:
     participants = thread.get("participants", [])
     names: list[str] = []
@@ -506,6 +508,19 @@ def default_phase_participants(
             names.append(participant)
 
     if phase.procedure:
+        fulfillment_matched: list[str] = []
+        for step in phase.procedure:
+            role = step.role if isinstance(step.role, str) else None
+            fulfillment = protocol.role_fulfillment.get(role) if protocol is not None and role else None
+            if fulfillment is None:
+                break
+            candidate = fulfillment.parent or fulfillment.agent
+            if not candidate:
+                break
+            fulfillment_matched.append(candidate)
+        if len(fulfillment_matched) == len(phase.procedure):
+            return fulfillment_matched
+
         role_matched = [
             step.role
             for step in phase.procedure

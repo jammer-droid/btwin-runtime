@@ -218,6 +218,37 @@ def test_default_phase_participants_prefers_agent_names_matching_procedure_roles
     assert default_phase_participants(thread, phase) == ["developer"]
 
 
+def test_default_phase_participants_prefers_role_fulfillment_parent_for_custom_role():
+    phase = ProtocolPhase(
+        name="review",
+        actions=["contribute"],
+        procedure=[{"role": "reviewer", "action": "review"}],
+    )
+    protocol = Protocol.model_validate(
+        {
+            "name": "custom-review",
+            "phases": [phase.model_dump()],
+            "role_fulfillment": {
+                "reviewer": {
+                    "mode": "managed_agent_subagent",
+                    "parent": "planner",
+                    "profile": "strict_reviewer",
+                    "subagent_type": "explorer",
+                }
+            },
+            "subagent_profiles": {
+                "strict_reviewer": {"description": "Review risks"},
+            },
+        }
+    )
+    thread = {
+        "participants": [{"name": "moderator"}, {"name": "planner"}],
+        "phase_participants": ["moderator"],
+    }
+
+    assert default_phase_participants(thread, phase, protocol=protocol) == ["planner"]
+
+
 def test_build_delegation_assignment_blocks_when_role_binding_missing():
     assignment = build_delegation_assignment(
         thread=_review_thread(),

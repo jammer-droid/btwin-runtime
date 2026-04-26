@@ -431,6 +431,76 @@ def test_protocol_apply_next_sets_next_phase_participants_from_procedure_roles(t
     assert updated_thread["phase_participants"] == ["developer"]
 
 
+def test_protocol_apply_next_sets_next_phase_participants_from_role_fulfillment_parent(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    thread = thread_store.create_thread(
+        topic="custom role parent thread",
+        protocol="custom-role-parent",
+        participants=["moderator", "planner"],
+        initial_phase="plan",
+        phase_participants=["moderator"],
+    )
+    protocol_store = _save_protocol(
+        project_root,
+        compile_protocol_definition(
+            {
+                "name": "custom-role-parent",
+                "phases": [
+                    {
+                        "name": "plan",
+                        "actions": ["contribute"],
+                        "template": [{"section": "plan", "required": True}],
+                        "procedure": [{"role": "moderator", "action": "plan"}],
+                    },
+                    {
+                        "name": "review",
+                        "actions": ["contribute"],
+                        "template": [{"section": "findings", "required": True}],
+                        "procedure": [{"role": "reviewer", "action": "review"}],
+                    },
+                ],
+                "role_fulfillment": {
+                    "reviewer": {
+                        "mode": "managed_agent_subagent",
+                        "parent": "planner",
+                        "profile": "strict_reviewer",
+                        "subagent_type": "explorer",
+                    }
+                },
+                "subagent_profiles": {
+                    "strict_reviewer": {"description": "Review risks"},
+                },
+            }
+        ),
+    )
+    thread_store.submit_contribution(
+        thread["thread_id"],
+        "moderator",
+        "plan",
+        content="## plan\nReady.\n",
+        tldr="plan ready",
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+    monkeypatch.setattr(main, "_get_protocol_store", lambda: protocol_store)
+
+    result = runner.invoke(
+        app,
+        ["protocol", "apply-next", "--thread", thread["thread_id"], "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["applied"] is True, result.output
+    updated_thread = thread_store.get_thread(thread["thread_id"])
+    assert updated_thread["current_phase"] == "review"
+    assert updated_thread["phase_participants"] == ["planner"]
+
+
 def test_protocol_apply_next_updates_phase_cycle_state_on_retry(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     data_dir = tmp_path / ".btwin"

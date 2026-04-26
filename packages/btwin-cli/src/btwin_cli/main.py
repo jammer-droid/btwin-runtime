@@ -813,7 +813,7 @@ def _delegate_respond_local(
     updated_thread = thread_store.advance_phase(
         thread_id,
         next_phase=plan.next_phase,
-        phase_participants=default_phase_participants(thread, next_phase),
+        phase_participants=default_phase_participants(thread, next_phase, protocol=protocol),
     )
     if updated_thread is None:
         console.print(f"[red]Thread not found or closed:[/red] {thread_id}")
@@ -8217,7 +8217,7 @@ def protocol_apply_next(
             closed_or_updated = store.advance_phase(
                 resolved_thread_id,
                 next_phase=plan.next_phase,
-                phase_participants=default_phase_participants(thread, target_phase) if target_phase is not None else None,
+                phase_participants=default_phase_participants(thread, target_phase, protocol=protocol) if target_phase is not None else None,
             )
             if closed_or_updated is None:
                 console.print(f"[red]Thread not found:[/red] {resolved_thread_id}")
@@ -8333,7 +8333,7 @@ def thread_create(
         locale = LocaleSettingsStore(store.data_dir).read().model_dump()
         initial_phase_def = proto.phases[0] if proto.phases else None
         phase_participants = (
-            default_phase_participants({"participants": participant or []}, initial_phase_def)
+            default_phase_participants({"participants": participant or []}, initial_phase_def, protocol=proto)
             if initial_phase_def is not None
             else None
         )

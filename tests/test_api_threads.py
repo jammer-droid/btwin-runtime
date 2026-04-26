@@ -1441,6 +1441,74 @@ def test_advance_phase_sets_phase_participants_from_next_procedure_roles(tmp_pat
     assert payload["phase_participants"] == ["developer"]
 
 
+def test_advance_phase_sets_phase_participants_from_role_fulfillment_parent(tmp_path):
+    thread_store = ThreadStore(tmp_path / "threads")
+    protocol_store = ProtocolStore(tmp_path / "protocols")
+    event_bus = EventBus()
+    protocol_store.save_protocol(
+        compile_protocol_definition(
+            {
+                "name": "custom-role-parent",
+                "phases": [
+                    {
+                        "name": "plan",
+                        "actions": ["contribute"],
+                        "template": [{"section": "plan", "required": True}],
+                        "procedure": [{"role": "moderator", "action": "plan"}],
+                    },
+                    {
+                        "name": "review",
+                        "actions": ["contribute"],
+                        "template": [{"section": "findings", "required": True}],
+                        "procedure": [{"role": "reviewer", "action": "review"}],
+                    },
+                ],
+                "role_fulfillment": {
+                    "reviewer": {
+                        "mode": "managed_agent_subagent",
+                        "parent": "planner",
+                        "profile": "strict_reviewer",
+                        "subagent_type": "explorer",
+                    }
+                },
+                "subagent_profiles": {
+                    "strict_reviewer": {"description": "Review risks"},
+                },
+            }
+        )
+    )
+    thread = thread_store.create_thread(
+        topic="Custom role parent thread",
+        protocol="custom-role-parent",
+        participants=["moderator", "planner"],
+        initial_phase="plan",
+        phase_participants=["moderator"],
+    )
+    thread_store.submit_contribution(
+        thread["thread_id"],
+        "moderator",
+        "plan",
+        content="## plan\nReady.\n",
+        tldr="plan ready",
+    )
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(create_threads_router(thread_store, protocol_store, event_bus))
+    client = TestClient(app)
+
+    response = client.post(
+        f"/api/threads/{thread['thread_id']}/advance-phase",
+        json={"nextPhase": "review"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["current_phase"] == "review"
+    assert payload["phase_participants"] == ["planner"]
+
+
 def test_recover_agent_uses_agent_runner_recovery_path(tmp_path):
     thread_store = ThreadStore(tmp_path / "threads")
     protocol_store = ProtocolStore(tmp_path / "protocols")

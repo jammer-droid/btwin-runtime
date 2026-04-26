@@ -1729,7 +1729,7 @@ class AgentRunner:
             advanced_thread = self._threads.advance_phase(
                 thread_id,
                 assignment.next_phase,
-                phase_participants=default_phase_participants(thread, next_phase),
+                phase_participants=default_phase_participants(thread, next_phase, protocol=protocol),
             )
             if advanced_thread is None:
                 return
