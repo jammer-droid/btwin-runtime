@@ -19,6 +19,7 @@ from btwin_core.delegation_engine import (
     build_delegate_role_bindings,
     build_delegation_assignment,
     default_phase_participants,
+    role_fulfillment_participant_violation,
 )
 from btwin_core.delegation_store import DelegationStore
 from btwin_core.event_bus import EventBus, SSEEvent
@@ -1719,6 +1720,21 @@ class AgentRunner:
                         "status": "blocked",
                         "reason_blocked": "next_phase_not_found",
                         "stop_reason": "next_phase_not_found",
+                        "last_result_message_id": message_id,
+                        "updated_at": _now_iso(),
+                    }
+                )
+                self._delegations.write(blocked_state)
+                return
+
+            violation = role_fulfillment_participant_violation(thread, next_phase, protocol)
+            if violation is not None:
+                reason = str(violation.get("error") or "role_fulfillment_participant_missing")
+                blocked_state = delegation_state.model_copy(
+                    update={
+                        "status": "blocked",
+                        "reason_blocked": reason,
+                        "stop_reason": reason,
                         "last_result_message_id": message_id,
                         "updated_at": _now_iso(),
                     }

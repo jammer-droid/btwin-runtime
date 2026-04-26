@@ -387,6 +387,49 @@ def build_delegate_role_bindings(
     return bindings
 
 
+def role_fulfillment_participant_violation(
+    thread: dict[str, object],
+    phase,
+    protocol: Protocol,
+) -> dict[str, object] | None:
+    """Return a user-facing violation when explicit fulfillment targets an absent participant."""
+    participants = _thread_participant_names(thread)
+    if not phase.procedure:
+        return None
+
+    for step in phase.procedure:
+        role = step.role if isinstance(step.role, str) else None
+        if not role:
+            continue
+        fulfillment = protocol.role_fulfillment.get(role)
+        if fulfillment is None:
+            continue
+
+        participant_kind = "parent" if fulfillment.parent else "agent"
+        participant = fulfillment.parent or fulfillment.agent
+        if not participant or participant in participants:
+            continue
+
+        phase_name = phase.name if isinstance(getattr(phase, "name", None), str) else None
+        message = (
+            f"role_fulfillment '{role}' resolves to {participant_kind} '{participant}', "
+            f"but '{participant}' is not a participant in this thread."
+        )
+        return {
+            "error": "role_fulfillment_participant_missing",
+            "message": message,
+            "role": role,
+            "phase": phase_name,
+            "participant_kind": participant_kind,
+            "participant": participant,
+            "fulfillment_mode": fulfillment.mode,
+            "participants": participants,
+            "hint": f"Add --participant {participant} or update role_fulfillment for role '{role}'.",
+        }
+
+    return None
+
+
 def _role_fulfillment(protocol: Protocol, role: str) -> RoleFulfillment:
     return protocol.role_fulfillment.get(role) or RoleFulfillment()
 
@@ -506,16 +549,7 @@ def default_phase_participants(
     *,
     protocol: Protocol | None = None,
 ) -> list[str]:
-    participants = thread.get("participants", [])
-    names: list[str] = []
-    for participant in participants:
-        if isinstance(participant, dict):
-            name = participant.get("name")
-            if isinstance(name, str) and name:
-                names.append(name)
-            continue
-        if isinstance(participant, str) and participant:
-            names.append(participant)
+    names = _thread_participant_names(thread)
 
     if phase.procedure:
         fulfillment_matched: list[str] = []
@@ -545,6 +579,22 @@ def default_phase_participants(
     if not phase.procedure:
         return names
     return names[: len(phase.procedure)]
+
+
+def _thread_participant_names(thread: dict[str, object]) -> list[str]:
+    participants = thread.get("participants", [])
+    if not isinstance(participants, list):
+        return []
+    names: list[str] = []
+    for participant in participants:
+        if isinstance(participant, dict):
+            name = participant.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+            continue
+        if isinstance(participant, str) and participant:
+            names.append(participant)
+    return names
 
 
 def _current_phase_name(thread: dict[str, object], phase_cycle_state: PhaseCycleState) -> str | None:

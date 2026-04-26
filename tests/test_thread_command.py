@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 import btwin_cli.main as main
 from btwin_cli.main import app
 from btwin_core.config import BTwinConfig, RuntimeConfig
+from btwin_core.protocol_store import ProtocolStore, compile_protocol_definition
 
 
 runner = CliRunner()
@@ -23,6 +24,60 @@ def _standalone_config(data_dir: Path) -> BTwinConfig:
 
 def _parse_json_output(output: str):
     return json.loads(output.strip())
+
+
+def test_thread_create_blocks_role_fulfillment_parent_missing_from_participants(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    protocol_store = ProtocolStore(project_root / ".btwin" / "protocols")
+    protocol_store.save_protocol(
+        compile_protocol_definition(
+            {
+                "name": "missing-parent",
+                "phases": [
+                    {
+                        "name": "review",
+                        "actions": ["contribute"],
+                        "template": [{"section": "findings", "required": True}],
+                        "procedure": [{"role": "reviewer", "action": "review"}],
+                    }
+                ],
+                "role_fulfillment": {
+                    "reviewer": {
+                        "mode": "managed_agent_subagent",
+                        "parent": "planner",
+                        "profile": "strict_reviewer",
+                        "subagent_type": "explorer",
+                    }
+                },
+                "subagent_profiles": {"strict_reviewer": {"description": "Review risks"}},
+            }
+        )
+    )
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    result = runner.invoke(
+        app,
+        [
+            "thread",
+            "create",
+            "--topic",
+            "Missing parent",
+            "--protocol",
+            "missing-parent",
+            "--participant",
+            "moderator",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    payload = _parse_json_output(result.output)
+    assert payload["error"] == "role_fulfillment_participant_missing"
+    assert payload["role"] == "reviewer"
+    assert payload["participant"] == "planner"
+    assert "Add --participant planner" in payload["hint"]
 
 
 def test_thread_create_attached_uses_shared_api(monkeypatch):

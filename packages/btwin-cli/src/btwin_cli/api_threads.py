@@ -19,6 +19,7 @@ from btwin_core.delegation_engine import (
     build_delegation_resume_packet,
     build_delegation_resume_token,
     default_phase_participants,
+    role_fulfillment_participant_violation,
 )
 from btwin_core.delegation_state import DelegationState, delegation_status_payload
 from btwin_core.delegation_store import DelegationStore
@@ -242,6 +243,17 @@ def _build_delegate_role_bindings(thread: dict[str, object], phase: ProtocolPhas
         if isinstance(step.role, str) and step.role and isinstance(participant, str) and participant:
             bindings[step.role] = participant
     return bindings
+
+
+def _raise_role_fulfillment_participant_violation(
+    *,
+    thread: dict[str, object],
+    protocol: Protocol,
+    phase: ProtocolPhase,
+) -> None:
+    violation = role_fulfillment_participant_violation(thread, phase, protocol)
+    if violation is not None:
+        raise HTTPException(status_code=409, detail=violation)
 
 
 def _validate_delegate_direct_message(
@@ -560,6 +572,12 @@ def create_threads_router(
             raise HTTPException(status_code=404, detail=f"Protocol '{req.protocol}' not found")
         initial_phase = proto.phases[0].name if proto.phases else None
         initial_phase_def = proto.phases[0] if proto.phases else None
+        if initial_phase_def is not None:
+            _raise_role_fulfillment_participant_violation(
+                thread={"participants": req.participants or []},
+                protocol=proto,
+                phase=initial_phase_def,
+            )
         phase_participants = (
             default_phase_participants({"participants": req.participants or []}, initial_phase_def, protocol=proto)
             if initial_phase_def is not None
@@ -826,6 +844,7 @@ def create_threads_router(
                     "phase_cycle_state": phase_cycle_state.phase_name if phase_cycle_state is not None else None,
                 },
             )
+        _raise_role_fulfillment_participant_violation(thread=thread, protocol=protocol, phase=phase)
 
         if phase_cycle_state is None:
             phase_cycle_state = phase_cycle_store.start_cycle(
@@ -1012,6 +1031,7 @@ def create_threads_router(
         next_phase = next((item for item in protocol.phases if item.name == plan.next_phase), None)
         if next_phase is None:
             raise HTTPException(status_code=409, detail={"error": "next_phase_not_found", "next_phase": plan.next_phase})
+        _raise_role_fulfillment_participant_violation(thread=thread, protocol=protocol, phase=next_phase)
 
         updated_thread = thread_store.advance_phase(
             thread_id,
@@ -1163,6 +1183,8 @@ def create_threads_router(
                     )
 
         next_phase_def = next((phase for phase in proto.phases if phase.name == req.next_phase), None) if proto else None
+        if next_phase_def is not None and proto is not None:
+            _raise_role_fulfillment_participant_violation(thread=meta, protocol=proto, phase=next_phase_def)
         old_phase = meta.get("current_phase")
         updated = thread_store.advance_phase(
             thread_id,

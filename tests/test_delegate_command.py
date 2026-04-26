@@ -292,6 +292,70 @@ def test_delegate_start_outputs_managed_subagent_spawn_packet_and_dispatches_par
     assert _parse_json_output(status_result.output) == payload
 
 
+def test_delegate_start_blocks_role_fulfillment_parent_missing_from_participants(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / "custom-runtime-data"
+    thread_store = ThreadStore(data_dir / "threads")
+    protocol_store = ProtocolStore(data_dir / "protocols")
+    protocol_store.save_protocol(
+        compile_protocol_definition(
+            {
+                "name": "delegate-missing-parent",
+                "phases": [
+                    {
+                        "name": "review",
+                        "actions": ["contribute", "review"],
+                        "template": [{"section": "completed", "required": True}],
+                        "procedure": [
+                            {"role": "reviewer", "action": "review", "alias": "Review"},
+                        ],
+                    }
+                ],
+                "role_fulfillment": {
+                    "reviewer": {
+                        "mode": "managed_agent_subagent",
+                        "parent": "planner",
+                        "profile": "strict_reviewer",
+                        "subagent_type": "explorer",
+                    }
+                },
+                "subagent_profiles": {
+                    "strict_reviewer": {"description": "Find correctness risks"},
+                },
+            }
+        )
+    )
+    thread = thread_store.create_thread(
+        topic="Missing parent delegate thread",
+        protocol="delegate-missing-parent",
+        participants=["reviewer"],
+        initial_phase="review",
+        phase_participants=["planner"],
+    )
+    PhaseCycleStore(data_dir).write(
+        PhaseCycleState.start(
+            thread_id=thread["thread_id"],
+            phase_name="review",
+            procedure_steps=["review"],
+        )
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+
+    result = runner.invoke(
+        app,
+        ["delegate", "start", "--thread", thread["thread_id"], "--json"],
+    )
+
+    assert result.exit_code == 2, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["error"] == "role_fulfillment_participant_missing"
+    assert payload["role"] == "reviewer"
+    assert payload["participant"] == "planner"
+    assert "Add --participant planner" in payload["hint"]
+
+
 def test_contribution_submit_persists_subagent_executor_metadata(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     data_dir = tmp_path / "custom-runtime-data"

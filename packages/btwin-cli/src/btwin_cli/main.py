@@ -61,6 +61,7 @@ from btwin_core.delegation_engine import (
     build_delegation_resume_packet,
     build_delegation_resume_token,
     default_phase_participants,
+    role_fulfillment_participant_violation,
 )
 from btwin_core.delegation_state import DelegationState, delegation_status_payload
 from btwin_core.delegation_store import DelegationStore
@@ -437,6 +438,20 @@ def _build_delegate_role_bindings(thread: dict[str, object], phase: ProtocolPhas
     return bindings
 
 
+def _role_fulfillment_participant_violation_or_exit(
+    *,
+    thread: dict[str, object],
+    protocol: Protocol,
+    phase: ProtocolPhase,
+    as_json: bool = False,
+) -> None:
+    violation = role_fulfillment_participant_violation(thread, phase, protocol)
+    if violation is None:
+        return
+    _emit_payload(violation, as_json=as_json)
+    raise typer.Exit(2)
+
+
 def _resolve_delegate_phase(
     *,
     thread: dict[str, object],
@@ -615,7 +630,12 @@ def _dispatch_delegate_assignment(
     return True, None
 
 
-def _delegate_start_local(thread_id: str, config: BTwinConfig | None = None) -> dict[str, object]:
+def _delegate_start_local(
+    thread_id: str,
+    config: BTwinConfig | None = None,
+    *,
+    as_json: bool = False,
+) -> dict[str, object]:
     current_config = config or _get_config()
     data_dir = _delegate_local_data_dir(current_config)
     thread_store = ThreadStore(data_dir / "threads")
@@ -640,6 +660,12 @@ def _delegate_start_local(thread_id: str, config: BTwinConfig | None = None) -> 
     if phase is None:
         console.print(f"[red]Phase not found for thread:[/red] {thread_id}")
         raise typer.Exit(4)
+    _role_fulfillment_participant_violation_or_exit(
+        thread=thread,
+        protocol=protocol,
+        phase=phase,
+        as_json=as_json,
+    )
 
     if phase_cycle_state is None:
         phase_cycle_state = phase_cycle_store.start_cycle(
@@ -752,6 +778,7 @@ def _delegate_respond_local(
     summary: str | None = None,
     resume_token: str | None = None,
     config: BTwinConfig | None = None,
+    as_json: bool = False,
 ) -> dict[str, object]:
     current_config = config or _get_config()
     data_dir = _delegate_local_data_dir(current_config)
@@ -788,6 +815,12 @@ def _delegate_respond_local(
     if phase is None:
         console.print(f"[red]Phase not found for thread:[/red] {thread_id}")
         raise typer.Exit(4)
+    _role_fulfillment_participant_violation_or_exit(
+        thread=thread,
+        protocol=protocol,
+        phase=phase,
+        as_json=as_json,
+    )
     if phase_cycle_state is None:
         phase_cycle_state = phase_cycle_store.start_cycle(
             thread_id=thread_id,
@@ -809,6 +842,12 @@ def _delegate_respond_local(
     if next_phase is None:
         console.print(f"[red]Phase not found:[/red] {plan.next_phase}")
         raise typer.Exit(4)
+    _role_fulfillment_participant_violation_or_exit(
+        thread=thread,
+        protocol=protocol,
+        phase=next_phase,
+        as_json=as_json,
+    )
 
     updated_thread = thread_store.advance_phase(
         thread_id,
@@ -8214,6 +8253,13 @@ def protocol_apply_next(
         else:
             store = _get_thread_store()
             target_phase = next((item for item in protocol.phases if item.name == plan.next_phase), None)
+            if target_phase is not None:
+                _role_fulfillment_participant_violation_or_exit(
+                    thread=thread,
+                    protocol=protocol,
+                    phase=target_phase,
+                    as_json=as_json,
+                )
             closed_or_updated = store.advance_phase(
                 resolved_thread_id,
                 next_phase=plan.next_phase,
@@ -8332,6 +8378,13 @@ def thread_create(
         store = _get_thread_store()
         locale = LocaleSettingsStore(store.data_dir).read().model_dump()
         initial_phase_def = proto.phases[0] if proto.phases else None
+        if initial_phase_def is not None:
+            _role_fulfillment_participant_violation_or_exit(
+                thread={"participants": participant or []},
+                protocol=proto,
+                phase=initial_phase_def,
+                as_json=as_json,
+            )
         phase_participants = (
             default_phase_participants({"participants": participant or []}, initial_phase_def, protocol=proto)
             if initial_phase_def is not None
@@ -8931,7 +8984,7 @@ def delegate_start(
             return
         payload = _attached_api_call_or_exit(f"/api/threads/{thread_id}/delegate/start", {})
     else:
-        payload = _delegate_start_local(thread_id, config)
+        payload = _delegate_start_local(thread_id, config, as_json=as_json)
     _emit_payload(payload, as_json=as_json)
 
 
@@ -9058,6 +9111,7 @@ def delegate_respond(
             summary=summary,
             resume_token=resume_token,
             config=config,
+            as_json=as_json,
         )
     _emit_payload(payload, as_json=as_json)
 

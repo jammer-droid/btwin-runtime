@@ -5,6 +5,7 @@ from btwin_core.delegation_engine import (
     build_delegation_assignment,
     build_subagent_spawn_packet,
     default_phase_participants,
+    role_fulfillment_participant_violation,
 )
 
 
@@ -249,6 +250,45 @@ def test_default_phase_participants_prefers_role_fulfillment_parent_for_custom_r
     }
 
     assert default_phase_participants(thread, phase, protocol=protocol) == ["planner"]
+
+
+def test_role_fulfillment_participant_violation_reports_missing_parent():
+    phase = ProtocolPhase(
+        name="review",
+        actions=["contribute"],
+        procedure=[{"role": "reviewer", "action": "review"}],
+    )
+    protocol = Protocol.model_validate(
+        {
+            "name": "custom-review",
+            "phases": [phase.model_dump()],
+            "role_fulfillment": {
+                "reviewer": {
+                    "mode": "managed_agent_subagent",
+                    "parent": "planner",
+                    "profile": "strict_reviewer",
+                    "subagent_type": "explorer",
+                }
+            },
+            "subagent_profiles": {
+                "strict_reviewer": {"description": "Review risks"},
+            },
+        }
+    )
+    thread = {
+        "thread_id": "thread-1",
+        "participants": [{"name": "moderator"}],
+        "phase_participants": ["moderator"],
+    }
+
+    violation = role_fulfillment_participant_violation(thread, phase, protocol)
+
+    assert violation is not None
+    assert violation["error"] == "role_fulfillment_participant_missing"
+    assert violation["role"] == "reviewer"
+    assert violation["participant_kind"] == "parent"
+    assert violation["participant"] == "planner"
+    assert "Add --participant planner" in violation["hint"]
 
 
 def test_build_delegation_assignment_blocks_when_role_binding_missing():
