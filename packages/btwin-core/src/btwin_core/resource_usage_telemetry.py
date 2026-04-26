@@ -17,13 +17,15 @@ class ResourceUsageTelemetryStore:
     def record_provider_usage(
         self,
         *,
-        thread_id: str,
         agent_name: str | None,
         phase: str | None,
         provider: str | None,
         provider_thread_id: str | None,
         provider_turn_id: str | None,
         token_usage: dict[str, object],
+        thread_id: str | None = None,
+        runtime_session_id: str | None = None,
+        btwin_thread_id: str | None = None,
         prompt_source: str = "runtime_prompt",
         context_sections: list[str] | tuple[str, ...] | None = None,
         cycle_index: int | None = None,
@@ -33,6 +35,15 @@ class ResourceUsageTelemetryStore:
         last = _coerce_breakdown(token_usage.get("last") if isinstance(token_usage, dict) else None)
         total = _coerce_breakdown(token_usage.get("total") if isinstance(token_usage, dict) else None)
         model_context_window = _coerce_int(token_usage.get("modelContextWindow")) if isinstance(token_usage, dict) else None
+        canonical_btwin_thread_id = _coerce_text(btwin_thread_id) or _coerce_text(thread_id)
+        canonical_runtime_session_id = (
+            _coerce_text(runtime_session_id)
+            or _derive_runtime_session_id(
+                btwin_thread_id=canonical_btwin_thread_id,
+                agent_name=agent_name,
+                provider_thread_id=provider_thread_id,
+            )
+        )
         input_tokens = last["inputTokens"]
         cached_input_tokens = last["cachedInputTokens"]
         uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
@@ -41,7 +52,9 @@ class ResourceUsageTelemetryStore:
             "recorded_at": datetime.now(timezone.utc).isoformat(),
             "event_type": "resource.provider_token_usage",
             "source": source,
-            "thread_id": thread_id,
+            "runtime_session_id": canonical_runtime_session_id,
+            "btwin_thread_id": canonical_btwin_thread_id,
+            "thread_id": canonical_btwin_thread_id,
             "agent_name": agent_name,
             "phase": phase,
             "provider": provider,
@@ -71,23 +84,48 @@ class ResourceUsageTelemetryStore:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
         return event
 
-    def tail(self, limit: int = 20, *, thread_id: str | None = None) -> list[dict[str, Any]]:
+    def tail(
+        self,
+        limit: int = 20,
+        *,
+        thread_id: str | None = None,
+        runtime_session_id: str | None = None,
+        provider_thread_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         if limit <= 0 or not self.file_path.exists():
             return []
 
         rows: list[dict[str, Any]] = []
         for event in reversed(self._read_events()):
-            if thread_id is not None and event.get("thread_id") != thread_id:
+            if thread_id is not None and _event_btwin_thread_id(event) != thread_id:
+                continue
+            if runtime_session_id is not None and event.get("runtime_session_id") != runtime_session_id:
+                continue
+            if provider_thread_id is not None and event.get("provider_thread_id") != provider_thread_id:
                 continue
             rows.append(event)
             if len(rows) >= limit:
                 break
         return rows
 
-    def summarize_provider_usage(self, *, thread_id: str | None = None, limit: int = 200) -> dict[str, Any]:
+    def summarize_provider_usage(
+        self,
+        *,
+        thread_id: str | None = None,
+        runtime_session_id: str | None = None,
+        provider_thread_id: str | None = None,
+        limit: int = 200,
+    ) -> dict[str, Any]:
         rows = [
             row
-            for row in reversed(self.tail(limit=limit, thread_id=thread_id))
+            for row in reversed(
+                self.tail(
+                    limit=limit,
+                    thread_id=thread_id,
+                    runtime_session_id=runtime_session_id,
+                    provider_thread_id=provider_thread_id,
+                )
+            )
             if row.get("event_type") == "resource.provider_token_usage"
         ]
         summary: dict[str, Any] = {
@@ -98,11 +136,23 @@ class ResourceUsageTelemetryStore:
             "actual_output_tokens": sum(int(row.get("actual_output_tokens") or 0) for row in rows),
             "actual_reasoning_output_tokens": sum(int(row.get("actual_reasoning_output_tokens") or 0) for row in rows),
             "actual_total_tokens": sum(int(row.get("actual_total_tokens") or 0) for row in rows),
+            "by_runtime_session": {},
+            "by_provider_thread": {},
             "by_agent": {},
             "by_phase": {},
             "hotspots": [],
         }
         for row in rows:
+            self._add_provider_group(
+                summary["by_runtime_session"],
+                str(row.get("runtime_session_id") or "unknown"),
+                row,
+            )
+            self._add_provider_group(
+                summary["by_provider_thread"],
+                str(row.get("provider_thread_id") or "unknown"),
+                row,
+            )
             self._add_provider_group(summary["by_agent"], str(row.get("agent_name") or "unknown"), row)
             self._add_provider_group(summary["by_phase"], str(row.get("phase") or "unknown"), row)
         summary["hotspots"] = sorted(
@@ -177,3 +227,25 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return numerator / denominator
+
+
+def _coerce_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _derive_runtime_session_id(
+    *,
+    btwin_thread_id: str | None,
+    agent_name: str | None,
+    provider_thread_id: str | None,
+) -> str | None:
+    if btwin_thread_id and agent_name:
+        return f"{btwin_thread_id}:{agent_name}"
+    return _coerce_text(provider_thread_id)
+
+
+def _event_btwin_thread_id(event: dict[str, Any]) -> object:
+    return event.get("btwin_thread_id") or event.get("thread_id")

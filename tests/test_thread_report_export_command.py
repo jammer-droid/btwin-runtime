@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import date
 from pathlib import Path
 
 import httpx
@@ -174,7 +175,8 @@ def test_thread_export_report_standalone_writes_self_contained_html(tmp_path, mo
     assert result.exit_code == 0, result.output
     payload = _parse_json_output(result.output)
     report_path = Path(payload["path"])
-    assert report_path == project_root / "docs" / "local" / "reports" / "2026-04-25-static-report-export-report.html"
+    today = date.today().isoformat()
+    assert report_path == project_root / "docs" / "local" / "reports" / f"{today}-static-report-export-report.html"
     assert report_path.exists()
     html = report_path.read_text(encoding="utf-8")
     assert "<!doctype html>" in html

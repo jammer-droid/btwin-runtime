@@ -94,3 +94,56 @@ def test_resource_usage_telemetry_summarizes_provider_usage_by_agent_and_phase(t
     assert summary["by_agent"]["reviewer"]["actual_reasoning_output_tokens"] == 20
     assert summary["by_phase"]["review"]["actual_uncached_input_tokens"] == 100
     assert summary["hotspots"][0]["agent_name"] == "reviewer"
+
+
+def test_resource_usage_telemetry_records_runtime_session_usage_without_protocol_thread(tmp_path: Path) -> None:
+    store = ResourceUsageTelemetryStore(tmp_path)
+
+    store.record_provider_usage(
+        runtime_session_id="runtime-session-1",
+        thread_id=None,
+        agent_name="foreground",
+        phase=None,
+        provider="codex",
+        provider_thread_id="codex-thread-1",
+        provider_turn_id="turn-1",
+        token_usage={
+            "last": {
+                "inputTokens": 50,
+                "cachedInputTokens": 10,
+                "outputTokens": 8,
+                "reasoningOutputTokens": 2,
+                "totalTokens": 60,
+            }
+        },
+    )
+    store.record_provider_usage(
+        runtime_session_id="runtime-session-2",
+        thread_id="thread-2",
+        agent_name="developer",
+        phase="implement",
+        provider="codex",
+        provider_thread_id="codex-thread-2",
+        provider_turn_id="turn-2",
+        token_usage={
+            "last": {
+                "inputTokens": 100,
+                "cachedInputTokens": 20,
+                "outputTokens": 10,
+                "reasoningOutputTokens": 0,
+                "totalTokens": 110,
+            }
+        },
+    )
+
+    rows = store.tail(limit=10, runtime_session_id="runtime-session-1")
+    summary = store.summarize_provider_usage(runtime_session_id="runtime-session-1")
+
+    assert len(rows) == 1
+    assert rows[0]["runtime_session_id"] == "runtime-session-1"
+    assert rows[0]["btwin_thread_id"] is None
+    assert rows[0]["thread_id"] is None
+    assert summary["event_count"] == 1
+    assert summary["actual_total_tokens"] == 60
+    assert summary["by_runtime_session"]["runtime-session-1"]["actual_total_tokens"] == 60
+    assert "runtime-session-2" not in summary["by_runtime_session"]

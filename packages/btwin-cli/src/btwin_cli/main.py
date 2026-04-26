@@ -265,12 +265,49 @@ def _validation_telemetry_rows(
 
 
 def _resource_usage_rows(
-    thread_id: str,
+    thread_id: str | None,
     config: BTwinConfig | None = None,
     limit: int = 200,
+    runtime_session_id: str | None = None,
+    provider_thread_id: str | None = None,
 ) -> list[dict[str, object]]:
     store = ResourceUsageTelemetryStore(_shared_runtime_data_dir(config))
-    return store.tail(limit=limit, thread_id=thread_id)
+    return store.tail(
+        limit=limit,
+        thread_id=thread_id,
+        runtime_session_id=runtime_session_id,
+        provider_thread_id=provider_thread_id,
+    )
+
+
+def _runtime_usage_payload(
+    *,
+    thread_id: str | None,
+    runtime_session_id: str | None,
+    provider_thread_id: str | None,
+    limit: int,
+    config: BTwinConfig | None = None,
+) -> dict[str, object]:
+    store = ResourceUsageTelemetryStore(_shared_runtime_data_dir(config))
+    return {
+        "filters": {
+            "thread_id": thread_id,
+            "runtime_session_id": runtime_session_id,
+            "provider_thread_id": provider_thread_id,
+        },
+        "summary": store.summarize_provider_usage(
+            thread_id=thread_id,
+            runtime_session_id=runtime_session_id,
+            provider_thread_id=provider_thread_id,
+            limit=max(limit, 200),
+        ),
+        "rows": store.tail(
+            limit=limit,
+            thread_id=thread_id,
+            runtime_session_id=runtime_session_id,
+            provider_thread_id=provider_thread_id,
+        ),
+    }
 
 
 def _iso_now() -> str:
@@ -9689,6 +9726,26 @@ def runtime_clear(
         "previous_thread": previous_thread,
         "previous_binding_error": previous.binding_error,
     }
+    _emit_payload(payload, as_json=as_json)
+
+
+@runtime_app.command("usage")
+def runtime_usage(
+    thread_id: str | None = typer.Option(None, "--thread", help="Filter by B-TWIN thread id"),
+    runtime_session_id: str | None = typer.Option(None, "--session", help="Filter by runtime session id"),
+    provider_thread_id: str | None = typer.Option(None, "--provider-thread", help="Filter by provider thread id"),
+    limit: int = typer.Option(20, "--limit", min=1, help="Maximum usage rows to return"),
+    as_json: bool = typer.Option(False, "--json", help="Output JSON"),
+):
+    """Show provider token usage by runtime/session identity."""
+    config = _get_config()
+    payload = _runtime_usage_payload(
+        thread_id=thread_id,
+        runtime_session_id=runtime_session_id,
+        provider_thread_id=provider_thread_id,
+        limit=limit,
+        config=config,
+    )
     _emit_payload(payload, as_json=as_json)
 
 

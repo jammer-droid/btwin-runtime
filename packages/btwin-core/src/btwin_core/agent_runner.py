@@ -68,6 +68,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _runtime_session_id(thread_id: str, agent_name: str) -> str:
+    return f"{thread_id}:{agent_name}"
+
+
 def _prompt_context_sections(prompt: str) -> dict[str, str]:
     sections: dict[str, list[str]] = {}
     current = "preamble"
@@ -874,6 +878,7 @@ class AgentRunner:
             response_text=final_result.response_text,
             truncated=delivered_prompt_truncated,
             provider_usage=final_result.provider_usage,
+            runtime_session_id=_runtime_session_id(thread_id, agent_name),
         )
         return final_result
 
@@ -3027,6 +3032,7 @@ class AgentRunner:
         response_text: str,
         truncated: bool,
         provider_usage: dict[str, object] | None = None,
+        runtime_session_id: str | None = None,
     ) -> None:
         thread = self._threads.get_thread(thread_id)
         phase = thread.get("current_phase") if thread is not None else None
@@ -3041,6 +3047,7 @@ class AgentRunner:
             cycle_index = phase_cycle.cycle_index if phase_cycle is not None else None
             self._resource_usage.record_provider_usage(
                 thread_id=thread_id,
+                runtime_session_id=runtime_session_id or _runtime_session_id(thread_id, agent_name),
                 agent_name=agent_name,
                 phase=phase if isinstance(phase, str) else None,
                 provider=str(provider_usage.get("provider") or ""),

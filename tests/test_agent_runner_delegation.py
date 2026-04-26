@@ -176,6 +176,8 @@ def test_agent_runner_records_provider_token_usage(tmp_path: Path) -> None:
     assert len(rows) == 1
     assert rows[0]["event_type"] == "resource.provider_token_usage"
     assert rows[0]["agent_name"] == "alice"
+    assert rows[0]["runtime_session_id"] == f"{thread['thread_id']}:alice"
+    assert rows[0]["btwin_thread_id"] == thread["thread_id"]
     assert rows[0]["phase"] == "analysis"
     assert rows[0]["prompt_source"] == "context_pack"
     assert rows[0]["actual_total_tokens"] == 120
