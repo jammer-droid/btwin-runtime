@@ -5514,6 +5514,28 @@ def _attached_api_get_or_exit(path: str, params: dict | None = None):
         raise typer.Exit(1)
 
 
+def _delegate_resume_timeout_payload(
+    thread_id: str,
+    *,
+    status_payload: dict[str, object] | None,
+    error: object,
+) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    if status_payload:
+        payload.update(status_payload)
+    payload.setdefault("thread_id", thread_id)
+    payload["resume_request_timed_out"] = True
+    payload["reason"] = "resume_request_timed_out"
+    payload["message"] = (
+        "delegate resume timed out while waiting for the attached API response; "
+        "the helper runtime may still be running."
+    )
+    payload["suggested_next_command"] = f"btwin delegate status --thread {thread_id} --json"
+    payload["wait_command"] = f"btwin delegate wait --thread {thread_id} --json"
+    payload["error"] = f"{error.__class__.__name__}: {error}"
+    return payload
+
+
 def _require_attached_live(config: BTwinConfig) -> None:
     if _use_attached_api(config):
         return
@@ -8683,13 +8705,53 @@ def delegate_resume(
     """Reattach the current delegated agent and replay pending work."""
     config = _get_config()
     if _use_attached_api(config):
-        payload = _attached_api_call_or_exit(
-            f"/api/threads/{thread_id}/delegate/resume",
-            {
-                "bypassPermissions": full_auto,
-                "projectRoot": str(_project_root()),
-            },
-        )
+        import httpx
+
+        try:
+            payload = _api_post(
+                f"/api/threads/{thread_id}/delegate/resume",
+                {
+                    "bypassPermissions": full_auto,
+                    "projectRoot": str(_project_root()),
+                },
+            )
+        except httpx.ReadTimeout as exc:
+            status_payload: dict[str, object] | None = None
+            try:
+                status = _api_get(f"/api/threads/{thread_id}/delegate/status")
+                if isinstance(status, dict):
+                    status_payload = status
+            except httpx.HTTPStatusError as status_exc:
+                if as_json:
+                    status_payload = {
+                        "thread_id": thread_id,
+                        "status_lookup_error": (
+                            f"HTTPStatusError: {status_exc.response.status_code}"
+                        ),
+                    }
+                else:
+                    _render_attached_http_status_error(status_exc)
+                    raise typer.Exit(_attached_http_status_exit_code(status_exc))
+            except httpx.RequestError as status_exc:
+                if as_json:
+                    status_payload = {
+                        "thread_id": thread_id,
+                        "status_lookup_error": f"{status_exc.__class__.__name__}: {status_exc}",
+                    }
+                else:
+                    _render_attached_transport_error(status_exc)
+                    raise typer.Exit(1)
+            payload = _delegate_resume_timeout_payload(
+                thread_id,
+                status_payload=status_payload,
+                error=exc,
+            )
+        except httpx.HTTPStatusError as exc:
+            _render_attached_http_status_error(exc)
+            raise typer.Exit(_attached_http_status_exit_code(exc))
+        except httpx.RequestError as exc:
+            _render_attached_transport_error(exc)
+            raise typer.Exit(1)
     else:
         payload = _delegate_status_local(thread_id, config)
         payload = {

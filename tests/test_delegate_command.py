@@ -407,7 +407,7 @@ def test_delegate_resume_uses_attached_api_when_attached(tmp_path, monkeypatch):
 
     calls: list[tuple[str, object]] = []
 
-    def fake_attached_post(path: str, data: dict) -> dict:
+    def fake_api_post(path: str, data: dict) -> dict:
         calls.append((path, data))
         return {
             "thread_id": "thread-1",
@@ -417,7 +417,7 @@ def test_delegate_resume_uses_attached_api_when_attached(tmp_path, monkeypatch):
             "pending_replayed": 1,
         }
 
-    monkeypatch.setattr(main, "_attached_api_call_or_exit", fake_attached_post)
+    monkeypatch.setattr(main, "_api_post", fake_api_post)
 
     result = runner.invoke(app, ["delegate", "resume", "--thread", "thread-1", "--json"])
 
@@ -430,6 +430,52 @@ def test_delegate_resume_uses_attached_api_when_attached(tmp_path, monkeypatch):
             "/api/threads/thread-1/delegate/resume",
             {"bypassPermissions": True, "projectRoot": str(project_root)},
         )
+    ]
+
+
+def test_delegate_resume_attached_json_returns_status_packet_on_read_timeout(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _attached_config(data_dir))
+
+    calls: list[tuple[str, object]] = []
+    request = httpx.Request("POST", "http://test/api/threads/thread-1/delegate/resume")
+
+    def fake_api_post(path: str, data: dict) -> dict:
+        calls.append((path, data))
+        raise httpx.ReadTimeout("resume is still running", request=request)
+
+    def fake_api_get(path: str, params: dict | None = None) -> dict:
+        calls.append((path, params))
+        return {
+            "thread_id": "thread-1",
+            "status": "running",
+            "resolved_agent": "alice",
+            "required_action": "submit_contribution",
+        }
+
+    monkeypatch.setattr(main, "_api_post", fake_api_post)
+    monkeypatch.setattr(main, "_api_get", fake_api_get)
+
+    result = runner.invoke(app, ["delegate", "resume", "--thread", "thread-1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["thread_id"] == "thread-1"
+    assert payload["status"] == "running"
+    assert payload["resume_request_timed_out"] is True
+    assert payload["reason"] == "resume_request_timed_out"
+    assert payload["resolved_agent"] == "alice"
+    assert "delegate status --thread thread-1 --json" in payload["suggested_next_command"]
+    assert "delegate wait --thread thread-1 --json" in payload["wait_command"]
+    assert calls == [
+        (
+            "/api/threads/thread-1/delegate/resume",
+            {"bypassPermissions": True, "projectRoot": str(project_root)},
+        ),
+        ("/api/threads/thread-1/delegate/status", None),
     ]
 
 
