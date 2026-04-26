@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+UNCACHED_INPUT_RATIO_WARNING_THRESHOLD = 0.5
+REASONING_RATIO_WARNING_THRESHOLD = 0.3
+TURN_TOTAL_TOKENS_WARNING_THRESHOLD = 50_000
+
 
 class ResourceUsageTelemetryStore:
     def __init__(self, data_dir: Path) -> None:
@@ -48,6 +52,14 @@ class ResourceUsageTelemetryStore:
         cached_input_tokens = last["cachedInputTokens"]
         uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
         total_tokens = last["totalTokens"]
+        cache_hit_ratio = _safe_ratio(cached_input_tokens, input_tokens)
+        uncached_input_ratio = _safe_ratio(uncached_input_tokens, input_tokens)
+        reasoning_ratio = _safe_ratio(last["reasoningOutputTokens"], total_tokens)
+        usage_warnings = _usage_warnings(
+            uncached_input_ratio=uncached_input_ratio,
+            reasoning_ratio=reasoning_ratio,
+            total_tokens=total_tokens,
+        )
         event: dict[str, Any] = {
             "recorded_at": datetime.now(timezone.utc).isoformat(),
             "event_type": "resource.provider_token_usage",
@@ -68,9 +80,9 @@ class ResourceUsageTelemetryStore:
             "actual_output_tokens": last["outputTokens"],
             "actual_reasoning_output_tokens": last["reasoningOutputTokens"],
             "actual_total_tokens": total_tokens,
-            "actual_cache_hit_ratio": _safe_ratio(cached_input_tokens, input_tokens),
-            "actual_uncached_input_ratio": _safe_ratio(uncached_input_tokens, input_tokens),
-            "actual_reasoning_ratio": _safe_ratio(last["reasoningOutputTokens"], total_tokens),
+            "actual_cache_hit_ratio": cache_hit_ratio,
+            "actual_uncached_input_ratio": uncached_input_ratio,
+            "actual_reasoning_ratio": reasoning_ratio,
             "model_context_window": model_context_window,
             "provider_usage": {
                 "last": last,
@@ -78,6 +90,7 @@ class ResourceUsageTelemetryStore:
                 "modelContextWindow": model_context_window,
             },
             "context_sections": list(context_sections or []),
+            "usage_warnings": usage_warnings,
             "schema_version": schema_version,
         }
         with self.file_path.open("a", encoding="utf-8") as handle:
@@ -140,6 +153,8 @@ class ResourceUsageTelemetryStore:
             "by_provider_thread": {},
             "by_agent": {},
             "by_phase": {},
+            "by_cycle": {},
+            "warning_counts": {},
             "hotspots": [],
         }
         for row in rows:
@@ -155,6 +170,10 @@ class ResourceUsageTelemetryStore:
             )
             self._add_provider_group(summary["by_agent"], str(row.get("agent_name") or "unknown"), row)
             self._add_provider_group(summary["by_phase"], str(row.get("phase") or "unknown"), row)
+            self._add_provider_group(summary["by_cycle"], str(row.get("cycle_index") or "unknown"), row)
+            for warning in row.get("usage_warnings") or []:
+                if isinstance(warning, str) and warning:
+                    summary["warning_counts"][warning] = int(summary["warning_counts"].get(warning, 0)) + 1
         summary["hotspots"] = sorted(
             rows,
             key=lambda item: int(item.get("actual_total_tokens") or 0),
@@ -227,6 +246,22 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return numerator / denominator
+
+
+def _usage_warnings(
+    *,
+    uncached_input_ratio: float,
+    reasoning_ratio: float,
+    total_tokens: int,
+) -> list[str]:
+    warnings: list[str] = []
+    if uncached_input_ratio >= UNCACHED_INPUT_RATIO_WARNING_THRESHOLD:
+        warnings.append("uncached_input_ratio_high")
+    if reasoning_ratio >= REASONING_RATIO_WARNING_THRESHOLD:
+        warnings.append("reasoning_ratio_high")
+    if total_tokens >= TURN_TOTAL_TOKENS_WARNING_THRESHOLD:
+        warnings.append("turn_total_tokens_high")
+    return warnings
 
 
 def _coerce_text(value: object) -> str | None:

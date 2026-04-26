@@ -71,6 +71,7 @@ class SessionDeliveryResult:
     outputs: tuple[object, ...] = ()
     provider_session_id: str | None = None
     provider_usage: dict[str, object] | None = None
+    provider_usage_recorded: bool = False
     fallback_mode: str | None = None
 
 

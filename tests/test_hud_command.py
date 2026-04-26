@@ -20,6 +20,7 @@ from btwin_core.protocol_store import (
     compile_protocol_definition,
 )
 from btwin_core.runtime_binding_store import RuntimeBindingStore
+from btwin_core.resource_usage_telemetry import ResourceUsageTelemetryStore
 from btwin_core.thread_store import ThreadStore
 from btwin_core.workflow_event_log import WorkflowEventLog
 
@@ -100,6 +101,47 @@ def test_hud_with_binding_shows_bound_thread_and_recent_events(tmp_path, monkeyp
     assert thread["thread_id"] in result.output
     assert "phase=context" in result.output
     assert "Stop allowed." in result.output
+
+
+def test_hud_thread_snapshot_shows_runtime_token_usage(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    data_dir = tmp_path / ".btwin"
+    thread_store = ThreadStore(project_root / ".btwin" / "threads")
+    thread = thread_store.create_thread(
+        topic="HUD usage thread",
+        protocol="debate",
+        participants=["alice"],
+        initial_phase="context",
+    )
+    ResourceUsageTelemetryStore(project_root / ".btwin").record_provider_usage(
+        thread_id=thread["thread_id"],
+        runtime_session_id=f"{thread['thread_id']}:alice",
+        agent_name="alice",
+        phase="context",
+        provider="codex",
+        provider_thread_id="provider-thread-1",
+        provider_turn_id="turn-1",
+        token_usage={
+            "last": {
+                "inputTokens": 100,
+                "cachedInputTokens": 40,
+                "outputTokens": 20,
+                "reasoningOutputTokens": 5,
+                "totalTokens": 120,
+            }
+        },
+    )
+
+    monkeypatch.setattr(main, "_project_root", lambda: project_root)
+    monkeypatch.setattr(main, "_get_config", lambda: _standalone_config(data_dir))
+    monkeypatch.setattr(main, "_get_thread_store", lambda: thread_store)
+
+    rendered = main._render_hud(thread["thread_id"], limit=5)
+
+    assert "Token Usage" in rendered
+    assert "actual=120" in rendered
+    assert "uncached=60" in rendered
+    assert "reasoning=5" in rendered
 
 
 def test_hud_keeps_only_compact_latest_event_snapshot(tmp_path, monkeypatch):

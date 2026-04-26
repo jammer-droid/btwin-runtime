@@ -140,7 +140,7 @@ class ContextFormatter:
                 "phase": contrib.get("phase", ""),
                 "tldr": contrib.get("tldr") or _first_content_line(contrib.get("_content")),
             }
-            for contrib in contributions[:6]
+            for contrib in contributions[-6:]
         ]
         active_feedback = [
             item

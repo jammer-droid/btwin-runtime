@@ -147,3 +147,35 @@ def test_resource_usage_telemetry_records_runtime_session_usage_without_protocol
     assert summary["actual_total_tokens"] == 60
     assert summary["by_runtime_session"]["runtime-session-1"]["actual_total_tokens"] == 60
     assert "runtime-session-2" not in summary["by_runtime_session"]
+
+
+def test_resource_usage_telemetry_marks_soft_warning_thresholds(tmp_path: Path) -> None:
+    store = ResourceUsageTelemetryStore(tmp_path)
+
+    event = store.record_provider_usage(
+        thread_id="thread-1",
+        runtime_session_id="thread-1:developer",
+        agent_name="developer",
+        phase="implement",
+        provider="codex",
+        provider_thread_id="provider-thread-1",
+        provider_turn_id="turn-1",
+        cycle_index=2,
+        token_usage={
+            "last": {
+                "inputTokens": 100,
+                "cachedInputTokens": 20,
+                "outputTokens": 10,
+                "reasoningOutputTokens": 35,
+                "totalTokens": 100,
+            }
+        },
+    )
+
+    summary = store.summarize_provider_usage(thread_id="thread-1")
+
+    assert "uncached_input_ratio_high" in event["usage_warnings"]
+    assert "reasoning_ratio_high" in event["usage_warnings"]
+    assert summary["by_cycle"]["2"]["actual_total_tokens"] == 100
+    assert summary["warning_counts"]["uncached_input_ratio_high"] == 1
+    assert summary["warning_counts"]["reasoning_ratio_high"] == 1

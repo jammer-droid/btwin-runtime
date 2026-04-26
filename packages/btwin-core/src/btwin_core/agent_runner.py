@@ -104,6 +104,7 @@ class InvocationResult:
     session_resumed: bool = False
     session_id_captured: str | None = None
     provider_usage: dict[str, object] | None = None
+    provider_usage_recorded: bool = False
 
 
 @dataclass(frozen=True)
@@ -643,6 +644,7 @@ class AgentRunner:
                         outputs=result.outputs,
                         provider_session_id=result.session_id_captured,
                         provider_usage=result.provider_usage,
+                        provider_usage_recorded=result.provider_usage_recorded,
                     )
                 if attempted_transport_mode == "live_process_transport":
                     runtime_session.last_transport_error = (
@@ -837,6 +839,7 @@ class AgentRunner:
                     outputs=result.outputs,
                     provider_session_id=result.session_id_captured,
                     provider_usage=result.provider_usage,
+                    provider_usage_recorded=result.provider_usage_recorded,
                 )
 
             self._mark_recovery_failed(runtime_session)
@@ -870,16 +873,18 @@ class AgentRunner:
         final_result.response_text = delivery.response_text
         final_result.outputs = tuple(delivery.outputs)
         final_result.provider_usage = delivery.provider_usage
+        final_result.provider_usage_recorded = delivery.provider_usage_recorded
         final_result.session_id_captured = session.provider_session_id if session else None
-        self._record_resource_usage(
-            thread_id=thread_id,
-            agent_name=agent_name,
-            prompt=delivered_prompt,
-            response_text=final_result.response_text,
-            truncated=delivered_prompt_truncated,
-            provider_usage=final_result.provider_usage,
-            runtime_session_id=_runtime_session_id(thread_id, agent_name),
-        )
+        if not final_result.provider_usage_recorded:
+            self._record_resource_usage(
+                thread_id=thread_id,
+                agent_name=agent_name,
+                prompt=delivered_prompt,
+                response_text=final_result.response_text,
+                truncated=delivered_prompt_truncated,
+                provider_usage=final_result.provider_usage,
+                runtime_session_id=_runtime_session_id(thread_id, agent_name),
+            )
         return final_result
 
     # --- Spawn ---
@@ -2009,6 +2014,7 @@ class AgentRunner:
             final_text = ""
             captured_session_id = session.provider_session_id
             latest_provider_usage: dict[str, object] | None = None
+            provider_usage_recorded = False
             seen_text_delta = False
             turn_complete_seen = False
             active_turn_id: str | None = None
@@ -2133,6 +2139,16 @@ class AgentRunner:
                             "provider_turn_id": event.metadata.get("provider_turn_id") or event.content,
                             "token_usage": usage,
                         }
+                        self._record_resource_usage(
+                            thread_id=thread_id,
+                            agent_name=agent_name,
+                            prompt=prompt,
+                            response_text="",
+                            truncated=False,
+                            provider_usage=latest_provider_usage,
+                            runtime_session_id=_runtime_session_id(thread_id, agent_name),
+                        )
+                        provider_usage_recorded = True
                         self._log_runtime_event(
                             "runtime_provider_token_usage",
                             thread_id=thread_id,
@@ -2273,6 +2289,7 @@ class AgentRunner:
                 outputs=tuple(completed_outputs),
                 session_id_captured=captured_session_id,
                 provider_usage=latest_provider_usage,
+                provider_usage_recorded=provider_usage_recorded,
             )
         except HelperOverlayBootstrapError as exc:
             session.last_transport_error = str(exc)

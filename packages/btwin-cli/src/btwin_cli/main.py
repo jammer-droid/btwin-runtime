@@ -310,6 +310,26 @@ def _runtime_usage_payload(
     }
 
 
+def _runtime_usage_summary_lines(thread_id: str, config: BTwinConfig | None = None) -> list[str]:
+    summary = ResourceUsageTelemetryStore(_shared_runtime_data_dir(config)).summarize_provider_usage(
+        thread_id=thread_id,
+    )
+    event_count = int(summary.get("event_count") or 0)
+    if event_count <= 0:
+        return []
+    return [
+        (
+            f"actual={int(summary.get('actual_total_tokens') or 0)}  "
+            f"input={int(summary.get('actual_input_tokens') or 0)}  "
+            f"cached={int(summary.get('actual_cached_input_tokens') or 0)}  "
+            f"uncached={int(summary.get('actual_uncached_input_tokens') or 0)}  "
+            f"output={int(summary.get('actual_output_tokens') or 0)}  "
+            f"reasoning={int(summary.get('actual_reasoning_output_tokens') or 0)}  "
+            f"events={event_count}"
+        )
+    ]
+
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1431,6 +1451,10 @@ def _render_hud_thread_snapshot(
     if runtime_lines:
         lines.extend(["", "Runtime"])
         lines.extend(runtime_lines)
+    usage_lines = _runtime_usage_summary_lines(thread_id, config)
+    if usage_lines:
+        lines.extend(["", "Token Usage"])
+        lines.extend(usage_lines)
     if trace_rows:
         lines.extend(["", "Latest"])
         lines.extend(_render_trace_row_lines(trace_rows[-1]))
@@ -2309,6 +2333,11 @@ def _render_thread_detail(
                 lines.append(f"          {detail_line}")
     else:
         lines.append("No recent workflow events")
+
+    usage_lines = _runtime_usage_summary_lines(thread_id, config)
+    if usage_lines:
+        _append_detail_section(lines, "Token Usage")
+        lines.extend(usage_lines)
 
     _append_detail_section(lines, "Agent Sessions")
     if agent_session_rows:

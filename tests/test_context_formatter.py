@@ -73,6 +73,50 @@ def test_context_pack_prompt_uses_current_phase_contract_without_full_protocol_d
     assert "Continue the implementation." in rendered
 
 
+def test_context_pack_prefers_latest_contribution_summaries() -> None:
+    thread = {
+        "thread_id": "thread-123",
+        "topic": "Latest contribution context",
+        "protocol": "report-flow",
+        "current_phase": "implement",
+        "participants": [{"name": "developer"}],
+    }
+    protocol = {
+        "name": "report-flow",
+        "phases": [
+            {
+                "name": "implement",
+                "actions": ["contribute"],
+                "template": [{"section": "implementation", "required": True}],
+            }
+        ],
+    }
+    contributions = [
+        {
+            "agent": f"agent-{index}",
+            "phase": "implement",
+            "tldr": f"Contribution summary {index}",
+            "_content": f"## implementation\nRaw body {index}",
+        }
+        for index in range(8)
+    ]
+
+    snapshot = ContextFormatter.build_context_pack(
+        thread=thread,
+        protocol=protocol,
+        messages=[],
+        contributions=contributions,
+        agent_name="developer",
+    )
+    rendered = ContextFormatter.render_context_pack_prompt(snapshot, ask="Continue.")
+
+    assert "Contribution summary 0" not in rendered
+    assert "Contribution summary 1" not in rendered
+    assert "Contribution summary 2" in rendered
+    assert "Contribution summary 7" in rendered
+    assert "Raw body" not in rendered
+
+
 def test_format_initial_context_prefers_cli_contribution_command_for_spawned_helpers() -> None:
     thread = {
         "thread_id": "thread-123",
