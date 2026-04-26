@@ -65,6 +65,17 @@ Common sequence:
 - Inbox flow: `thread send-message -> thread inbox -> agent inbox -> ack-message`
 - Runtime helper flow: `runtime bind -> runtime current -> protocol next/apply-next -> runtime clear`
 - Runtime recovery flow: `thread create -> live attach -> induce fallback/recovery -> hud verify runtime events -> final status check`
+- Protocol authoring and managed subagent flow: `btwin protocol scaffold -> validate -> preview -> create -> thread create -> delegate start -> contribution submit -> protocol apply-next -> delegate start -> contribution submit with executor metadata`.
+
+For managed subagent scenarios, assert JSON-visible facts, including:
+
+- preview shows `managed_agent_subagent` for the target role
+- `spawn_packet.packet_type` is `btwin.managed_agent_subagent.dispatch`
+- the parent inbox contains the generated dispatch packet
+- the contribution preserves executor metadata
+- tool policy remains declared unless runtime enforcement is explicitly under test
+
+The compact flow name for this family is: `scaffold -> validate -> preview -> create`.
 
 If attached direct delivery is not the behavior under test, prefer `--delivery-mode broadcast`.
 In attached mode, direct delivery can require the target agent to already be active in that thread runtime.

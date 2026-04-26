@@ -16,6 +16,47 @@
 - **standalone**: local-only mode. Direct CLI/local runtime paths resolve storage from the current process and support `btwin chat`.
 - `btwin chat` is standalone-only because it depends on a direct local LLM/session loop rather than the shared API path.
 
+## Orchestration Authoring
+
+For custom protocol work, prefer the CLI-first authoring loop:
+
+```bash
+btwin protocol scaffold <name> --template review --out <name>.yaml
+btwin protocol validate --file <name>.yaml
+btwin protocol preview --file <name>.yaml
+btwin protocol create --file <name>.yaml
+```
+
+Use `btwin protocol preview --file ... --json` before creating a thread when
+you need to inspect how B-TWIN will interpret `role_fulfillment` and
+`subagent_profiles`. The preview should show each role, fulfillment mode,
+registered agent or parent executor, subagent profile, and declared tool policy.
+
+`managed_agent_subagent` means B-TWIN dispatches the role to a managed parent
+agent, and that parent spawns the Codex sub-agent from a B-TWIN dispatch packet.
+The B-TWIN packet and contribution metadata remain the durable source of truth.
+Current subagent tool policy is declared metadata; tool policy is declared, not
+runtime-enforced, unless a future provider smoke proves enforcement.
+
+## Delegation Resume Vocabulary
+
+Use `btwin delegate wait/status/respond` as the operator resume surface for a
+running thread-scoped delegation loop. Treat `delegate wait/status/respond` as a
+resume contract, not a mailbox polling shortcut.
+
+When reading or reporting delegation state, preserve these fields when present:
+
+- `target_role`: protocol role currently expected to act
+- `resolved_agent`: concrete parent/registered agent selected for the role
+- `required_action`: what must happen next, such as `submit_contribution` or `record_outcome`
+- `expected_output`: result shape the current role should produce
+- `reason_blocked`: deterministic reason the loop cannot continue
+- `suggested_next_command`: command the foreground operator can run next
+
+HUD and reports should describe executor lineage explicitly. For
+`managed_agent_subagent`, distinguish the durable parent executor from the
+ephemeral subagent profile and preserve executor metadata on contributions.
+
 ## Recording Rules
 
 ### Always use absolute paths
