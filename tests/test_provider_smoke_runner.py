@@ -460,6 +460,154 @@ def _run_delegation_provider_smoke(provider_smoke_env: dict[str, str]) -> dict[s
     return payload
 
 
+def _run_scaffolded_managed_subagent_provider_smoke(
+    provider_smoke_env: dict[str, str],
+) -> dict[str, object]:
+    _provider_preflight(provider_smoke_env)
+    run_dir = _provider_run_dir(provider_smoke_env)
+    protocol_path = run_dir / "subagent-review.yaml"
+
+    scaffold = _run_btwin(
+        provider_smoke_env,
+        "protocol",
+        "scaffold",
+        "subagent-review",
+        "--template",
+        "review",
+        "--out",
+        str(protocol_path),
+        "--json",
+    )
+    validate = _run_btwin(
+        provider_smoke_env,
+        "protocol",
+        "validate",
+        "--file",
+        str(protocol_path),
+        "--json",
+    )
+    preview = _run_btwin(
+        provider_smoke_env,
+        "protocol",
+        "preview",
+        "--file",
+        str(protocol_path),
+        "--json",
+    )
+    create = _run_btwin(
+        provider_smoke_env,
+        "protocol",
+        "create",
+        "--file",
+        str(protocol_path),
+        "--json",
+    )
+    _run_btwin(
+        provider_smoke_env,
+        "agent",
+        "create",
+        "planner",
+        "--provider",
+        "codex",
+        "--role",
+        "planner",
+        "--model",
+        provider_smoke_env["provider_model"],
+        "--json",
+    )
+
+    thread = _run_btwin(
+        provider_smoke_env,
+        "thread",
+        "create",
+        "--topic",
+        "Scaffolded managed subagent smoke",
+        "--protocol",
+        "subagent-review",
+        "--participant",
+        "planner",
+        "--json",
+    )
+    thread_id = str(thread["thread_id"])
+    first_start = _run_btwin(provider_smoke_env, "delegate", "start", "--thread", thread_id, "--json")
+    _run_btwin(
+        provider_smoke_env,
+        "contribution",
+        "submit",
+        "--thread",
+        thread_id,
+        "--agent",
+        "planner",
+        "--phase",
+        "plan",
+        "--content",
+        "## Plan\nPrepare a focused managed subagent review.",
+        "--tldr",
+        "planner phase complete",
+        "--json",
+    )
+    applied = _run_btwin(provider_smoke_env, "protocol", "apply-next", "--thread", thread_id, "--json")
+    subagent_start = _run_btwin(provider_smoke_env, "delegate", "start", "--thread", thread_id, "--json")
+    planner_inbox = _capture_pending_messages(provider_smoke_env, thread_id=thread_id, agent_name="planner")
+    packet = subagent_start["spawn_packet"]
+    contribution = _run_btwin(
+        provider_smoke_env,
+        "contribution",
+        "submit",
+        "--thread",
+        thread_id,
+        "--agent",
+        packet["executor"]["suggested_contribution_agent"],
+        "--phase",
+        "review",
+        "--content",
+        "## Findings\nNo blocking issues found in the smoke path.",
+        "--tldr",
+        "managed subagent review complete",
+        "--executor-type",
+        packet["executor"]["executor_type"],
+        "--executor-id",
+        packet["executor"]["executor_id"],
+        "--subagent-profile",
+        packet["dispatch"]["profile"],
+        "--parent-executor",
+        packet["executor"]["parent_executor"],
+        "--dispatch-id",
+        packet["dispatch"]["dispatch_id"],
+        "--json",
+    )
+    reevaluate_after_subagent = _run_btwin(
+        provider_smoke_env,
+        "delegate",
+        "start",
+        "--thread",
+        thread_id,
+        "--json",
+    )
+    final_status = _run_btwin(provider_smoke_env, "delegate", "status", "--thread", thread_id, "--json")
+
+    payload = {
+        "thread_id": thread_id,
+        "scaffold": scaffold,
+        "validate": validate,
+        "preview": preview,
+        "create": create,
+        "thread": thread,
+        "first_start": first_start,
+        "applied": applied,
+        "subagent_start": subagent_start,
+        "planner_inbox": planner_inbox,
+        "contribution": contribution,
+        "reevaluate_after_subagent": reevaluate_after_subagent,
+        "final_status": final_status,
+    }
+    (run_dir / "scaffolded-managed-subagent-smoke.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return payload
+
+
 def _run_scripted_provider_smoke(provider_smoke_env: dict[str, str]) -> dict[str, object]:
     state = _setup_provider_smoke_thread(
         provider_smoke_env,
@@ -756,6 +904,41 @@ def test_provider_smoke_delegation_loop_covers_manual_steps_1_to_6(provider_smok
     assert result["runtime_status"]["transport_mode"] == "live_process_transport"
     assert result["agent_inbox"]["context"]["runtime_mode"] == "attached"
     assert result["agent_inbox"]["attached_runtime_diagnostics"]
+
+
+def test_provider_smoke_scaffolded_custom_protocol_managed_subagent_path(provider_smoke_env) -> None:
+    result = _run_scaffolded_managed_subagent_provider_smoke(provider_smoke_env)
+
+    assert result["scaffold"]["created"] is True
+    assert result["validate"]["valid"] is True
+    assert result["validate"]["role_count"] == 2
+    assert result["validate"]["role_fulfillment_count"] == 2
+    assert result["validate"]["subagent_profile_count"] == 1
+    roles = {item["role"]: item for item in result["preview"]["roles"]}
+    assert roles["reviewer"]["fulfillment_mode"] == "managed_agent_subagent"
+    assert roles["reviewer"]["profile"] == "strict_reviewer"
+    assert result["create"]["saved"] is True
+    assert result["first_start"]["status"] == "running"
+    assert result["first_start"]["target_role"] == "planner"
+    assert result["first_start"]["fulfillment_mode"] == "registered_agent"
+    assert result["applied"]["applied"] is True
+    assert result["applied"]["thread"]["current_phase"] == "review"
+    assert result["subagent_start"]["status"] == "running"
+    assert result["subagent_start"]["target_role"] == "reviewer"
+    assert result["subagent_start"]["resolved_agent"] == "planner"
+    assert result["subagent_start"]["fulfillment_mode"] == "managed_agent_subagent"
+    assert result["subagent_start"]["subagent_profile"] == "strict_reviewer"
+    assert result["subagent_start"]["spawn_packet"]["packet_type"] == "btwin.managed_agent_subagent.dispatch"
+    assert result["subagent_start"]["spawn_packet"]["profile"]["tools"]["policy_level"] == "declared"
+    assert any(
+        "btwin.managed_agent_subagent.dispatch" in str(message.get("_content"))
+        for message in result["planner_inbox"]["messages"]
+    )
+    assert result["contribution"]["executor"]["type"] == "managed_agent_subagent"
+    assert result["contribution"]["executor"]["subagent_profile"] == "strict_reviewer"
+    assert result["contribution"]["executor"]["parent_executor"] == "planner"
+    assert result["reevaluate_after_subagent"]["status"] == "completed"
+    assert result["final_status"]["status"] == "completed"
 
 
 def test_provider_smoke_stop_block_uses_shared_scenario_fixture(provider_smoke_env) -> None:
