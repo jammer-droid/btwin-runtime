@@ -91,7 +91,7 @@ def btwin_get_guidelines() -> str:
     """
     guidelines_path = _active_data_dir() / "guidelines.md"
     if guidelines_path.exists():
-        return guidelines_path.read_text()
+        return guidelines_path.read_text(encoding="utf-8")
     return f"No guidelines file found. Create one at {guidelines_path}"
 
 

@@ -27,12 +27,17 @@ import signal
 import subprocess
 import threading
 import time
-import tty
-import termios
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+try:
+    import termios
+    import tty
+except ModuleNotFoundError:
+    termios = None
+    tty = None
 
 import typer
 import yaml
@@ -3454,7 +3459,12 @@ class _HudRawInput:
     def __enter__(self):
         self._stdin = typer.get_text_stream("stdin")
         self._enabled = False
-        if hasattr(self._stdin, "fileno") and getattr(self._stdin, "isatty", lambda: False)():
+        if (
+            termios is not None
+            and tty is not None
+            and hasattr(self._stdin, "fileno")
+            and getattr(self._stdin, "isatty", lambda: False)()
+        ):
             self._fd = self._stdin.fileno()
             self._old_settings = termios.tcgetattr(self._fd)
             tty.setcbreak(self._fd)
@@ -9423,7 +9433,10 @@ def _install_skills_to(target_dir: Path, skill_dirs: list[Path]) -> int:
         link_path = target_dir / f"{skill_name}.md"
         if link_path.exists() or link_path.is_symlink():
             link_path.unlink()
-        link_path.symlink_to(source_path)
+        try:
+            link_path.symlink_to(source_path)
+        except OSError:
+            shutil.copy2(source_path, link_path)
         count += 1
     return count
 
@@ -9438,9 +9451,18 @@ def _install_skill_dirs_to(target_dir: Path, skill_dirs: list[Path]) -> int:
             link_path.unlink()
         elif link_path.is_dir():
             shutil.rmtree(link_path)
-        link_path.symlink_to(skill_dir, target_is_directory=True)
+        try:
+            link_path.symlink_to(skill_dir, target_is_directory=True)
+        except OSError:
+            shutil.copytree(skill_dir, link_path)
         count += 1
     return count
+
+
+def _install_base_dir(*, local: bool) -> Path:
+    if local:
+        return Path.cwd()
+    return Path(os.environ.get("HOME") or Path.home()).expanduser()
 
 
 def _install_platform_skills(platform_key: str, *, local: bool) -> list[Path]:
@@ -9450,13 +9472,14 @@ def _install_platform_skills(platform_key: str, *, local: bool) -> list[Path]:
         return []
 
     _, rel_paths, skill_dir_paths = _PLATFORMS[platform_key]
+    base_dir = _install_base_dir(local=local)
     installed_targets: list[Path] = []
     for rel_path in rel_paths:
-        target = (Path.cwd() if local else Path.home()) / rel_path
+        target = base_dir / rel_path
         _install_skills_to(target, skill_dirs)
         installed_targets.append(target)
     for rel_path in skill_dir_paths:
-        target = (Path.cwd() if local else Path.home()) / rel_path
+        target = base_dir / rel_path
         _install_skill_dirs_to(target, skill_dirs)
         installed_targets.append(target)
     return installed_targets

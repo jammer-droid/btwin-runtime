@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import os
-import pty
 import signal
 import struct
 import subprocess
-import termios
 from abc import ABC, abstractmethod
+
+try:
+    import fcntl
+    import pty
+    import termios
+except ModuleNotFoundError:
+    fcntl = None
+    pty = None
+    termios = None
 
 
 class ProcessAdapter(ABC):
@@ -43,6 +49,9 @@ class PtyAdapter(ProcessAdapter):
         self._process: subprocess.Popen | None = None
 
     async def spawn(self, command: str, args: list[str], cwd: str | None = None, env: dict[str, str] | None = None) -> None:
+        if fcntl is None or pty is None or termios is None:
+            raise RuntimeError("PTY terminal sessions are not supported on this platform.")
+
         master_fd, slave_fd = pty.openpty()
 
         winsize = struct.pack("HHHH", 24, 80, 0, 0)
