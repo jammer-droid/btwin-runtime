@@ -233,6 +233,12 @@ btwin init
 And in `~/.codex/config.toml` you should see a `mcp_servers.btwin` entry that
 launches `btwin mcp-proxy`.
 
+`btwin init` also syncs a small B-TWIN-managed pointer into
+`~/.codex/AGENTS.md`. The actual B-TWIN guidance lives at
+`~/.codex/btwin/AGENTS.md` and tells new Codex sessions to read a repository
+`HANDOFF.md` first when one exists, so resume context is loaded before planning,
+implementation, or review work.
+
 ### MCP Reconnect Troubleshooting
 
 If `btwin serve-api` is running but an existing Codex session still shows
@@ -392,10 +398,12 @@ args: ["mcp-proxy"]
 ```
 
 For Codex, `btwin init` is the canonical global setup path: it writes the
-equivalent MCP entry, syncs bundled B-TWIN assets, and installs the bundled
-skills. `btwin install-skills --platform codex` remains available as a
-compatibility refresh command. The Codex skill discovery path used by B-TWIN is
-`~/.codex/skills/`.
+equivalent MCP entry, syncs global Codex guidance, syncs bundled B-TWIN assets,
+and installs the bundled skills. `btwin install-skills --platform codex` remains
+available as a compatibility refresh command. The Codex skill discovery path
+used by B-TWIN is `~/.codex/skills/`. The global `~/.codex/AGENTS.md` update is
+only a pointer to the B-TWIN-managed guidance file, so existing user or
+project-specific global instructions stay in place.
 
 The bundled skills are short task-oriented guides installed into the client
 environment. They are not part of `btwin-core`; they ship with `btwin-cli` and

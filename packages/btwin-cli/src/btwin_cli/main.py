@@ -7547,6 +7547,54 @@ def _register_claude_global(force: bool = False) -> bool:
     return True
 
 
+_BTWIN_CODEX_AGENTS_BEGIN = "<!-- BEGIN B-TWIN GLOBAL GUIDANCE -->"
+_BTWIN_CODEX_AGENTS_END = "<!-- END B-TWIN GLOBAL GUIDANCE -->"
+_BTWIN_CODEX_AGENTS_FILENAME = "AGENTS.md"
+_BTWIN_CODEX_AGENTS_GUIDANCE = """\
+## B-TWIN Session Bootstrap
+
+At the start of a Codex session, check whether the current workspace or git repository contains `HANDOFF.md`.
+If it exists, read it before planning, implementing, or reviewing.
+Treat it as resume context, then follow any more specific project `AGENTS.md` instructions.
+If `HANDOFF.md` points to additional local docs or btwin records, read those when they are relevant.
+"""
+
+
+def _sync_codex_global_agents_guidance() -> tuple[Path, Path]:
+    """Sync B-TWIN guidance and upsert a global Codex pointer to it."""
+    codex_dir = Path.home() / ".codex"
+    btwin_agents_path = codex_dir / "btwin" / _BTWIN_CODEX_AGENTS_FILENAME
+    btwin_agents_path.parent.mkdir(parents=True, exist_ok=True)
+    btwin_agents_path.write_text(_BTWIN_CODEX_AGENTS_GUIDANCE, encoding="utf-8")
+
+    agents_path = codex_dir / "AGENTS.md"
+    agents_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
+    pointer = "\n".join(
+        [
+            _BTWIN_CODEX_AGENTS_BEGIN,
+            "## B-TWIN",
+            "",
+            "At session start, also read this B-TWIN guidance file if it exists:",
+            f"`{btwin_agents_path}`",
+            _BTWIN_CODEX_AGENTS_END,
+        ]
+    )
+    block_pattern = re.compile(
+        rf"{re.escape(_BTWIN_CODEX_AGENTS_BEGIN)}.*?{re.escape(_BTWIN_CODEX_AGENTS_END)}",
+        re.DOTALL,
+    )
+    if block_pattern.search(existing):
+        updated = block_pattern.sub(pointer, existing).rstrip() + "\n"
+    else:
+        updated = existing.rstrip()
+        if updated:
+            updated += "\n\n"
+        updated += pointer + "\n"
+    agents_path.write_text(updated, encoding="utf-8")
+    return agents_path, btwin_agents_path
+
+
 def _register_codex_global(force: bool = False) -> bool:
     """Register btwin in Codex global config (~/.codex/config.toml)."""
     codex_dir = Path.home() / ".codex"
@@ -9557,8 +9605,11 @@ def init(
     else:
         console.print(f"[bold]Registering B-TWIN MCP for {provider_label}...[/bold]\n")
         _register_codex_global(force=force)
+        agents_path, btwin_agents_path = _sync_codex_global_agents_guidance()
         assets_updated = _sync_init_global_assets(active_data_dir)
         installed_skill_targets = _install_platform_skills(provider_name, local=False)
+        console.print(f"[green]Synced global Codex guidance pointer[/green] ({agents_path})")
+        console.print(f"[green]Synced B-TWIN Codex guidance[/green] ({btwin_agents_path})")
         if assets_updated:
             console.print(f"[green]Synced bundled B-TWIN assets[/green] ({assets_updated} files)")
         else:

@@ -26,6 +26,15 @@ def test_init_global_creates_providers_config_and_codex_registration(tmp_path, m
     codex_config = tmp_path / ".codex" / "config.toml"
     assert codex_config.exists()
     assert 'args = ["mcp-proxy"]' in codex_config.read_text(encoding="utf-8")
+    codex_agents = tmp_path / ".codex" / "AGENTS.md"
+    assert codex_agents.exists()
+    codex_agents_text = codex_agents.read_text(encoding="utf-8")
+    assert "B-TWIN guidance file" in codex_agents_text
+    assert str(tmp_path / ".codex" / "btwin" / "AGENTS.md") in codex_agents_text
+    btwin_codex_agents = tmp_path / ".codex" / "btwin" / "AGENTS.md"
+    assert btwin_codex_agents.exists()
+    assert "B-TWIN Session Bootstrap" in btwin_codex_agents.read_text(encoding="utf-8")
+    assert "HANDOFF.md" in btwin_codex_agents.read_text(encoding="utf-8")
     assert (tmp_path / ".codex" / "skills" / "bt-handoff").exists()
     assert (tmp_path / ".btwin" / "guidelines.md").exists()
     assert (tmp_path / ".btwin" / "protocols" / "debate.yaml").exists()
@@ -45,6 +54,55 @@ def test_init_global_preserves_provider_config_while_syncing_global_assets(tmp_p
     assert payload["providers"][0]["cli"] == "codex"
     assert payload["providers"][0]["id"] == "openai"
     assert payload["providers"][0]["default_model"] == "gpt-5.4"
+
+
+def test_init_global_preserves_existing_codex_agents_guidance(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("btwin_cli.provider_init.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(main, "_get_active_data_dir", lambda: tmp_path / ".btwin")
+    agents_path = tmp_path / ".codex" / "AGENTS.md"
+    agents_path.parent.mkdir(parents=True)
+    agents_path.write_text("Existing global guidance.\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    written = agents_path.read_text(encoding="utf-8")
+    assert "Existing global guidance." in written
+    assert "B-TWIN guidance file" in written
+    assert str(tmp_path / ".codex" / "btwin" / "AGENTS.md") in written
+    assert "HANDOFF.md" in (tmp_path / ".codex" / "btwin" / "AGENTS.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_init_global_replaces_existing_btwin_codex_agents_block(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("btwin_cli.provider_init.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(main, "_get_active_data_dir", lambda: tmp_path / ".btwin")
+    agents_path = tmp_path / ".codex" / "AGENTS.md"
+    agents_path.parent.mkdir(parents=True)
+    agents_path.write_text(
+        "Existing global guidance.\n\n"
+        "<!-- BEGIN B-TWIN GLOBAL GUIDANCE -->\n"
+        "old guidance\n"
+        "<!-- END B-TWIN GLOBAL GUIDANCE -->\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    written = agents_path.read_text(encoding="utf-8")
+    assert "Existing global guidance." in written
+    assert "old guidance" not in written
+    assert written.count("BEGIN B-TWIN GLOBAL GUIDANCE") == 1
+    assert "B-TWIN guidance file" in written
+    assert "B-TWIN Session Bootstrap" in (
+        tmp_path / ".codex" / "btwin" / "AGENTS.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_init_local_creates_provider_config_and_project_codex_registration(tmp_path, monkeypatch):
